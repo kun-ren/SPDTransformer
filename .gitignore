@@ -1,7 +1,11 @@
 
 # ignore file tpye list
 *.log
+__pycache__/
 
 
 # ignore folder list
+data/
+experiments/
+
 

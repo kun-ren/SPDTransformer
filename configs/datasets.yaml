@@ -1,0 +1,10 @@
+defaults:
+  download_dir: data
+datasets:
+  - name: PhysionetMI
+    #subjects: 1-87,89-109
+    subjects: 1-3,
+    params:
+      imagined: true
+      executed: false
+    sample_rate: 160

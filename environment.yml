@@ -1,5 +1,5 @@
 name: spd_transformer
-channels:  # package souce
+channels:
   - pytorch
   - nvidia
   - conda-forge
@@ -20,14 +20,17 @@ dependencies:
   - tqdm
   - joblib
 
-  # ---------- EEG preprocessing / filtering ----------
-  - mne
+  # ---------- EEG preprocessing & BCI (Conda) ----------
+  - mne>=1.6.0
+  - pooch>=1.8.0
   - pyedflib
+  - pyriemann
 
   # ---------- Deep learning ----------
-  # For NVIDIA GPU. If you only use CPU, remove pytorch-cuda and install CPU PyTorch instead.
   - pytorch
   - pytorch-cuda=12.1
+  - torchvision
+  - torchaudio
 
   # ---------- Experiment utilities ----------
   - pyyaml
@@ -36,25 +39,6 @@ dependencies:
   - tensorboard
   - einops
 
-  # ---------- Jupyter / development ----------
-  - jupyterlab
-  - ipykernel
-  - notebook
-
-  # ---------- Packages better installed by pip ----------
+  # ---------- Packages from PyPI ----------
   - pip:
-      # Riemannian geometry / SPD covariance processing
-      - pyriemann
-      - geomstats
-
-      # EEG benchmark datasets, e.g. BNCI, PhysioNet MI
       - moabb
-
-      # Optional training utilities
-      - torchmetrics
-      - wandb
-      - lightning
-
-      # Configuration / logging
-      - omegaconf
-      - hydra-core
