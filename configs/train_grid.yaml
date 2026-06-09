@@ -1,0 +1,42 @@
+data:
+  root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
+  filter_bank:
+    - [8, 12]
+    - [12, 16]
+    - [16, 20]
+    - [20, 24]
+    - [24, 28]
+    - [28, 32]
+  estimator: ["lwf"]
+  sfreq: [160]
+  eps: [1.0e-6]
+  segment_duration: [1.0]
+  stride_duration: [0.5]
+
+model:
+  spd_out_dim: [64]
+  ffn_hidden_spd_dim: [32]
+  metric: ["log-euclidean"]
+  depth: [1, 2]
+  classifier_type: ["pooling"]
+  pooling: ["attention", "mean"]
+  dropout: [0.1]
+  attention_dropout: [0.0]
+  debug_attention_dropout: [false]
+  debug_attention_shape: [false]
+  learnable_metric_mode: ["low-rank"]
+  learnable_metric_rank: [null]
+  metric_eps: [1.0e-6]
+
+training:
+  seed: [42]
+  epochs: [30]
+  batch_size: [16]
+  learning_rate: [1.0e-3]
+  weight_decay: [1.0e-4]
+  test_size: [0.15]
+  val_size: [0.15]
+  num_workers: [0]
+
+output:
+  dir: experiments/results/spd_transformer_grid
