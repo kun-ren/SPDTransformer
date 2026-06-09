@@ -15,19 +15,19 @@ import numpy as np
 import torch
 import yaml
 from sklearn.metrics import accuracy_score, f1_score
-from sklearn.model_selection import train_test_split
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from src.datasets.PhysioNetMI_preprocess import preprocess_spd
 from src.models.SPDTransformer import SPDTransformerClassifier
+from src.training.shared_split import load_or_create_split_indices
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_grid.yaml"
 
 
-class SPDDataset(Dataset):
+class MotorImageryDataset(Dataset):
     def __init__(self, x: np.ndarray, y: np.ndarray) -> None:
         self.x = torch.from_numpy(x).float()
         self.y = torch.from_numpy(y).long()
@@ -159,27 +159,13 @@ def save_yaml(path: Path, payload: dict[str, Any]) -> None:
         yaml.safe_dump(payload, handle, sort_keys=False)
 
 
-def split_indices(
-    y: np.ndarray,
-    test_size: float,
-    val_size: float,
-    seed: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    indices = np.arange(len(y))
-    train_val_idx, test_idx = train_test_split(
-        indices,
-        test_size=test_size,
-        stratify=y,
-        random_state=seed,
-    )
-    relative_val_size = val_size / (1.0 - test_size)
-    train_idx, val_idx = train_test_split(
-        train_val_idx,
-        test_size=relative_val_size,
-        stratify=y[train_val_idx],
-        random_state=seed,
-    )
-    return train_idx, val_idx, test_idx
+def resolve_split_file(split_file: Any) -> Path | None:
+    if split_file in {None, ""}:
+        return None
+    path = Path(str(split_file))
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
 
 
 def make_loaders(
@@ -192,21 +178,21 @@ def make_loaders(
     num_workers: int,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     train_loader = DataLoader(
-        SPDDataset(x[train_idx], y[train_idx]),
+        MotorImageryDataset(x[train_idx], y[train_idx]),
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         drop_last=False,
     )
     val_loader = DataLoader(
-        SPDDataset(x[val_idx], y[val_idx]),
+        MotorImageryDataset(x[val_idx], y[val_idx]),
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
         drop_last=False,
     )
     test_loader = DataLoader(
-        SPDDataset(x[test_idx], y[test_idx]),
+        MotorImageryDataset(x[test_idx], y[test_idx]),
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
@@ -329,11 +315,13 @@ def train_experiment(
     run_dir = make_run_dir(base_output_dir, run_index, experiment_cfg)
     save_yaml(run_dir / "config.yaml", experiment_cfg)
 
-    train_idx, val_idx, test_idx = split_indices(
+    split_file = resolve_split_file(training_cfg.get("split_file"))
+    train_idx, val_idx, test_idx = load_or_create_split_indices(
         y=y,
         test_size=float(training_cfg.get("test_size", 0.15)),
         val_size=float(training_cfg.get("val_size", 0.15)),
         seed=seed,
+        split_file=split_file,
     )
     train_loader, val_loader, test_loader = make_loaders(
         x=x,
@@ -466,6 +454,8 @@ def main() -> int:
 
     # Preprocess once from the first expanded data config. If you grid data
     # preprocessing parameters, each distinct data config will be handled below.
+
+    # cache loaded dataset
     data_cache: dict[str, tuple[np.ndarray, np.ndarray, list[str]]] = {}
     all_metrics = []
 

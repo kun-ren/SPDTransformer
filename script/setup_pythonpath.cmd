@@ -1,0 +1,3 @@
+@echo off
+set "PYTHONPATH=./"
+echo PYTHONPATH=%PYTHONPATH%

@@ -1,0 +1,2 @@
+$env:PYTHONPATH = "./"
+Write-Host "PYTHONPATH=$env:PYTHONPATH"

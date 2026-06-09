@@ -36,6 +36,7 @@ training:
   weight_decay: [1.0e-4]
   test_size: [0.15]
   val_size: [0.15]
+  split_file: ["experiments/splits/physionet_mi_seed42.json"]
   num_workers: [0]
 
 output:

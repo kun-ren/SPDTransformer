@@ -1,5 +1,29 @@
 ### SDP Transformer
 
+
+
+##### Change to working directory
+
+```
+cd ./SPDTransformer
+```
+
+##### Set Env Path
+
+Choose a script file corresponding to your operating system to set enironment path in the begin
+
+```powershell
+.\script\setup_pythonpath.ps1
+```
+
+```bash
+source script/setup_pythonpath.sh
+```
+
+```cmd
+script\setup_pythonpath.cmd
+```
+
 #### Prepare dataset
 
 To download and unzip dataset:  
@@ -12,6 +36,22 @@ Dry Run:
 PhysionMI dataset Shape
 
 `trial x channels x time samples per trial`
+
+
+
+##### Training
+
+```
+python src\training\train.py --config configs/train_grid.yaml --device cuda:0
+```
+
+##### Result
+
+Each set of configuration will be saved in
+
+```
+experiments/results/spd_transformer_grid/<timestamp>/run_xxx_<hash>/
+```
 
 Preprocessing pipeline
 
