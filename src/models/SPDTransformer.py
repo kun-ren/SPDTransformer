@@ -254,7 +254,7 @@ class SPDEncoder(nn.Module):
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
             debug_attention_shape: bool = False,
-            learnable_metric_mode: str = "low-rank",
+            learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
     ):
@@ -382,7 +382,7 @@ class SPDTransformer(nn.Module):
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
             debug_attention_shape: bool = False,
-            learnable_metric_mode: str = "low-rank",
+            learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
     ):
@@ -394,8 +394,7 @@ class SPDTransformer(nn.Module):
         self.spd_out_dim = spd_out_dim
         self.depth = depth
 
-        layers = [
-            SPDEncoder(
+        self.layers = nn.ModuleList([SPDEncoder(
                 spd_in_dim=spd_in_dim,
                 spd_out_dim=spd_out_dim,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
@@ -406,24 +405,7 @@ class SPDTransformer(nn.Module):
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
                 metric_eps=metric_eps,
-            )
-        ]
-        layers.extend(
-            SPDEncoder(
-                spd_in_dim=spd_out_dim,
-                spd_out_dim=spd_out_dim,
-                ffn_hidden_spd_dim=ffn_hidden_spd_dim,
-                metric=metric,
-                attention_dropout=attention_dropout,
-                debug_attention_dropout=debug_attention_dropout,
-                debug_attention_shape=debug_attention_shape,
-                learnable_metric_mode=learnable_metric_mode,
-                learnable_metric_rank=learnable_metric_rank,
-                metric_eps=metric_eps,
-            )
-            for _ in range(depth - 1)
-        )
-        self.layers = nn.ModuleList(layers)
+            ) for _ in range(depth)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for layer in self.layers:
@@ -431,15 +413,40 @@ class SPDTransformer(nn.Module):
         return x
 
 
-class SPDTransformerClassifier(nn.Module):
-    """
-    Trial-level SPDTransformer classifier.
+ClassifierType = Literal["pooling", "task"]
+SPDPoolingMode = Literal["mean", "attention"]
 
-    pooling:
-        "mean": Log-Euclidean mean pooling over all tokens.
-        "attention": learnable attention pooling over all tokens.
-        "task": prepend a learnable SPD [TASK] token on the time axis and
-                classify from its output representation.
+
+class SPDClassifierBase(nn.Module):
+    @staticmethod
+    def upper_triangular_vectorize(x: torch.Tensor) -> torch.Tensor:
+        spd_dim = x.shape[-1]
+        row, col = torch.triu_indices(spd_dim, spd_dim, device=x.device)
+        return x[..., row, col]
+
+    @staticmethod
+    def build_linear_classifier(
+            feature_dim: int,
+            num_classes: int,
+            dropout: float,
+    ) -> nn.Module:
+        return nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(feature_dim, num_classes),
+        )
+
+
+class SPDPoolingClassifier(SPDClassifierBase):
+    """
+    Classifier that pools all SPD tokens after the SPDTransformer encoder.
+
+    Input:
+        4D: (batch, time, channels, channels)
+        5D: (batch, time, frequency_bands, channels, channels)
+
+    Classification:
+        encoder -> log map -> mean/attention pooling over all tokens
+        -> upper triangular vector -> linear classifier
     """
 
     def __init__(
@@ -450,29 +457,27 @@ class SPDTransformerClassifier(nn.Module):
             ffn_hidden_spd_dim=None,
             metric: str = "log-euclidean",
             depth: int = 1,
-            pooling: Literal["mean", "attention", "task"] = "attention",
+            pooling: SPDPoolingMode = "attention",
             dropout: float = 0.0,
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
             debug_attention_shape: bool = False,
-            learnable_metric_mode: str = "low-rank",
+            learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
     ):
         super().__init__()
-        if pooling not in {"mean", "attention", "task"}:
+        if pooling not in {"mean", "attention"}:
             raise ValueError(
-                "pooling must be one of {'mean', 'attention', 'task'}, "
-                f"got {pooling!r}."
+                f"SPDPoolingClassifier pooling must be 'mean' or 'attention', got {pooling!r}."
             )
 
-        self.spd_in_dim = spd_in_dim
         self.spd_out_dim = spd_out_dim
         self.num_classes = num_classes
-        self.depth = depth
         self.pooling = pooling
+        self.feature_dim = spd_out_dim * (spd_out_dim + 1) // 2
 
-        self.backbone = SPDTransformer(
+        self.encoder = SPDTransformer(
             spd_in_dim=spd_in_dim,
             spd_out_dim=spd_out_dim,
             depth=depth,
@@ -486,7 +491,6 @@ class SPDTransformerClassifier(nn.Module):
             metric_eps=metric_eps,
         )
 
-        self.feature_dim = spd_out_dim * (spd_out_dim + 1) // 2
         if pooling == "attention":
             self.pool_score = nn.Sequential(
                 nn.LayerNorm(self.feature_dim),
@@ -495,23 +499,114 @@ class SPDTransformerClassifier(nn.Module):
         else:
             self.pool_score = None
 
-        if pooling == "task":
-            self.task_log_token = nn.Parameter(torch.zeros(spd_in_dim, spd_in_dim))
-        else:
-            self.register_parameter("task_log_token", None)
-
-        self.classifier = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(self.feature_dim, num_classes),
+        self.classifier = self.build_linear_classifier(
+            feature_dim=self.feature_dim,
+            num_classes=num_classes,
+            dropout=dropout,
         )
 
-    @staticmethod
-    def _upper_triangular_vectorize(x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.encoder(x)
+
+        if self.pooling == "mean":
+            pooled_log = self._mean_pool(x)
+        else:
+            pooled_log = self._attention_pool(x)
+
+        features = self.upper_triangular_vectorize(pooled_log)
+        return self.classifier(features)
+
+    def _mean_pool(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the mean value across all tokens that belong to one trial
+        :return torch.Tensor: (batch, channels, channels)
+        """
+        log_x = spd_log(x)
+        token_dims = tuple(range(1, log_x.ndim - 2))
+        return log_x.mean(dim=token_dims)
+
+    def _attention_pool(self, x: torch.Tensor) -> torch.Tensor:
+        """
+
+        :param x:
+        :return: pooled spd matrix, (batch, channels, channels)
+        """
+        batch_size = x.shape[0]
         spd_dim = x.shape[-1]
-        row, col = torch.triu_indices(spd_dim, spd_dim, device=x.device)
-        return x[..., row, col]
+        log_x = spd_log(x)
+        # log_tokens = (batch, tim x frequency_bands, channels, channels)
+        log_tokens = log_x.reshape(batch_size, -1, spd_dim, spd_dim)
+        token_features = self.upper_triangular_vectorize(log_tokens)
+
+        scores = self.pool_score(token_features).squeeze(-1)
+        weights = torch.softmax(scores, dim=-1)
+        return torch.einsum("bt,btmn->bmn", weights, log_tokens)
+
+
+class SPDTaskTagClassifier(SPDClassifierBase):
+    """
+    Classifier that inserts an SPD [TASK] token before the encoder.
+
+    For 5D input, one task token is inserted on the time axis for every
+    frequency band. After encoding, only task-token outputs are used for
+    classification; non-task tokens are not pooled into the classifier.
+    """
+
+    def __init__(
+            self,
+            spd_in_dim: int,
+            spd_out_dim: int,
+            num_classes: int,
+            ffn_hidden_spd_dim=None,
+            metric: str = "log-euclidean",
+            depth: int = 1,
+            dropout: float = 0.0,
+            attention_dropout: float = 0.0,
+            debug_attention_dropout: bool = False,
+            debug_attention_shape: bool = False,
+            learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
+            learnable_metric_rank: int | None = None,
+            metric_eps: float = 1e-6,
+    ):
+        super().__init__()
+        self.spd_in_dim = spd_in_dim
+        self.spd_out_dim = spd_out_dim
+        self.num_classes = num_classes
+        self.feature_dim = spd_out_dim * (spd_out_dim + 1) // 2
+
+        self.task_log_token = nn.Parameter(torch.zeros(spd_in_dim, spd_in_dim))
+        self.encoder = SPDTransformer(
+            spd_in_dim=spd_in_dim,
+            spd_out_dim=spd_out_dim,
+            depth=depth,
+            ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+            metric=metric,
+            attention_dropout=attention_dropout,
+            debug_attention_dropout=debug_attention_dropout,
+            debug_attention_shape=debug_attention_shape,
+            learnable_metric_mode=learnable_metric_mode,
+            learnable_metric_rank=learnable_metric_rank,
+            metric_eps=metric_eps,
+        )
+        self.classifier = self.build_linear_classifier(
+            feature_dim=self.feature_dim,
+            num_classes=num_classes,
+            dropout=dropout,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self._prepend_task_token(x)
+        x = self.encoder(x)
+        task_log = self._extract_task_log_feature(x)
+        features = self.upper_triangular_vectorize(task_log)
+        return self.classifier(features)
 
     def _prepend_task_token(self, x: torch.Tensor) -> torch.Tensor:
+        """
+
+        :param x:
+        :return: (batch, time + 1, channels, channels) or (batch, time + 1, frequency_bands, channels, channels)
+        """
         if x.ndim not in {4, 5}:
             raise ValueError(
                 "Expected input shape (batch, time, channels, channels) or "
@@ -531,41 +626,89 @@ class SPDTransformerClassifier(nn.Module):
 
         return torch.cat([task_token, x], dim=1)
 
-    def _mean_pool(self, x: torch.Tensor) -> torch.Tensor:
-        log_x = spd_log(x)
-        token_dims = tuple(range(1, log_x.ndim - 2))
-        return log_x.mean(dim=token_dims)
-
-    def _attention_pool(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size = x.shape[0]
-        spd_dim = x.shape[-1]
-        log_x = spd_log(x)
-        log_tokens = log_x.reshape(batch_size, -1, spd_dim, spd_dim)
-        token_features = self._upper_triangular_vectorize(log_tokens)
-
-        scores = self.pool_score(token_features).squeeze(-1)
-        weights = torch.softmax(scores, dim=-1)
-        return torch.einsum("bt,btmn->bmn", weights, log_tokens)
-
-    def _task_pool(self, x: torch.Tensor) -> torch.Tensor:
+    def _extract_task_log_feature(self, x: torch.Tensor) -> torch.Tensor:
+        # (batch, time, channels, channels)
         if x.ndim == 4:
             return spd_log(x[:, 0])
-
+        # (batch, time, frequency_bands, channels, channels)
         task_tokens = x[:, 0]
         return spd_log(task_tokens).mean(dim=1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.pooling == "task":
-            x = self._prepend_task_token(x)
 
-        x = self.backbone(x)
+class SPDTransformerClassifier(nn.Module):
+    """
+    Selects the trial-level classifier style.
 
-        if self.pooling == "mean":
-            pooled_log = self._mean_pool(x)
-        elif self.pooling == "attention":
-            pooled_log = self._attention_pool(x)
+    classifier_type="pooling":
+        no task tag; use mean or attention pooling over encoder tokens.
+
+    classifier_type="task":
+        insert SPD [TASK] token; classify from task-token output.
+    """
+
+    def __init__(
+            self,
+            spd_in_dim: int,
+            spd_out_dim: int,
+            num_classes: int,
+            ffn_hidden_spd_dim=None,
+            metric: str = "log-euclidean",
+            depth: int = 1,
+            classifier_type: ClassifierType = "pooling",
+            pooling: SPDPoolingMode = "attention",
+            dropout: float = 0.0,
+            attention_dropout: float = 0.0,
+            debug_attention_dropout: bool = False,
+            debug_attention_shape: bool = False,
+            learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
+            learnable_metric_rank: int | None = None,
+            metric_eps: float = 1e-6,
+    ):
+        super().__init__()
+        if pooling == "task":
+            classifier_type = "task"
+            pooling = "attention"
+
+        if classifier_type not in {"pooling", "task"}:
+            raise ValueError(
+                "classifier_type must be 'pooling' or 'task', "
+                f"got {classifier_type!r}."
+            )
+
+        self.classifier_type = classifier_type
+        if classifier_type == "pooling":
+            self.model = SPDPoolingClassifier(
+                spd_in_dim=spd_in_dim,
+                spd_out_dim=spd_out_dim,
+                num_classes=num_classes,
+                ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                metric=metric,
+                depth=depth,
+                pooling=pooling,
+                dropout=dropout,
+                attention_dropout=attention_dropout,
+                debug_attention_dropout=debug_attention_dropout,
+                debug_attention_shape=debug_attention_shape,
+                learnable_metric_mode=learnable_metric_mode,
+                learnable_metric_rank=learnable_metric_rank,
+                metric_eps=metric_eps,
+            )
         else:
-            pooled_log = self._task_pool(x)
+            self.model = SPDTaskTagClassifier(
+                spd_in_dim=spd_in_dim,
+                spd_out_dim=spd_out_dim,
+                num_classes=num_classes,
+                ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                metric=metric,
+                depth=depth,
+                dropout=dropout,
+                attention_dropout=attention_dropout,
+                debug_attention_dropout=debug_attention_dropout,
+                debug_attention_shape=debug_attention_shape,
+                learnable_metric_mode=learnable_metric_mode,
+                learnable_metric_rank=learnable_metric_rank,
+                metric_eps=metric_eps,
+            )
 
-        features = self._upper_triangular_vectorize(pooled_log)
-        return self.classifier(features)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)

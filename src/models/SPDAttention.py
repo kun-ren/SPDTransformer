@@ -1,4 +1,5 @@
 from enum import Enum
+import math
 from typing import Literal
 
 import torch
@@ -32,6 +33,28 @@ def spd_exp(x: torch.Tensor) -> torch.Tensor:
     return 0.5 * (y + y.transpose(-1, -2))
 
 
+class PositionBias(nn.Module):
+    """
+    Learnable scalar position bias for attention score
+
+    """
+
+    def __init__(self, max_position: int) -> None:
+        super().__init__()
+        self.max_position = max_position
+        self.bias = nn.Parameter(torch.zeros(self.max_position, self.max_position))
+
+    def forward(self, attention_scope: int) -> torch.Tensor:
+        """
+
+        :param attention_scope: the position values will be clipped in range [0, attention_scope]
+        :return: relative position values matrix
+
+        """
+        self.bias = self.bias.clip(0, attention_scope)
+
+        return self.bias[:attention_scope, :attention_scope]
+
 class SingleHeadAttention(nn.Module):
 
     def __init__(
@@ -46,6 +69,7 @@ class SingleHeadAttention(nn.Module):
         learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
         learnable_metric_rank: int | None = None,
         metric_eps: float = 1e-6,
+        use_position: bool = False
     ):
         super().__init__()
         self.spd_in_dim = spd_in_dim
@@ -56,6 +80,7 @@ class SingleHeadAttention(nn.Module):
         self.attention_dropout = nn.Dropout(attention_dropout)
         self.debug_attention_dropout = debug_attention_dropout
         self.affine_log_eps = metric_eps
+        self.use_position = use_position
 
         self.query = BiMap(in_dim=spd_in_dim, out_dim=spd_out_dim, )
         self.key = BiMap(in_dim=spd_in_dim, out_dim=spd_out_dim, )
@@ -99,6 +124,7 @@ class SingleHeadAttention(nn.Module):
             self.left_metric_cholesky = None
             self.right_metric_cholesky = None
 
+        self.position_bias = PositionBias(max_position=128) if self.use_position else None
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         q = self.query(x)
         k = self.key(x)
@@ -106,7 +132,10 @@ class SingleHeadAttention(nn.Module):
 
         log_v = spd_log(v)
         dis = self.learnableRiemannianDistance(q, k)
-        attention = torch.softmax(-dis, dim=-1)
+        score = -dis
+        if self.position_bias is not None:
+            score += self.position_bias(dis.shape[-1])
+        attention = torch.softmax(score, dim=-1)
         attention_before_dropout = attention
         attention = self.attention_dropout(attention)
         self._print_attention_dropout_debug(attention_before_dropout, attention)

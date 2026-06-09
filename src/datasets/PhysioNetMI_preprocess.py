@@ -278,6 +278,7 @@ def build_dataset(
 
 def preprocess_spd(
     filter_bank,
+    root_dir="data/MNE-eegbci-data/files/eegmmidb/1.0.0",
     estimator="cov",
     eps=1e-10,
     sfreq=160,
@@ -285,7 +286,7 @@ def preprocess_spd(
     stride_duration=None,
 ):
 
-    dataset = build_dataset("data/MNE-eegbci-data/files/eegmmidb/1.0.0", tmin=-2.0, tmax=4.0)
+    dataset = build_dataset(root_dir, tmin=-2.0, tmax=4.0)
     X = dataset['X']   #[n_epochs, n_channels, n_samples_per_epoch]
     print(f"raw X shape: {X.shape}")
     labels = dataset['y']
