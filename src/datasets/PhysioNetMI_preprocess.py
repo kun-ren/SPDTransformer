@@ -3,9 +3,7 @@ import re
 import mne
 
 import numpy as np
-from pyriemann.estimation import Covariances
 from scipy.signal import butter, sosfiltfilt
-from sklearn.preprocessing import LabelEncoder
 
 
 def bandpass_filter(X, sfreq=160.0, low_freq=8.0, high_freq=30.0, order=4):
@@ -64,6 +62,8 @@ def regularize_spd(covs, eps=1e-10):
 
 
 def encode_labels(labels):
+    from sklearn.preprocessing import LabelEncoder
+
     encoder = LabelEncoder()
     y = encoder.fit_transform(labels)
     return y.astype(np.int64), encoder.classes_
@@ -247,14 +247,38 @@ def build_dataset(
     root_dir,
     tmin=-2.0,
     tmax=4.0,
+    subjects=None,
 ):
     X_all = []
     y_all = []
-    subjects = []
+    subject_labels = []
 
-    for subject_dir in sorted(
-        Path(root_dir).glob("S*")
-    ):
+    subject_dirs = sorted(Path(root_dir).glob("S*"))
+    if subjects is not None:
+        requested_subjects = {
+            (
+                f"S{int(str(subject)[1:]):03d}"
+                if str(subject).upper().startswith("S")
+                else f"S{int(subject):03d}"
+            )
+            for subject in subjects
+        }
+        subject_dirs = [
+            subject_dir
+            for subject_dir in subject_dirs
+            if subject_dir.name.upper() in requested_subjects
+        ]
+        missing_subjects = requested_subjects - {
+            subject_dir.name.upper() for subject_dir in subject_dirs
+        }
+        if missing_subjects:
+            missing = ", ".join(sorted(missing_subjects))
+            raise ValueError(f"Subject directories not found under {root_dir}: {missing}")
+
+    if not subject_dirs:
+        raise ValueError(f"No subject directories found under {root_dir}.")
+
+    for subject_dir in subject_dirs:
 
         X, y = load_subject(
             subject_dir,
@@ -265,14 +289,14 @@ def build_dataset(
         X_all.append(X)
         y_all.append(y)
 
-        subjects.extend(
+        subject_labels.extend(
             [subject_dir.name] * len(y)
         )
 
     return {
         "X": np.concatenate(X_all),
         "y": np.concatenate(y_all),
-        "subject": np.array(subjects),
+        "subject": np.array(subject_labels),
     }
 
 
@@ -285,6 +309,7 @@ def preprocess_spd(
     segment_duration=0.75,
     stride_duration=None,
 ):
+    from pyriemann.estimation import Covariances
 
     dataset = build_dataset(root_dir, tmin=-2.0, tmax=4.0)
     X = dataset['X']   #[n_epochs, n_channels, n_samples_per_epoch]

@@ -37,6 +37,19 @@ PhysionMI dataset Shape
 
 `trial x channels x time samples per trial`
 
+##### Visualize task signals
+
+Plot the complete rest-to-task epoch and every configured frequency band,
+grouped by task type. The default motor-cortex channels are C3, Cz, and C4.
+
+```powershell
+python script/visualize_task_signals.py --subjects 1-10
+```
+
+By default, filter-bank rows show the amplitude envelope so that oscillations
+do not cancel when trials are averaged. Use `--band-view waveform` to plot
+signed band-pass waveforms, or `--show-trials 5` to overlay individual trials.
+
 
 
 ##### Training
