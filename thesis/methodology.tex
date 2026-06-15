@@ -1,0 +1,419 @@
+% Required packages in the main thesis preamble:
+%\usepackage{amsmath,amssymb,bm}
+
+\chapter{Methodology}
+\label{chap:methodology}
+
+\section{Overview}
+\label{sec:methodology-overview}
+
+This work proposes an SPD Transformer for electroencephalography (EEG)
+motor-imagery classification. The central design principle is to preserve the
+geometry of symmetric positive-definite (SPD) covariance matrices throughout
+the feature-extraction backbone. Conventional Transformer models operate on
+vectors in Euclidean space and therefore do not directly respect the
+non-Euclidean structure of covariance matrices. In contrast, the proposed
+model performs projection, attention, residual aggregation, normalisation, and
+feed-forward transformation using operations that preserve positive
+definiteness.
+
+The complete processing pipeline consists of four stages:
+\begin{enumerate}
+    \item extraction of event-centred EEG trials;
+    \item construction of multi-band, multi-segment covariance matrices;
+    \item temporal and frequency-domain modelling with stacked SPD Transformer
+          encoders; and
+    \item Log-Euclidean pooling followed by a linear classification head.
+\end{enumerate}
+
+For a trial containing $T$ temporal segments, $F$ frequency bands, and $C$ EEG
+channels, each token satisfies
+\begin{equation}
+    \bm{X}_{t,f}\in\mathbb{S}_{++}^{C},
+\end{equation}
+and the complete trial is represented by the grid
+\begin{equation}
+    \bm{\mathcal{X}}
+    =
+    \left\{\bm{X}_{t,f}\right\}_{t=1,f=1}^{T,F}
+    \in
+    \left(\mathbb{S}_{++}^{C}\right)^{T\times F},
+\end{equation}
+where $\mathbb{S}_{++}^{C}$ denotes the manifold of $C \times C$ SPD matrices.
+The encoder first models relationships between temporal segments independently
+within each frequency band. It subsequently models relationships between
+frequency bands independently at each temporal position. This axial
+factorisation avoids flattening the temporal and spectral dimensions and
+retains their distinct interpretation.
+
+The experimental architecture uses one or two encoder layers, an SPD output
+dimension of $64$, and an SPD feed-forward hidden dimension of $32$. Both mean
+pooling and learned attention pooling are evaluated at the classification
+stage.
+
+\section{Input Representation}
+\label{sec:input-representation}
+
+\subsection{Trial Extraction and Class Definition}
+
+EEG recordings are organised into trials around the onset of the annotated
+motor-imagery event. Each trial spans the interval from $-2$ to $4$ seconds
+relative to the event onset. Runs corresponding to left-versus-right hand
+imagery and hands-versus-feet imagery are retained, producing the four classes
+\emph{left hand}, \emph{right hand}, \emph{hands}, and \emph{feet}. The
+resulting raw trial is represented as
+\begin{equation}
+    \bm{E} \in \mathbb{R}^{C \times L},
+\end{equation}
+where $C$ is the number of EEG channels and $L$ is the number of temporal
+samples.
+
+\subsection{Filter-Bank Decomposition}
+
+Motor-imagery information is primarily expressed through changes in the
+sensorimotor rhythms. To represent frequency-specific spatial covariance, each
+trial is processed by a fourth-order Butterworth filter bank. The evaluated
+frequency intervals are
+\begin{equation}
+    [8,12],\ [12,16],\ [16,20],\ [20,24],\ [24,28],\
+    \text{and }[28,32]\ \mathrm{Hz}.
+\end{equation}
+For frequency band $f$, filtering produces the signal
+$\bm{E}^{(f)} \in \mathbb{R}^{C \times L}$.
+
+\subsection{Temporal Segmentation}
+
+Each band-pass-filtered trial is divided into overlapping temporal windows.
+The experiments use a window duration of $1$ second and a stride of $0.5$
+seconds at a sampling frequency of $160$ Hz. If $\bm{E}^{(t,f)}$ denotes the
+signal from temporal segment $t$ and frequency band $f$, then
+\begin{equation}
+    \bm{E}^{(t,f)} \in \mathbb{R}^{C \times L_s},
+\end{equation}
+where $L_s$ is the number of samples in one segment. Overlapping segmentation
+provides local temporal resolution while retaining continuity between adjacent
+windows.
+
+\subsection{SPD Covariance Construction}
+
+For every temporal-frequency pair, a covariance matrix is estimated using the
+Ledoit--Wolf shrinkage estimator:
+\begin{equation}
+    \widetilde{\bm{X}}_{t,f}
+    = \operatorname{Cov}_{\mathrm{LWF}}
+      \left(\bm{E}^{(t,f)}\right).
+\end{equation}
+Shrinkage estimation improves numerical stability when the number of temporal
+samples is limited relative to the number of channels.
+
+The covariance matrix is trace-normalised to remove global scale variation:
+\begin{equation}
+    \overline{\bm{X}}_{t,f}
+    =
+    \frac{\widetilde{\bm{X}}_{t,f}}
+         {\max\left(\operatorname{tr}
+         (\widetilde{\bm{X}}_{t,f}),\varepsilon\right)}.
+\end{equation}
+Finally, a small diagonal regulariser is added:
+\begin{equation}
+    \bm{X}_{t,f}
+    =
+    \overline{\bm{X}}_{t,f}+\varepsilon\bm{I},
+    \qquad \varepsilon=10^{-6},
+\end{equation}
+which ensures strict positive definiteness. Stacking all matrices gives the
+network input
+\begin{equation}
+    \bm{\mathcal{X}}
+    =
+    \left\{\bm{X}_{t,f}\right\}_{t=1,f=1}^{T,F}
+    \in \mathbb{R}^{T \times F \times C \times C}.
+\end{equation}
+
+\section{Component Design}
+\label{sec:component-design}
+
+\subsection{SPD Matrix Functions}
+
+Several model components use the matrix logarithm and exponential. For an SPD
+matrix $\bm{X}=\bm{U}\operatorname{diag}(\bm{\lambda})\bm{U}^{\top}$,
+the logarithmic map is
+\begin{equation}
+    \log(\bm{X})
+    =
+    \bm{U}\operatorname{diag}
+    \left(\log\bm{\lambda}\right)\bm{U}^{\top}.
+\end{equation}
+For a symmetric matrix
+$\bm{S}=\bm{U}\operatorname{diag}(\bm{\sigma})\bm{U}^{\top}$, the inverse map
+is
+\begin{equation}
+    \exp(\bm{S})
+    =
+    \bm{U}\operatorname{diag}
+    \left(\exp\bm{\sigma}\right)\bm{U}^{\top}.
+\end{equation}
+The logarithm maps SPD matrices into the vector space of symmetric matrices,
+where weighted addition is well defined, while the exponential maps the result
+back to the SPD manifold.
+
+\subsection{Bilinear SPD Projection}
+
+Learnable dimensional transformations are performed with a bilinear mapping
+(BiMap). Given $\bm{X}\in\mathbb{S}_{++}^{d_{\mathrm{in}}}$ and a learnable
+matrix
+$\bm{W}\in\mathbb{R}^{d_{\mathrm{out}}\times d_{\mathrm{in}}}$, the output is
+\begin{equation}
+    \operatorname{BiMap}(\bm{X})
+    =
+    \bm{W}\bm{X}\bm{W}^{\top}
+    + \varepsilon\bm{I}.
+    \label{eq:bimap}
+\end{equation}
+The weight matrix is orthogonally initialised. The output is explicitly
+symmetrised before diagonal regularisation is applied. The BiMap operation is
+used to construct query, key, and value matrices and to implement the SPD
+feed-forward network.
+
+\subsection{Riemannian Self-Attention}
+
+For an input sequence of SPD matrices $\{\bm{X}_i\}_{i=1}^{N}$, query, key,
+and value representations are obtained using independent BiMap projections:
+\begin{equation}
+    \bm{Q}_i = \operatorname{BiMap}_{Q}(\bm{X}_i),\qquad
+    \bm{K}_i = \operatorname{BiMap}_{K}(\bm{X}_i),\qquad
+    \bm{V}_i = \operatorname{BiMap}_{V}(\bm{X}_i).
+\end{equation}
+Similarity is defined using the negative Log-Euclidean distance:
+\begin{equation}
+    d_{\mathrm{LE}}(\bm{Q}_i,\bm{K}_j)
+    =
+    \left\|
+        \log(\bm{Q}_i)-\log(\bm{K}_j)
+    \right\|_{\mathrm{F}},
+\end{equation}
+\begin{equation}
+    a_{ij}
+    =
+    \frac{
+        \exp\left[-d_{\mathrm{LE}}(\bm{Q}_i,\bm{K}_j)\right]
+    }{
+        \sum_{k=1}^{N}
+        \exp\left[-d_{\mathrm{LE}}(\bm{Q}_i,\bm{K}_k)\right]
+    }.
+\end{equation}
+
+The value matrices are aggregated in the Log-Euclidean tangent space:
+\begin{equation}
+    \bm{H}_i
+    =
+    \exp\left(
+        \sum_{j=1}^{N}a_{ij}\log(\bm{V}_j)
+    \right).
+    \label{eq:spd-attention}
+\end{equation}
+Because the weighted sum is formed between symmetric log-matrices and is then
+exponentiated, $\bm{H}_i$ remains SPD. The implemented architecture uses
+single-head attention; attention dropout can be applied to the normalised
+weights, although it is set to zero in the reported configuration.
+
+\subsection{Temporal and Frequency Axial Attention}
+
+An encoder block applies the attention operation in
+Equation~\eqref{eq:spd-attention} along two axes. Temporal attention treats the
+$T$ temporal matrices within each frequency band as a sequence:
+\begin{equation}
+    \bm{\mathcal{H}}^{\mathrm{time}}
+    =
+    \operatorname{Attn}_{\mathrm{time}}
+    (\bm{\mathcal{X}}).
+\end{equation}
+After its residual, normalisation, and feed-forward stages, frequency attention
+treats the $F$ frequency-band matrices at each temporal position as a sequence:
+\begin{equation}
+    \bm{\mathcal{H}}^{\mathrm{freq}}
+    =
+    \operatorname{Attn}_{\mathrm{freq}}
+    (\bm{\mathcal{H}}^{\mathrm{time}}).
+\end{equation}
+Separate attention modules are used for the two axes. This design explicitly
+models both temporal evolution and cross-band interaction without forming a
+single sequence of $TF$ tokens.
+
+\subsection{Log-Euclidean Residual Connection}
+
+Euclidean matrix addition does not guarantee that a residual output will remain
+SPD. Therefore, each residual connection is implemented as a two-point
+Log-Euclidean barycentre:
+\begin{equation}
+    \operatorname{Res}(\bm{R},\bm{H})
+    =
+    \exp\left[
+        (1-\alpha)\log(\bm{R})
+        +\alpha\log(\bm{H})
+    \right],
+    \label{eq:spd-residual}
+\end{equation}
+where $\bm{R}$ is the residual input, $\bm{H}$ is the sublayer output, and
+$\alpha=0.5$. If their dimensions differ, the residual branch is first
+projected using a BiMap layer.
+
+\subsection{Riemannian Layer Normalisation}
+
+The residual output is normalised independently for every SPD token. Let
+$\bm{S}=\log(\bm{X})\in\mathbb{S}^{d}$ and define
+\begin{equation}
+    \mu = \frac{1}{d}\operatorname{tr}(\bm{S}),\qquad
+    \bm{Z}=\bm{S}-\mu\bm{I}.
+\end{equation}
+The scalar variance is calculated from all entries of the centred symmetric
+matrix:
+\begin{equation}
+    \sigma^{2}
+    =
+    \frac{1}{d^{2}}\|\bm{Z}\|_{\mathrm{F}}^{2}.
+\end{equation}
+Normalisation and the learnable affine transformation are then performed as
+\begin{equation}
+    \widehat{\bm{Z}}
+    =
+    \gamma
+    \frac{\bm{Z}}{\sqrt{\sigma^{2}+\varepsilon}}
+    +\bm{B},
+\end{equation}
+where $\gamma$ is a learnable scalar and $\bm{B}$ is a learnable symmetric
+bias matrix. The normalised SPD output is
+\begin{equation}
+    \operatorname{RLN}(\bm{X})=\exp(\widehat{\bm{Z}}).
+\end{equation}
+This operation performs per-token normalisation in the Log-Euclidean tangent
+space and maps the result back to the manifold.
+
+\subsection{SPD Feed-Forward Network}
+
+The point-wise feed-forward sublayer is implemented with SPD-preserving
+transformations:
+\begin{equation}
+    \operatorname{FFN}(\bm{X})
+    =
+    \operatorname{BiMap}_{2}
+    \left(
+        \operatorname{Act}_{\mathrm{SPD}}
+        \left(\operatorname{BiMap}_{1}(\bm{X})\right)
+    \right).
+\end{equation}
+The first BiMap projects from the encoder dimension to the hidden SPD
+dimension, and the second returns to the encoder dimension. The activation is
+applied to the eigenvalues. For the GELU variant used by the implementation,
+\begin{equation}
+    \lambda'_i
+    =
+    \operatorname{GELU}(\lambda_i)+\delta,
+\end{equation}
+where $\delta$ shifts all eigenvalues when necessary so that the minimum
+eigenvalue is at least a small positive constant. The matrix is then
+reconstructed using the original eigenvectors. Consequently, the activation
+does not leave the SPD manifold.
+
+\subsection{Encoder Block}
+
+Combining the preceding components, one encoder layer performs
+\begin{align}
+    \bm{\mathcal{Z}}_1
+    &=
+    \operatorname{RLN}\left(
+        \operatorname{Res}
+        \left(
+            \bm{\mathcal{X}},
+            \operatorname{Attn}_{\mathrm{time}}
+            (\bm{\mathcal{X}})
+        \right)
+    \right),\\
+    \bm{\mathcal{Z}}_2
+    &=
+    \operatorname{RLN}\left(
+        \operatorname{Res}
+        \left(
+            \bm{\mathcal{Z}}_1,
+            \operatorname{FFN}_{\mathrm{time}}
+            (\bm{\mathcal{Z}}_1)
+        \right)
+    \right),\\
+    \bm{\mathcal{Z}}_3
+    &=
+    \operatorname{RLN}\left(
+        \operatorname{Res}
+        \left(
+            \bm{\mathcal{Z}}_2,
+            \operatorname{Attn}_{\mathrm{freq}}
+            (\bm{\mathcal{Z}}_2)
+        \right)
+    \right),\\
+    \bm{\mathcal{Y}}
+    &=
+    \operatorname{RLN}\left(
+        \operatorname{Res}
+        \left(
+            \bm{\mathcal{Z}}_3,
+            \operatorname{FFN}_{\mathrm{freq}}
+            (\bm{\mathcal{Z}}_3)
+        \right)
+    \right).
+\end{align}
+Multiple layers can be stacked to form the complete SPD Transformer encoder.
+
+\subsection{Log-Euclidean Pooling and Classification}
+
+After the final encoder, all SPD tokens are mapped to symmetric log-matrices.
+Two trial-level aggregation strategies are considered. Mean pooling computes
+\begin{equation}
+    \bm{P}_{\mathrm{mean}}
+    =
+    \frac{1}{TF}
+    \sum_{t=1}^{T}\sum_{f=1}^{F}
+    \log(\bm{Y}_{t,f}).
+\end{equation}
+
+For attention pooling, each upper-triangular log-matrix is vectorised:
+\begin{equation}
+    \bm{z}_{t,f}
+    =
+    \operatorname{vech}
+    \left(\log(\bm{Y}_{t,f})\right)
+    \in \mathbb{R}^{d(d+1)/2}.
+\end{equation}
+A learnable scoring function produces one scalar for each token:
+\begin{equation}
+    s_{t,f}
+    =
+    \bm{w}^{\top}
+    \operatorname{LayerNorm}(\bm{z}_{t,f})+b,
+\end{equation}
+and the pooling weights are obtained using a softmax over all temporal-frequency
+tokens:
+\begin{equation}
+    \beta_{t,f}
+    =
+    \frac{\exp(s_{t,f})}
+         {\sum_{t',f'}\exp(s_{t',f'})}.
+\end{equation}
+The pooled representation is
+\begin{equation}
+    \bm{P}_{\mathrm{attn}}
+    =
+    \sum_{t=1}^{T}\sum_{f=1}^{F}
+    \beta_{t,f}\log(\bm{Y}_{t,f}).
+\end{equation}
+
+The pooled symmetric matrix is converted into a vector using its upper
+triangular entries. A dropout layer and a linear transformation then produce
+the class logits:
+\begin{equation}
+    \widehat{\bm{y}}
+    =
+    \bm{W}_{c}\operatorname{Dropout}
+    \left(\operatorname{vech}(\bm{P})\right)+\bm{b}_{c}.
+\end{equation}
+The network is trained end-to-end using multiclass cross-entropy loss. AdamW is
+used for optimisation, and the checkpoint with the highest validation
+macro-averaged F1 score is selected for final evaluation.

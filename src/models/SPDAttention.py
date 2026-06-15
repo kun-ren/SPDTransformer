@@ -1,6 +1,9 @@
 from enum import Enum
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 import math
-from typing import Literal
+from typing import Callable, Iterator, Literal, ParamSpec, TypeVar
 
 import torch
 from torch import nn
@@ -17,12 +20,90 @@ class MetricType(Enum):
     MLPLogFunction = 'mlp-log-function'  # learnable-spectral-log-function
 
 
+class _SPDLogCache:
+    """Forward-scoped cache keyed by tensor identity."""
+
+    def __init__(self) -> None:
+        self._values: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def get(self, x: torch.Tensor) -> torch.Tensor | None:
+        entry = self._values.get(id(x))
+        if entry is None:
+            return None
+
+        cached_x, cached_log = entry
+        if cached_x is x:
+            return cached_log
+        return None
+
+    def store(self, x: torch.Tensor, log_x: torch.Tensor) -> None:
+        # Keep the tensor alive for the duration of the forward pass so that
+        # Python cannot reuse its id for a different temporary tensor.
+        self._values[id(x)] = (x, log_x)
+
+
+_ACTIVE_SPD_LOG_CACHE: ContextVar[_SPDLogCache | None] = ContextVar(
+    "_ACTIVE_SPD_LOG_CACHE",
+    default=None,
+)
+
+
+@contextmanager
+def spd_log_cache() -> Iterator[_SPDLogCache]:
+    """
+    Reuse SPD logarithms within one forward pass.
+
+    Nested scopes share the same cache. The outermost scope releases all
+    tensors when it exits, so cached autograd graphs never cross batches.
+    """
+
+    active_cache = _ACTIVE_SPD_LOG_CACHE.get()
+    if active_cache is not None:
+        yield active_cache
+        return
+
+    cache = _SPDLogCache()
+    token = _ACTIVE_SPD_LOG_CACHE.set(cache)
+    try:
+        yield cache
+    finally:
+        _ACTIVE_SPD_LOG_CACHE.reset(token)
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def use_spd_log_cache(function: Callable[P, R]) -> Callable[P, R]:
+    """Run a module forward method inside a shared SPD-log cache."""
+
+    @wraps(function)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        with spd_log_cache():
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
 def spd_log(x: torch.Tensor) -> torch.Tensor:
+    cache = _ACTIVE_SPD_LOG_CACHE.get()
+    if cache is not None:
+        cached_log = cache.get(x)
+        if cached_log is not None:
+            return cached_log
+
+    original_x = x
     x = 0.5 * (x + x.transpose(-1, -2))
     eigenvalues, eigenvectors = torch.linalg.eigh(x)
     eps = torch.finfo(eigenvalues.dtype).eps
     log_eigenvalues = eigenvalues.clamp_min(eps).log()
-    return (eigenvectors * log_eigenvalues.unsqueeze(-2)) @ eigenvectors.transpose(-1, -2)
+    log_x = (
+        eigenvectors * log_eigenvalues.unsqueeze(-2)
+    ) @ eigenvectors.transpose(-1, -2)
+
+    if cache is not None:
+        cache.store(original_x, log_x)
+    return log_x
 
 
 def spd_exp(x: torch.Tensor) -> torch.Tensor:
@@ -30,7 +111,16 @@ def spd_exp(x: torch.Tensor) -> torch.Tensor:
     eigenvalues, eigenvectors = torch.linalg.eigh(x)
     exp_eigenvalues = eigenvalues.exp()
     y = (eigenvectors * exp_eigenvalues.unsqueeze(-2)) @ eigenvectors.transpose(-1, -2)
-    return 0.5 * (y + y.transpose(-1, -2))
+    y = 0.5 * (y + y.transpose(-1, -2))
+
+    cache = _ACTIVE_SPD_LOG_CACHE.get()
+    if cache is not None:
+        # For symmetric x, log(exp(x)) = x. Registering the symmetrized input
+        # avoids an immediate eigendecomposition in residual and norm blocks.
+        # This also avoids the float32 reconstruction error introduced by
+        # numerically applying log directly after exp.
+        cache.store(y, x)
+    return y
 
 
 class PositionBias(nn.Module):
@@ -125,6 +215,7 @@ class SingleHeadAttention(nn.Module):
             self.right_metric_cholesky = None
 
         self.position_bias = PositionBias(max_position=128) if self.use_position else None
+    @use_spd_log_cache
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         q = self.query(x)
         k = self.key(x)

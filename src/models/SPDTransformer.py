@@ -4,7 +4,12 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from src.models.BiMap import BiMap
-from src.models.SPDAttention import SingleHeadAttention, spd_exp, spd_log
+from src.models.SPDAttention import (
+    SingleHeadAttention,
+    spd_exp,
+    spd_log,
+    use_spd_log_cache,
+)
 
 
 class RiemannianLayerNorm(nn.Module):
@@ -37,6 +42,7 @@ class RiemannianLayerNorm(nn.Module):
             self.register_parameter("weight", None)
             self.register_parameter("bias", None)
 
+    @use_spd_log_cache
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-2:] != (self.spd_dim, self.spd_dim):
             raise ValueError(
@@ -100,6 +106,7 @@ class SPDAddNorm(nn.Module):
         )
         self.norm = RiemannianLayerNorm(spd_out_dim, eps=eps, affine=affine)
 
+    @use_spd_log_cache
     def forward(self, residual: torch.Tensor, sublayer_output: torch.Tensor) -> torch.Tensor:
         residual = self.residual_projection(residual)
 
@@ -332,6 +339,7 @@ class SPDEncoder(nn.Module):
 
         return y
 
+    @use_spd_log_cache
     def forward(self, x):
         if x.ndim not in {4, 5}:
             raise ValueError(
@@ -407,6 +415,7 @@ class SPDTransformer(nn.Module):
                 metric_eps=metric_eps,
             ) for _ in range(depth)])
 
+    @use_spd_log_cache
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for layer in self.layers:
             x = layer(x)
@@ -505,6 +514,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             dropout=dropout,
         )
 
+    @use_spd_log_cache
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.encoder(x)
 
@@ -594,6 +604,7 @@ class SPDTaskTagClassifier(SPDClassifierBase):
             dropout=dropout,
         )
 
+    @use_spd_log_cache
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._prepend_task_token(x)
         x = self.encoder(x)
@@ -710,5 +721,6 @@ class SPDTransformerClassifier(nn.Module):
                 metric_eps=metric_eps,
             )
 
+    @use_spd_log_cache
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
