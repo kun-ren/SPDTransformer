@@ -1,9 +1,6 @@
 from enum import Enum
-from contextlib import contextmanager
-from contextvars import ContextVar
-from functools import wraps
 import math
-from typing import Callable, Iterator, Literal, ParamSpec, TypeVar
+from typing import Literal
 
 import torch
 from torch import nn
@@ -16,94 +13,16 @@ class MetricType(Enum):
     LogEuclidean = 'log-euclidean'
     LearnableMetric = 'learnable-metric'
     LearnableAffineLogFunction = 'learnable-affine-log-function'
-    MonotoneNeuralSpline = 'monotone-neural-spline'  # learnable-spectral-log-function
-    MLPLogFunction = 'mlp-log-function'  # learnable-spectral-log-function
-
-
-class _SPDLogCache:
-    """Forward-scoped cache keyed by tensor identity."""
-
-    def __init__(self) -> None:
-        self._values: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
-
-    def get(self, x: torch.Tensor) -> torch.Tensor | None:
-        entry = self._values.get(id(x))
-        if entry is None:
-            return None
-
-        cached_x, cached_log = entry
-        if cached_x is x:
-            return cached_log
-        return None
-
-    def store(self, x: torch.Tensor, log_x: torch.Tensor) -> None:
-        # Keep the tensor alive for the duration of the forward pass so that
-        # Python cannot reuse its id for a different temporary tensor.
-        self._values[id(x)] = (x, log_x)
-
-
-_ACTIVE_SPD_LOG_CACHE: ContextVar[_SPDLogCache | None] = ContextVar(
-    "_ACTIVE_SPD_LOG_CACHE",
-    default=None,
-)
-
-
-@contextmanager
-def spd_log_cache() -> Iterator[_SPDLogCache]:
-    """
-    Reuse SPD logarithms within one forward pass.
-
-    Nested scopes share the same cache. The outermost scope releases all
-    tensors when it exits, so cached autograd graphs never cross batches.
-    """
-
-    active_cache = _ACTIVE_SPD_LOG_CACHE.get()
-    if active_cache is not None:
-        yield active_cache
-        return
-
-    cache = _SPDLogCache()
-    token = _ACTIVE_SPD_LOG_CACHE.set(cache)
-    try:
-        yield cache
-    finally:
-        _ACTIVE_SPD_LOG_CACHE.reset(token)
-
-
-P = ParamSpec("P")
-R = TypeVar("R")
-
-
-def use_spd_log_cache(function: Callable[P, R]) -> Callable[P, R]:
-    """Run a module forward method inside a shared SPD-log cache."""
-
-    @wraps(function)
-    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
-        with spd_log_cache():
-            return function(*args, **kwargs)
-
-    return wrapped
+    #MonotoneNeuralSpline = 'monotone-neural-spline'
+    #MLPLogFunction = 'mlp-log-function'
 
 
 def spd_log(x: torch.Tensor) -> torch.Tensor:
-    cache = _ACTIVE_SPD_LOG_CACHE.get()
-    if cache is not None:
-        cached_log = cache.get(x)
-        if cached_log is not None:
-            return cached_log
-
-    original_x = x
     x = 0.5 * (x + x.transpose(-1, -2))
     eigenvalues, eigenvectors = torch.linalg.eigh(x)
     eps = torch.finfo(eigenvalues.dtype).eps
     log_eigenvalues = eigenvalues.clamp_min(eps).log()
-    log_x = (
-        eigenvectors * log_eigenvalues.unsqueeze(-2)
-    ) @ eigenvectors.transpose(-1, -2)
-
-    if cache is not None:
-        cache.store(original_x, log_x)
-    return log_x
+    return (eigenvectors * log_eigenvalues.unsqueeze(-2)) @ eigenvectors.transpose(-1, -2)
 
 
 def spd_exp(x: torch.Tensor) -> torch.Tensor:
@@ -111,16 +30,7 @@ def spd_exp(x: torch.Tensor) -> torch.Tensor:
     eigenvalues, eigenvectors = torch.linalg.eigh(x)
     exp_eigenvalues = eigenvalues.exp()
     y = (eigenvectors * exp_eigenvalues.unsqueeze(-2)) @ eigenvectors.transpose(-1, -2)
-    y = 0.5 * (y + y.transpose(-1, -2))
-
-    cache = _ACTIVE_SPD_LOG_CACHE.get()
-    if cache is not None:
-        # For symmetric x, log(exp(x)) = x. Registering the symmetrized input
-        # avoids an immediate eigendecomposition in residual and norm blocks.
-        # This also avoids the float32 reconstruction error introduced by
-        # numerically applying log directly after exp.
-        cache.store(y, x)
-    return y
+    return 0.5 * (y + y.transpose(-1, -2))
 
 
 class PositionBias(nn.Module):
@@ -176,24 +86,27 @@ class SingleHeadAttention(nn.Module):
         self.key = BiMap(in_dim=spd_in_dim, out_dim=spd_out_dim, )
         self.value = BiMap(in_dim=spd_in_dim, out_dim=self.spd_out_dim, )
         if self.metric == MetricType.LearnableAffineLogFunction:
-            self.affine_log_scale_raw = nn.Parameter(torch.ones(()))
-            self.affine_log_bias_raw = nn.Parameter(torch.zeros(()))
+            # softplus(inverse_softplus(1)) = 1, so the initial transform is
+            # g(lambda) = log(lambda + eps).
+            inverse_softplus_one = math.log(math.expm1(1.0))
+            self.affine_log_scale_raw = nn.Parameter(
+                torch.tensor(inverse_softplus_one)
+            )
         else:
             self.register_parameter("affine_log_scale_raw", None)
-            self.register_parameter("affine_log_bias_raw", None)
 
         tangent_feature_dim = spd_out_dim * (spd_out_dim + 1) // 2
         tangent_hidden_dim = tangent_hidden_dim or tangent_feature_dim
         tangent_out_dim = tangent_out_dim or tangent_feature_dim
-        if self.metric == MetricType.MLPLogFunction:
-            self.mlp_log_function = nn.Sequential(
-                nn.LayerNorm(tangent_feature_dim),
-                nn.Linear(tangent_feature_dim, tangent_hidden_dim),
-                nn.GELU(),
-                nn.Linear(tangent_hidden_dim, tangent_out_dim),
-            )
-        else:
-            self.mlp_log_function = None
+        # if self.metric == MetricType.MLPLogFunction:
+        #     self.mlp_log_function = nn.Sequential(
+        #         nn.LayerNorm(tangent_feature_dim),
+        #         nn.Linear(tangent_feature_dim, tangent_hidden_dim),
+        #         nn.GELU(),
+        #         nn.Linear(tangent_hidden_dim, tangent_out_dim),
+        #     )
+        # else:
+        #     self.mlp_log_function = None
 
         self.tangent_feature_dim = tangent_feature_dim
         if self.metric == MetricType.LearnableMetric:
@@ -215,7 +128,7 @@ class SingleHeadAttention(nn.Module):
             self.right_metric_cholesky = None
 
         self.position_bias = PositionBias(max_position=128) if self.use_position else None
-    @use_spd_log_cache
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         q = self.query(x)
         k = self.key(x)
@@ -281,16 +194,16 @@ class SingleHeadAttention(nn.Module):
             return torch.linalg.matrix_norm(diff, ord='fro', dim=(-2, -1))
             # [B, N_q, N_k]
 
-        if self.metric == MetricType.MLPLogFunction:
-            phi_q = self._learnable_mlp_log_function(q)
-            phi_k = self._learnable_mlp_log_function(k)
-
-            if phi_q.ndim == 1 and phi_k.ndim == 1:
-                diff = phi_q - phi_k
-            else:
-                diff = phi_q.unsqueeze(-2) - phi_k.unsqueeze(-3)
-
-            return torch.linalg.vector_norm(diff, ord=2, dim=-1)
+        # if self.metric == MetricType.MLPLogFunction:
+        #     phi_q = self._learnable_mlp_log_function(q)
+        #     phi_k = self._learnable_mlp_log_function(k)
+        #
+        #     if phi_q.ndim == 1 and phi_k.ndim == 1:
+        #         diff = phi_q - phi_k
+        #     else:
+        #         diff = phi_q.unsqueeze(-2) - phi_k.unsqueeze(-3)
+        #
+        #     return torch.linalg.vector_norm(diff, ord=2, dim=-1)
         if self.metric == MetricType.LearnableMetric:
             log_q = spd_log(q)
             log_k = spd_log(k)
@@ -359,13 +272,20 @@ class SingleHeadAttention(nn.Module):
 
 
     def _spd_affine_log(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply g_theta(lambda) = a log(lambda + eps) spectrally.
+
+        The scale is parameterized with softplus to ensure a > 0, preserving
+        the ordering of eigenvalues.
+        """
         x = 0.5 * (x + x.transpose(-1, -2))
         eigenvalues, eigenvectors = torch.linalg.eigh(x)
-        log_eigenvalues = eigenvalues.clamp_min(self.affine_log_eps).log()
+        log_eigenvalues = (
+            eigenvalues.clamp_min(0.0) + self.affine_log_eps
+        ).log()
 
         scale = F.softplus(self.affine_log_scale_raw)
-        bias = F.softplus(self.affine_log_bias_raw)
-        transformed_eigenvalues = scale * log_eigenvalues + bias
+        transformed_eigenvalues = scale * log_eigenvalues
 
         y = (
             eigenvectors

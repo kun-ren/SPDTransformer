@@ -427,14 +427,23 @@ def train_experiment(
 
 def preprocess_dataset(data_cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, list[str]]:
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
+
+    # for dataset in data_cfg["datasets"]:
+    #     dataset["filter_bank"] = filter_bank
+    task_types = tuple(data_cfg["task_types"].split(','))
     x, y, class_names = preprocess_spd(
         filter_bank=filter_bank,
         root_dir=str(data_cfg.get("root_dir", "data/MNE-eegbci-data/files/eegmmidb/1.0.0")),
+        subjects=data_cfg.get("subjects"),
+        channels=data_cfg.get("channels"),
         estimator=str(data_cfg.get("estimator", "lwf")),
         sfreq=float(data_cfg.get("sfreq", 160)),
         eps=float(data_cfg.get("eps", 1e-6)),
         segment_duration=float(data_cfg.get("segment_duration", 1.0)),
         stride_duration=data_cfg.get("stride_duration", 0.5),
+        imaged=data_cfg.get("imaged", True),
+        executed=data_cfg.get("executed", False),
+        task_types=task_types,
     )
     return x.astype(np.float32), y.astype(np.int64), list(class_names)
 

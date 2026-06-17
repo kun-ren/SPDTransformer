@@ -359,7 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-trials-per-class",
         type=int,
-        default=200,
+        default=400,
         help="Randomly sample at most this many trials per task; use 0 for all.",
     )
     parser.add_argument(
@@ -373,6 +373,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         default="experiments/visualizations/task_signals",
     )
+    parser.add_argument("--imaged", type=bool, default=True)
+    parser.add_argument("--executed", type=bool, default=False)
     return parser
 
 
@@ -416,6 +418,8 @@ def main(argv: list[str] | None = None) -> int:
         tmin=args.tmin,
         tmax=args.tmax,
         subjects=args.subjects,
+        imaged=args.imaged,
+        executed=args.executed,
     )
     print(f"Dataset X shape: {dataset['X'].shape}")
     print(f"Tasks: {sorted(set(dataset['y'].tolist()))}")
