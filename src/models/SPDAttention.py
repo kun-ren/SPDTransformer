@@ -17,20 +17,65 @@ class MetricType(Enum):
     #MLPLogFunction = 'mlp-log-function'
 
 
-def spd_log(x: torch.Tensor) -> torch.Tensor:
-    x = 0.5 * (x + x.transpose(-1, -2))
-    eigenvalues, eigenvectors = torch.linalg.eigh(x)
-    eps = torch.finfo(eigenvalues.dtype).eps
+def _symmetrize(x: torch.Tensor) -> torch.Tensor:
+    return 0.5 * (x + x.transpose(-1, -2))
+
+
+def _eye_like(x: torch.Tensor) -> torch.Tensor:
+    dim = x.shape[-1]
+    return torch.eye(dim, device=x.device, dtype=x.dtype)
+
+
+def _safe_eigh(
+    x: torch.Tensor,
+    eps: float = 1e-5,
+    max_tries: int = 6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    x = _symmetrize(x)
+    if not torch.isfinite(x).all():
+        raise ValueError("SPD spectral operation received NaN or Inf values.")
+
+    eye = _eye_like(x)
+    jitter = eps
+    last_error = None
+    for _ in range(max_tries):
+        try:
+            return torch.linalg.eigh(x + jitter * eye)
+        except RuntimeError as error:
+            last_error = error
+            jitter *= 10.0
+
+    try:
+        eigenvalues, eigenvectors = torch.linalg.eigh(
+            (x + jitter * eye).to(torch.float64)
+        )
+        return eigenvalues.to(dtype=x.dtype), eigenvectors.to(dtype=x.dtype)
+    except RuntimeError as error:
+        raise RuntimeError(
+            "torch.linalg.eigh failed after jitter and float64 fallback. "
+            "The input SPD matrix is likely severely ill-conditioned."
+        ) from last_error or error
+
+
+def spd_log(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+    eigenvalues, eigenvectors = _safe_eigh(x, eps=eps)
     log_eigenvalues = eigenvalues.clamp_min(eps).log()
-    return (eigenvectors * log_eigenvalues.unsqueeze(-2)) @ eigenvectors.transpose(-1, -2)
+    y = (eigenvectors * log_eigenvalues.unsqueeze(-2)) @ eigenvectors.transpose(-1, -2)
+    return _symmetrize(y)
 
 
-def spd_exp(x: torch.Tensor) -> torch.Tensor:
-    x = 0.5 * (x + x.transpose(-1, -2))
-    eigenvalues, eigenvectors = torch.linalg.eigh(x)
-    exp_eigenvalues = eigenvalues.exp()
+def spd_exp(
+    x: torch.Tensor,
+    eps: float = 1e-5,
+    max_log_value: float = 30.0,
+) -> torch.Tensor:
+    eigenvalues, eigenvectors = _safe_eigh(x, eps=eps)
+    exp_eigenvalues = eigenvalues.clamp(
+        min=-max_log_value,
+        max=max_log_value,
+    ).exp()
     y = (eigenvectors * exp_eigenvalues.unsqueeze(-2)) @ eigenvectors.transpose(-1, -2)
-    return 0.5 * (y + y.transpose(-1, -2))
+    return _symmetrize(y) + eps * _eye_like(y)
 
 
 class PositionBias(nn.Module):
@@ -278,8 +323,7 @@ class SingleHeadAttention(nn.Module):
         The scale is parameterized with softplus to ensure a > 0, preserving
         the ordering of eigenvalues.
         """
-        x = 0.5 * (x + x.transpose(-1, -2))
-        eigenvalues, eigenvectors = torch.linalg.eigh(x)
+        eigenvalues, eigenvectors = _safe_eigh(x, eps=self.affine_log_eps)
         log_eigenvalues = (
             eigenvalues.clamp_min(0.0) + self.affine_log_eps
         ).log()

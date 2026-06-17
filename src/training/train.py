@@ -28,8 +28,13 @@ DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_grid.yaml"
 
 
 class MotorImageryDataset(Dataset):
-    def __init__(self, x: np.ndarray, y: np.ndarray) -> None:
-        self.x = torch.from_numpy(x).float()
+    def __init__(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        dtype: torch.dtype = torch.float64,
+    ) -> None:
+        self.x = torch.from_numpy(x).to(dtype=dtype)
         self.y = torch.from_numpy(y).long()
 
     def __len__(self) -> int:
@@ -168,6 +173,18 @@ def resolve_split_file(split_file: Any) -> Path | None:
     return PROJECT_ROOT / path
 
 
+def resolve_precision(precision: Any) -> torch.dtype:
+    precision = str(precision or "float64").lower()
+    if precision in {"float64", "double", "fp64"}:
+        return torch.float64
+    if precision in {"float32", "float", "single", "fp32"}:
+        return torch.float32
+    raise ValueError(
+        "training.precision must be one of: float64, double, fp64, "
+        "float32, float, single, fp32."
+    )
+
+
 def make_loaders(
     x: np.ndarray,
     y: np.ndarray,
@@ -176,23 +193,24 @@ def make_loaders(
     test_idx: np.ndarray,
     batch_size: int,
     num_workers: int,
+    dtype: torch.dtype,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     train_loader = DataLoader(
-        MotorImageryDataset(x[train_idx], y[train_idx]),
+        MotorImageryDataset(x[train_idx], y[train_idx], dtype=dtype),
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         drop_last=False,
     )
     val_loader = DataLoader(
-        MotorImageryDataset(x[val_idx], y[val_idx]),
+        MotorImageryDataset(x[val_idx], y[val_idx], dtype=dtype),
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
         drop_last=False,
     )
     test_loader = DataLoader(
-        MotorImageryDataset(x[test_idx], y[test_idx]),
+        MotorImageryDataset(x[test_idx], y[test_idx], dtype=dtype),
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
@@ -310,6 +328,7 @@ def train_experiment(
     training_cfg = experiment_cfg["training"]
     model_cfg = experiment_cfg["model"]
     seed = int(training_cfg.get("seed", 42))
+    dtype = resolve_precision(training_cfg.get("precision", "float64"))
     set_seed(seed)
 
     run_dir = make_run_dir(base_output_dir, run_index, experiment_cfg)
@@ -331,13 +350,14 @@ def train_experiment(
         test_idx=test_idx,
         batch_size=int(training_cfg.get("batch_size", 16)),
         num_workers=int(training_cfg.get("num_workers", 0)),
+        dtype=dtype,
     )
 
     model = build_model(
         model_cfg=model_cfg,
         spd_in_dim=x.shape[-1],
         num_classes=len(class_names),
-    ).to(device)
+    ).to(device=device, dtype=dtype)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(
@@ -408,6 +428,7 @@ def train_experiment(
         "test_accuracy": test_metrics["accuracy"],
         "test_macro_f1": test_metrics["macro_f1"],
         "class_names": class_names,
+        "precision": str(dtype).replace("torch.", ""),
         "n_train": int(len(train_idx)),
         "n_val": int(len(val_idx)),
         "n_test": int(len(test_idx)),

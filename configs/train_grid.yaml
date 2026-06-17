@@ -34,9 +34,10 @@ model:
 
 training:
   seed: [42]
+  precision: ["float64"]
   epochs: [30]
   batch_size: [16]
-  learning_rate: [1.0e-3]
+  learning_rate: [1.0e-5]
   weight_decay: [1.0e-4]
   test_size: [0.15]
   val_size: [0.15]

@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from src.models.BiMap import BiMap
 from src.models.SPDAttention import (
     SingleHeadAttention,
+    _safe_eigh,
     spd_exp,
     spd_log,
 )
@@ -166,7 +167,7 @@ class _LegacySPDActivation(nn.Module):
         -------
         Y : Tensor  shape (..., n, n)  SPD
         """
-        eigvals, eigvecs = torch.linalg.eigh(X)               # (..., n), (..., n, n)
+        eigvals, eigvecs = _safe_eigh(X, eps=self.eps)        # (..., n), (..., n, n)
 
         if self.activation == "relu":
             eigvals = eigvals.clamp(min=self.eps)
@@ -202,7 +203,7 @@ class SPDActivation(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = 0.5 * (x + x.transpose(-1, -2))
-        eigvals, eigvecs = torch.linalg.eigh(x)
+        eigvals, eigvecs = _safe_eigh(x, eps=self.eps)
 
         if self.activation == "relu":
             eigvals = eigvals.clamp_min(self.eps)
