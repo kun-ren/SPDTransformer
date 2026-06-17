@@ -78,6 +78,32 @@ def spd_exp(
     return _symmetrize(y) + eps * _eye_like(y)
 
 
+def stable_attention_softmax(
+    score: torch.Tensor,
+    dim: int = -1,
+    large_value: float = 1e6,
+) -> torch.Tensor:
+    score = torch.nan_to_num(
+        score,
+        nan=-large_value,
+        posinf=large_value,
+        neginf=-large_value,
+    )
+    score = score - score.amax(dim=dim, keepdim=True)
+    attention = torch.softmax(score, dim=dim)
+    attention = torch.nan_to_num(attention, nan=0.0, posinf=0.0, neginf=0.0)
+
+    row_sum = attention.sum(dim=dim, keepdim=True)
+    sequence_length = attention.shape[dim]
+    uniform = torch.full_like(attention, 1.0 / sequence_length)
+    attention = torch.where(
+        row_sum > torch.finfo(attention.dtype).eps,
+        attention / row_sum.clamp_min(torch.finfo(attention.dtype).eps),
+        uniform,
+    )
+    return attention
+
+
 class PositionBias(nn.Module):
     """
     Learnable scalar position bias for attention score
@@ -184,7 +210,7 @@ class SingleHeadAttention(nn.Module):
         score = -dis
         if self.position_bias is not None:
             score += self.position_bias(dis.shape[-1])
-        attention = torch.softmax(score, dim=-1)
+        attention = stable_attention_softmax(score, dim=-1)
         attention_before_dropout = attention
         attention = self.attention_dropout(attention)
         self._print_attention_dropout_debug(attention_before_dropout, attention)

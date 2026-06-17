@@ -279,6 +279,7 @@ def train_one_epoch(
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    gradient_clip_norm: float | None = None,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
@@ -291,9 +292,19 @@ def train_one_epoch(
 
         logits = model(x_batch)
         loss = criterion(logits, y_batch)
+        if not torch.isfinite(loss):
+            raise RuntimeError(
+                "Non-finite training loss detected. "
+                "Check input SPD matrices, learning rate, and model numerical stability."
+            )
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        if gradient_clip_norm is not None and gradient_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=gradient_clip_norm,
+            )
         optimizer.step()
 
         total_loss += loss.item() * y_batch.size(0)
@@ -371,13 +382,23 @@ def train_experiment(
     history_path = run_dir / "history.csv"
     checkpoint_path = run_dir / "best_model.pt"
     epochs = int(training_cfg.get("epochs", 50))
+    gradient_clip_norm = training_cfg.get("gradient_clip_norm", 1.0)
+    if gradient_clip_norm is not None:
+        gradient_clip_norm = float(gradient_clip_norm)
 
     print(f"\n[Run {run_index}] {run_dir.name}")
     print(f"  model={model_cfg}")
     print(f"  training={training_cfg}")
 
     for epoch in range(1, epochs + 1):
-        train_metrics = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_metrics = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            gradient_clip_norm=gradient_clip_norm,
+        )
         val_metrics = evaluate(model, val_loader, criterion, device)
 
         row = {
@@ -466,6 +487,11 @@ def preprocess_dataset(data_cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray
         executed=data_cfg.get("executed", False),
         task_types=task_types,
     )
+    if not np.isfinite(x).all():
+        bad_count = int((~np.isfinite(x)).sum())
+        raise ValueError(
+            f"Preprocessed SPD dataset contains {bad_count} NaN or Inf values."
+        )
     return x.astype(np.float32), y.astype(np.int64), list(class_names)
 
 

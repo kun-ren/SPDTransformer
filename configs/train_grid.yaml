@@ -39,6 +39,7 @@ training:
   batch_size: [16]
   learning_rate: [1.0e-5]
   weight_decay: [1.0e-4]
+  gradient_clip_norm: [1.0]
   test_size: [0.15]
   val_size: [0.15]
   split_file: ["experiments/splits/physionet_mi_seed42.json"]
