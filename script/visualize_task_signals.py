@@ -1,4 +1,4 @@
-"""Visualize raw and filter-bank EEG signals grouped by motor task.
+"""Visualize filter-bank EEG signals grouped by motor task.
 
 Examples:
     python script/visualize_task_signals.py --subjects 1-10
@@ -237,48 +237,13 @@ def plot_task_signals(
         )
     times = tmin + np.arange(selected.shape[-1]) / sfreq
 
-    n_rows = 1 + len(filter_bank)
-    n_cols = len(class_names)
-    figures = []
-    axes_by_channel = []
+    n_rows = len(class_names)
+    n_cols = len(channel_names)
     colors = plt.get_cmap("tab10").colors
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_paths = []
 
-    for channel_name in channel_names:
-        figure, axes = plt.subplots(
-            n_rows,
-            n_cols,
-            figsize=(4.0 * n_cols, 2.25 * n_rows),
-            sharex=True,
-            squeeze=False,
-            constrained_layout=True,
-        )
-        figures.append(figure)
-        axes_by_channel.append(axes)
-        figure.suptitle(
-            f"{channel_name}: task-grouped raw and filter-bank signals",
-            fontsize=15,
-        )
-
-    for channel_position, axes in enumerate(axes_by_channel):
-        for class_position, class_name in enumerate(class_names):
-            axis = axes[0, class_position]
-            indices = local_indices_by_class[class_name]
-            add_signal_summary(
-                axis,
-                times,
-                selected[indices, channel_position, :],
-                colors[class_position % len(colors)],
-                show_trials,
-            )
-            axis.set_title(
-                f"{class_name.replace('_', ' ')} (n={len(indices)})",
-                fontsize=11,
-            )
-            style_axis(axis, tmin, tmax)
-            if class_position == 0:
-                axis.set_ylabel("Raw\namplitude (uV)")
-
-    for row, (low_freq, high_freq) in enumerate(filter_bank, start=1):
+    for low_freq, high_freq in filter_bank:
         filtered = bandpass_filter(
             selected,
             sfreq=sfreq,
@@ -288,10 +253,25 @@ def plot_task_signals(
         if band_view == "envelope":
             filtered = np.abs(hilbert(filtered, axis=-1))
 
-        for channel_position, axes in enumerate(axes_by_channel):
-            for class_position, class_name in enumerate(class_names):
-                axis = axes[row, class_position]
-                indices = local_indices_by_class[class_name]
+        figure, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(4.0 * n_cols, 2.25 * n_rows),
+            sharex=True,
+            squeeze=False,
+            constrained_layout=True,
+        )
+        quantity = "envelope" if band_view == "envelope" else "amplitude"
+        figure.suptitle(
+            f"{low_freq:g}-{high_freq:g} Hz task signals ({quantity})",
+            fontsize=15,
+        )
+
+        for class_position, class_name in enumerate(class_names):
+            indices = local_indices_by_class[class_name]
+            row_label = f"{class_name.replace('_', ' ')}\n(n={len(indices)})"
+            for channel_position, channel_name in enumerate(channel_names):
+                axis = axes[class_position, channel_position]
                 add_signal_summary(
                     axis,
                     times,
@@ -301,30 +281,28 @@ def plot_task_signals(
                 )
                 style_axis(axis, tmin, tmax)
                 if class_position == 0:
-                    quantity = "envelope" if band_view == "envelope" else "amplitude"
-                    axis.set_ylabel(
-                        f"{low_freq:g}-{high_freq:g} Hz\n{quantity} (uV)"
-                    )
-                if row == n_rows - 1:
+                    axis.set_title(channel_name, fontsize=11)
+                if channel_position == 0:
+                    axis.set_ylabel(f"{row_label}\n{quantity} (uV)")
+                if class_position == n_rows - 1:
                     axis.set_xlabel("Time from task onset (s)")
-        del filtered
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_paths = []
-    for figure, channel_name in zip(figures, channel_names):
-        safe_channel = re.sub(r"[^A-Za-z0-9_-]+", "_", channel_name)
-        output_path = output_dir / f"task_signals_{safe_channel}.png"
+        safe_band = f"{low_freq:g}-{high_freq:g}Hz"
+        safe_band = re.sub(r"[^A-Za-z0-9_-]+", "_", safe_band)
+        output_path = output_dir / f"task_signals_{safe_band}.png"
         figure.savefig(output_path, dpi=180, bbox_inches="tight")
         plt.close(figure)
         output_paths.append(output_path)
+        del filtered
+
     return output_paths
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot complete rest+task epochs and filter-bank signals, grouped by "
-            "PhysioNet motor-imagery task."
+            "Plot filter-bank rest+task epochs grouped by PhysioNet "
+            "motor-imagery task."
         )
     )
     parser.add_argument("--root-dir", default=DEFAULT_ROOT_DIR)

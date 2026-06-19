@@ -14,10 +14,16 @@ from typing import Any
 import numpy as np
 import torch
 import yaml
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_recall_fscore_support,
+)
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
+from script.load_moabb_dataset import parse_int_list
 from src.datasets.PhysioNetMI_preprocess import preprocess_spd
 from src.models.SPDTransformer import SPDTransformerClassifier
 from src.training.shared_split import load_or_create_split_indices
@@ -185,6 +191,14 @@ def resolve_precision(precision: Any) -> torch.dtype:
     )
 
 
+def parse_task_types(task_types: Any) -> tuple[str, ...]:
+    if task_types is None:
+        return ("unilateral_fist", "both")
+    if isinstance(task_types, str):
+        return tuple(part.strip() for part in task_types.split(",") if part.strip())
+    return tuple(str(part).strip() for part in task_types if str(part).strip())
+
+
 def make_loaders(
     x: np.ndarray,
     y: np.ndarray,
@@ -237,6 +251,7 @@ def build_model(
         attention_dropout=float(model_cfg.get("attention_dropout", 0.0)),
         debug_attention_dropout=bool(model_cfg.get("debug_attention_dropout", False)),
         debug_attention_shape=bool(model_cfg.get("debug_attention_shape", False)),
+        debug_tensor_stats=bool(model_cfg.get("debug_tensor_stats", False)),
         learnable_metric_mode=str(model_cfg.get("learnable_metric_mode", "low-rank")),
         learnable_metric_rank=model_cfg.get("learnable_metric_rank"),
         metric_eps=float(model_cfg.get("metric_eps", 1e-6)),
@@ -249,6 +264,20 @@ def evaluate(
     criterion: nn.Module,
     device: torch.device,
 ) -> dict[str, float]:
+    predictions = predict_loader(model, loader, criterion, device)
+    return {
+        "loss": predictions["loss"],
+        "accuracy": predictions["accuracy"],
+        "macro_f1": predictions["macro_f1"],
+    }
+
+
+def predict_loader(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> dict[str, Any]:
     model.eval()
     total_loss = 0.0
     y_true = []
@@ -266,11 +295,83 @@ def evaluate(
             y_true.extend(y_batch.cpu().numpy().tolist())
             y_pred.extend(logits.argmax(dim=1).cpu().numpy().tolist())
 
+    y_true = np.asarray(y_true, dtype=np.int64)
+    y_pred = np.asarray(y_pred, dtype=np.int64)
     return {
         "loss": total_loss / len(y_true),
         "accuracy": accuracy_score(y_true, y_pred),
         "macro_f1": f1_score(y_true, y_pred, average="macro", zero_division=0),
+        "y_true": y_true,
+        "y_pred": y_pred,
     }
+
+
+def save_per_class_metrics(
+    path: Path,
+    split_predictions: dict[str, dict[str, Any]],
+    class_names: list[str],
+) -> None:
+    labels = np.arange(len(class_names))
+    rows = []
+    for split_name, prediction in split_predictions.items():
+        precision, recall, f1, support = precision_recall_fscore_support(
+            prediction["y_true"],
+            prediction["y_pred"],
+            labels=labels,
+            zero_division=0,
+        )
+        for class_index, class_name in enumerate(class_names):
+            rows.append(
+                {
+                    "split": split_name,
+                    "class": class_name,
+                    "precision": float(precision[class_index]),
+                    "recall": float(recall[class_index]),
+                    "f1": float(f1[class_index]),
+                    "support": int(support[class_index]),
+                }
+            )
+
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def save_confusion_matrices(
+    path: Path,
+    split_predictions: dict[str, dict[str, Any]],
+    class_names: list[str],
+) -> None:
+    labels = np.arange(len(class_names))
+    rows = []
+    pred_columns = [f"pred_{class_name}" for class_name in class_names]
+    for split_name, prediction in split_predictions.items():
+        matrix = confusion_matrix(
+            prediction["y_true"],
+            prediction["y_pred"],
+            labels=labels,
+        )
+        for true_index, class_name in enumerate(class_names):
+            row = {
+                "split": split_name,
+                "true_class": class_name,
+            }
+            row.update(
+                {
+                    column: int(matrix[true_index, pred_index])
+                    for pred_index, column in enumerate(pred_columns)
+                }
+            )
+            rows.append(row)
+
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["split", "true_class", *pred_columns],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def train_one_epoch(
@@ -289,7 +390,6 @@ def train_one_epoch(
     for x_batch, y_batch in loader:
         x_batch = x_batch.to(device)
         y_batch = y_batch.to(device)
-
         logits = model(x_batch)
         loss = criterion(logits, y_batch)
         if not torch.isfinite(loss):
@@ -300,12 +400,15 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        assert_model_finite(model, "backward")
         if gradient_clip_norm is not None and gradient_clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 max_norm=gradient_clip_norm,
             )
+            assert_model_finite(model, "gradient clipping")
         optimizer.step()
+        assert_model_finite(model, "optimizer step")
 
         total_loss += loss.item() * y_batch.size(0)
         y_true.extend(y_batch.detach().cpu().numpy().tolist())
@@ -316,6 +419,14 @@ def train_one_epoch(
         "accuracy": accuracy_score(y_true, y_pred),
         "macro_f1": f1_score(y_true, y_pred, average="macro", zero_division=0),
     }
+
+
+def assert_model_finite(model: nn.Module, context: str) -> None:
+    for name, parameter in model.named_parameters():
+        if not torch.isfinite(parameter).all():
+            raise RuntimeError(f"Non-finite parameter detected after {context}: {name}")
+        if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
+            raise RuntimeError(f"Non-finite gradient detected after {context}: {name}")
 
 
 def append_history(path: Path, row: dict[str, Any]) -> None:
@@ -390,6 +501,9 @@ def train_experiment(
     print(f"  model={model_cfg}")
     print(f"  training={training_cfg}")
 
+    print(f"thread: {torch.get_num_threads()}")
+    print(torch.get_num_interop_threads())
+
     for epoch in range(1, epochs + 1):
         train_metrics = train_one_epoch(
             model,
@@ -438,7 +552,22 @@ def train_experiment(
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
-    test_metrics = evaluate(model, test_loader, criterion, device)
+    split_predictions = {
+        "train": predict_loader(model, train_loader, criterion, device),
+        "val": predict_loader(model, val_loader, criterion, device),
+        "test": predict_loader(model, test_loader, criterion, device),
+    }
+    save_per_class_metrics(
+        run_dir / "per_class_metrics.csv",
+        split_predictions,
+        class_names,
+    )
+    save_confusion_matrices(
+        run_dir / "confusion_matrix.csv",
+        split_predictions,
+        class_names,
+    )
+    test_metrics = split_predictions["test"]
 
     metrics = {
         "run_index": run_index,
@@ -470,13 +599,14 @@ def train_experiment(
 def preprocess_dataset(data_cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, list[str]]:
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
 
+    subjects = parse_int_list(data_cfg["subjects"])
     # for dataset in data_cfg["datasets"]:
     #     dataset["filter_bank"] = filter_bank
-    task_types = tuple(data_cfg["task_types"].split(','))
+    task_types = parse_task_types(data_cfg.get("task_types"))
     x, y, class_names = preprocess_spd(
         filter_bank=filter_bank,
         root_dir=str(data_cfg.get("root_dir", "data/MNE-eegbci-data/files/eegmmidb/1.0.0")),
-        subjects=data_cfg.get("subjects"),
+        subjects=subjects,
         channels=data_cfg.get("channels"),
         estimator=str(data_cfg.get("estimator", "lwf")),
         sfreq=float(data_cfg.get("sfreq", 160)),

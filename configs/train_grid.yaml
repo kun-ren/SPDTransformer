@@ -1,15 +1,13 @@
 data:
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
   filter_bank:
-    - [8, 12]
-    - [12, 16]
-    - [16, 20]
-    - [20, 24]
-    - [24, 28]
-    - [28, 32]
+    - [8, 13]
+    - [13, 20]
+    - [20, 30]
   estimator: ["lwf"]
   sfreq: [160]
   eps: [1.0e-6]
+  subjects: 1-10
   channels: "FC5, FC3, FC1, FCz, FC2, FC4, FC6, C5, C3, C1, Cz, C2, C4, C6, CP5, CP3, CP1, CPz, CP2, CP4, CP6"
   segment_duration: [1.0]
   stride_duration: [0.5]
@@ -18,25 +16,26 @@ data:
   task_types: unilateral_fist, both
 
 model:
-  spd_out_dim: [64]
-  ffn_hidden_spd_dim: [32]
-  metric: ["log-euclidean"]
-  depth: [1, 2]
+  spd_out_dim: [21]
+  ffn_hidden_spd_dim: [21]
+  metric: ["learnable-metric", "learnable-affine-log-function"]
+  depth: [2]
   classifier_type: ["pooling"]
-  pooling: ["attention", "mean"]
+  pooling: ["mean", "attention"]
   dropout: [0.1]
   attention_dropout: [0.0]
   debug_attention_dropout: [false]
   debug_attention_shape: [false]
-  learnable_metric_mode: ["low-rank"]
+  debug_tensor_stats: [False]
+  learnable_metric_mode: ["low-rank","kronecker"]
   learnable_metric_rank: [null]
   metric_eps: [1.0e-6]
 
 training:
   seed: [42]
   precision: ["float64"]
-  epochs: [30]
-  batch_size: [16]
+  epochs: [2]
+  batch_size: [32]
   learning_rate: [1.0e-5]
   weight_decay: [1.0e-4]
   gradient_clip_norm: [1.0]

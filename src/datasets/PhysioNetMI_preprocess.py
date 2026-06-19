@@ -37,7 +37,7 @@ def bandpass_filter(X, sfreq=160.0, low_freq=8.0, high_freq=30.0, **kwargs):
 
 
 def pick_raw_channels(raw, channels=None):
-    raw.pick_types(eeg=True, exclude=[])
+    raw.pick("eeg", exclude=[])
     channels = normalize_channels(channels)
     if channels is None:
         return raw
@@ -77,37 +77,19 @@ def filter_raw_band(raw, low_freq, high_freq):
     return raw
 
 
-def filter_classes(X, labels, metadata=None, keep_classes=None):
-    """
-    keep_classes example:
-        ["left_hand", "right_hand"]
-        ["left_hand", "right_hand", "feet", "hands"]
-    """
-    if keep_classes is None:
-        keep_classes = ["left_hand", "right_hand", "feet", "hands"]
-
-    labels = np.asarray(labels).astype(str)
-
-    keep = np.isin(labels, keep_classes)
-
-    X = X[keep]
-    labels = labels[keep]
-
-    if metadata is not None:
-        metadata = metadata.iloc[keep].reset_index(drop=True)
-
-    return X, labels, metadata
-
-
 
 def trace_normalize(covs, eps=1e-10):
+
     """
-    covs: shape (..., n_channels, n_channels)
-    return: each matrix divided by its own trace
+    trace=d
+    :param covs:
+    :param eps:
+    :return:
     """
+    n_channels = covs.shape[-1]
     traces = np.trace(covs, axis1=-2, axis2=-1)
     traces = np.maximum(traces, eps)
-    return covs / traces[..., None, None]
+    return covs * n_channels / traces[..., None, None]
 
 
 def regularize_spd(covs, eps=1e-10):
@@ -471,7 +453,7 @@ def preprocess_spd(
         n_epochs, n_segments, n_channels, segment_samples = temp_x.shape
         print(
             f"Band {filter}: segmented shape {temp_x.shape} "
-            f"(segment_samples={segment_samples})"
+            f"trials: {n_epochs}, n_segments: {n_segments}, n_channels: {n_channels}, in_segment_samples: {segment_samples}"
         )
 
         # 3. Compute covariance matrices using pyriemann
@@ -486,9 +468,6 @@ def preprocess_spd(
         # 5. Make sure matrices are strictly SPD
         cov_x = regularize_spd(cov_x, eps=eps)
 
-        sample_epoch = min(100, cov_x.shape[0] - 1)
-        sample_segment = 0
-        sample_cov = cov_x[sample_epoch, sample_segment]
         frequencies.append(cov_x.astype(np.float32))
 
     if labels is None:

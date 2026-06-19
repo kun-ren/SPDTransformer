@@ -224,8 +224,8 @@ def standardize_and_filter_raw(edf_file: Path, low_freq: float, high_freq: float
     montage = mne.channels.make_standard_montage("standard_1005")
     raw.set_montage(montage, match_case=False, on_missing="ignore", verbose=False)
 
-    # Keep EEG channels only
-    raw.pick_types(eeg=True, exclude=[])
+    # Keep EEG channels only.
+    raw.pick("eeg", exclude=[])
 
     # Use MNE FIR filter for cleaner EEG filtering
     raw.filter(
@@ -241,9 +241,14 @@ def standardize_and_filter_raw(edf_file: Path, low_freq: float, high_freq: float
 
 
 def eeg_picks_with_positions(raw) -> np.ndarray:
-    import mne
-
-    eeg_picks = mne.pick_types(raw.info, eeg=True, exclude=[])
+    eeg_picks = np.asarray(
+        [
+            index
+            for index, channel_type in enumerate(raw.get_channel_types())
+            if channel_type == "eeg"
+        ],
+        dtype=int,
+    )
     valid_picks = []
 
     for pick in eeg_picks:

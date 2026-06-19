@@ -7,6 +7,7 @@ from src.models.BiMap import BiMap
 from src.models.SPDAttention import (
     SingleHeadAttention,
     _safe_eigh,
+    maybe_check_tensor,
     spd_exp,
     spd_log,
 )
@@ -27,11 +28,13 @@ class RiemannianLayerNorm(nn.Module):
             spd_dim: int,
             eps: float = 1e-5,
             affine: bool = True,
+            debug_tensor_stats: bool = False,
     ):
         super().__init__()
         self.spd_dim = spd_dim
         self.eps = eps
         self.affine = affine
+        self.debug_tensor_stats = debug_tensor_stats
 
         if affine:
             # γ: scalar — keeps symmetry under multiplication
@@ -48,7 +51,9 @@ class RiemannianLayerNorm(nn.Module):
                 f"Expected (..., {self.spd_dim}, {self.spd_dim}), got {tuple(x.shape)}"
             )
 
+        maybe_check_tensor(self.debug_tensor_stats, "layer_norm/input", x)
         S = spd_log(x)  # (..., n, n)
+        maybe_check_tensor(self.debug_tensor_stats, "layer_norm/log_input", S)
 
         # ── Per-sample scalar mean ────────────────────────────────────────
         mu = S.diagonal(dim1=-2, dim2=-1).mean(dim=-1)  # (...,)
@@ -60,8 +65,10 @@ class RiemannianLayerNorm(nn.Module):
         # ── Per-sample scalar variance (Frobenius-based) ──────────────────
         # σ² = mean squared entry of Z  =  ‖Z‖²_F / n²
         var = Z.pow(2).mean(dim=(-2, -1), keepdim=True)  # (..., 1, 1)
+        maybe_check_tensor(self.debug_tensor_stats, "layer_norm/variance", var)
 
         Z_hat = Z / (var + self.eps).sqrt()  # (..., n, n)
+        maybe_check_tensor(self.debug_tensor_stats, "layer_norm/normalized_log", Z_hat)
 
         # ── Affine transform ──────────────────────────────────────────────
         if self.affine:
@@ -69,7 +76,9 @@ class RiemannianLayerNorm(nn.Module):
             Z_hat = self.weight * Z_hat + B
 
         # ── Map back to SPD manifold ──────────────────────────────────────
-        return spd_exp(Z_hat)  # (..., n, n)
+        out = spd_exp(Z_hat)  # (..., n, n)
+        maybe_check_tensor(self.debug_tensor_stats, "layer_norm/output", out)
+        return out
 
 
 class SPDAddNorm(nn.Module):
@@ -88,6 +97,7 @@ class SPDAddNorm(nn.Module):
             residual_weight: float = 0.5,
             eps: float = 1e-5,
             affine: bool = True,
+            debug_tensor_stats: bool = False,
     ):
         super().__init__()
         if not 0.0 <= residual_weight <= 1.0:
@@ -98,15 +108,24 @@ class SPDAddNorm(nn.Module):
         self.spd_in_dim = spd_in_dim
         self.spd_out_dim = spd_out_dim
         self.residual_weight = residual_weight
+        self.debug_tensor_stats = debug_tensor_stats
         self.residual_projection = (
             nn.Identity()
             if spd_in_dim == spd_out_dim
             else BiMap(in_dim=spd_in_dim, out_dim=spd_out_dim)
         )
-        self.norm = RiemannianLayerNorm(spd_out_dim, eps=eps, affine=affine)
+        self.norm = RiemannianLayerNorm(
+            spd_out_dim,
+            eps=eps,
+            affine=affine,
+            debug_tensor_stats=debug_tensor_stats,
+        )
 
     def forward(self, residual: torch.Tensor, sublayer_output: torch.Tensor) -> torch.Tensor:
+        maybe_check_tensor(self.debug_tensor_stats, "add_norm/residual_input", residual)
+        maybe_check_tensor(self.debug_tensor_stats, "add_norm/sublayer_output", sublayer_output)
         residual = self.residual_projection(residual)
+        maybe_check_tensor(self.debug_tensor_stats, "add_norm/projected_residual", residual)
 
         expected_shape = (self.spd_out_dim, self.spd_out_dim)
         if residual.shape[-2:] != expected_shape:
@@ -122,8 +141,12 @@ class SPDAddNorm(nn.Module):
 
         alpha = self.residual_weight
         merged_log = (1.0 - alpha) * spd_log(residual) + alpha * spd_log(sublayer_output)
+        maybe_check_tensor(self.debug_tensor_stats, "add_norm/merged_log", merged_log)
         merged = spd_exp(merged_log)
-        return self.norm(merged)
+        maybe_check_tensor(self.debug_tensor_stats, "add_norm/merged_spd", merged)
+        out = self.norm(merged)
+        maybe_check_tensor(self.debug_tensor_stats, "add_norm/output", out)
+        return out
 
 
 class _LegacySPDActivation(nn.Module):
@@ -233,12 +256,14 @@ class SPDFeedForward(nn.Module):
             spd_dim: int,
             hidden_spd_dim: int | None = None,
             eps: float = 1e-4,
+            debug_tensor_stats: bool = False,
     ):
         super().__init__()
         hidden_spd_dim = hidden_spd_dim or spd_dim
 
         self.spd_dim = spd_dim
         self.hidden_spd_dim = hidden_spd_dim
+        self.debug_tensor_stats = debug_tensor_stats
         self.ffn = nn.Sequential(
             BiMap(in_dim=spd_dim, out_dim=hidden_spd_dim),
             SPDActivation(eps=eps),
@@ -246,7 +271,10 @@ class SPDFeedForward(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.ffn(x)
+        maybe_check_tensor(self.debug_tensor_stats, "ffn/input", x)
+        out = self.ffn(x)
+        maybe_check_tensor(self.debug_tensor_stats, "ffn/output", out)
+        return out
 
 
 class SPDEncoder(nn.Module):
@@ -259,6 +287,7 @@ class SPDEncoder(nn.Module):
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
             debug_attention_shape: bool = False,
+            debug_tensor_stats: bool = False,
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
@@ -268,6 +297,7 @@ class SPDEncoder(nn.Module):
         self.spd_in_dim = spd_in_dim
         self.spd_out_dim = spd_out_dim
         self.debug_attention_shape = debug_attention_shape
+        self.debug_tensor_stats = debug_tensor_stats
 
         self.time_attention = SingleHeadAttention(
             spd_in_dim,
@@ -278,10 +308,23 @@ class SPDEncoder(nn.Module):
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
             metric_eps=metric_eps,
+            debug_tensor_stats=debug_tensor_stats,
         )
-        self.time_add_norm1 = SPDAddNorm(spd_in_dim, spd_out_dim)
-        self.time_ffn = SPDFeedForward(spd_out_dim, ffn_hidden_spd_dim)
-        self.time_add_norm2 = SPDAddNorm(spd_out_dim, spd_out_dim)
+        self.time_add_norm1 = SPDAddNorm(
+            spd_in_dim,
+            spd_out_dim,
+            debug_tensor_stats=debug_tensor_stats,
+        )
+        self.time_ffn = SPDFeedForward(
+            spd_out_dim,
+            ffn_hidden_spd_dim,
+            debug_tensor_stats=debug_tensor_stats,
+        )
+        self.time_add_norm2 = SPDAddNorm(
+            spd_out_dim,
+            spd_out_dim,
+            debug_tensor_stats=debug_tensor_stats,
+        )
 
         self.frequency_attention = SingleHeadAttention(
             spd_out_dim,
@@ -292,10 +335,23 @@ class SPDEncoder(nn.Module):
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
             metric_eps=metric_eps,
+            debug_tensor_stats=debug_tensor_stats,
         )
-        self.frequency_add_norm1 = SPDAddNorm(spd_out_dim, spd_out_dim)
-        self.frequency_ffn = SPDFeedForward(spd_out_dim, ffn_hidden_spd_dim)
-        self.frequency_add_norm2 = SPDAddNorm(spd_out_dim, spd_out_dim)
+        self.frequency_add_norm1 = SPDAddNorm(
+            spd_out_dim,
+            spd_out_dim,
+            debug_tensor_stats=debug_tensor_stats,
+        )
+        self.frequency_ffn = SPDFeedForward(
+            spd_out_dim,
+            ffn_hidden_spd_dim,
+            debug_tensor_stats=debug_tensor_stats,
+        )
+        self.frequency_add_norm2 = SPDAddNorm(
+            spd_out_dim,
+            spd_out_dim,
+            debug_tensor_stats=debug_tensor_stats,
+        )
 
         self.attention = self.time_attention
 
@@ -345,6 +401,7 @@ class SPDEncoder(nn.Module):
                 f"got {tuple(x.shape)}."
             )
 
+        maybe_check_tensor(self.debug_tensor_stats, "encoder/input", x)
         self._print_attention_shape("time/input", x)
         time_output = self._apply_attention_along_axis(
             self.time_attention,
@@ -352,8 +409,11 @@ class SPDEncoder(nn.Module):
             axis=1,
         )
         self._print_attention_shape("time/output", time_output)
+        maybe_check_tensor(self.debug_tensor_stats, "encoder/time_attention_output", time_output)
         x = self.time_add_norm1(x, time_output)
+        maybe_check_tensor(self.debug_tensor_stats, "encoder/after_time_add_norm1", x)
         x = self.time_add_norm2(x, self.time_ffn(x))
+        maybe_check_tensor(self.debug_tensor_stats, "encoder/after_time_ffn_add_norm", x)
 
         # if (batch, time, frequency_bands, channels, channels)
         if x.ndim == 5:
@@ -364,9 +424,13 @@ class SPDEncoder(nn.Module):
                 axis=2,
             )
             self._print_attention_shape("frequency/output", frequency_output)
+            maybe_check_tensor(self.debug_tensor_stats, "encoder/frequency_attention_output", frequency_output)
             x = self.frequency_add_norm1(x, frequency_output)
+            maybe_check_tensor(self.debug_tensor_stats, "encoder/after_frequency_add_norm1", x)
             x = self.frequency_add_norm2(x, self.frequency_ffn(x))
+            maybe_check_tensor(self.debug_tensor_stats, "encoder/after_frequency_ffn_add_norm", x)
 
+        maybe_check_tensor(self.debug_tensor_stats, "encoder/output", x)
         return x
 
     def _print_attention_shape(self, name: str, x: torch.Tensor) -> None:
@@ -387,6 +451,7 @@ class SPDTransformer(nn.Module):
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
             debug_attention_shape: bool = False,
+            debug_tensor_stats: bool = False,
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
@@ -398,6 +463,7 @@ class SPDTransformer(nn.Module):
         self.spd_in_dim = spd_in_dim
         self.spd_out_dim = spd_out_dim
         self.depth = depth
+        self.debug_tensor_stats = debug_tensor_stats
 
         self.layers = nn.ModuleList([SPDEncoder(
                 spd_in_dim=spd_in_dim,
@@ -407,14 +473,27 @@ class SPDTransformer(nn.Module):
                 attention_dropout=attention_dropout,
                 debug_attention_dropout=debug_attention_dropout,
                 debug_attention_shape=debug_attention_shape,
+                debug_tensor_stats=debug_tensor_stats,
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
                 metric_eps=metric_eps,
             ) for _ in range(depth)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        for layer in self.layers:
+        maybe_check_tensor(self.debug_tensor_stats, "transformer/input", x)
+        for layer_index, layer in enumerate(self.layers):
+            maybe_check_tensor(
+                self.debug_tensor_stats,
+                f"transformer/layer_{layer_index}_input",
+                x,
+            )
             x = layer(x)
+            maybe_check_tensor(
+                self.debug_tensor_stats,
+                f"transformer/layer_{layer_index}_output",
+                x,
+            )
+        maybe_check_tensor(self.debug_tensor_stats, "transformer/output", x)
         return x
 
 
@@ -467,6 +546,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
             debug_attention_shape: bool = False,
+            debug_tensor_stats: bool = False,
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
@@ -480,6 +560,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
         self.spd_out_dim = spd_out_dim
         self.num_classes = num_classes
         self.pooling = pooling
+        self.debug_tensor_stats = debug_tensor_stats
         self.feature_dim = spd_out_dim * (spd_out_dim + 1) // 2
 
         self.encoder = SPDTransformer(
@@ -491,6 +572,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             attention_dropout=attention_dropout,
             debug_attention_dropout=debug_attention_dropout,
             debug_attention_shape=debug_attention_shape,
+            debug_tensor_stats=debug_tensor_stats,
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
             metric_eps=metric_eps,
@@ -511,15 +593,21 @@ class SPDPoolingClassifier(SPDClassifierBase):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        maybe_check_tensor(self.debug_tensor_stats, "pooling_classifier/input", x)
         x = self.encoder(x)
+        maybe_check_tensor(self.debug_tensor_stats, "pooling_classifier/encoded", x)
 
         if self.pooling == "mean":
             pooled_log = self._mean_pool(x)
         else:
             pooled_log = self._attention_pool(x)
+        maybe_check_tensor(self.debug_tensor_stats, "pooling_classifier/pooled_log", pooled_log)
 
         features = self.upper_triangular_vectorize(pooled_log)
-        return self.classifier(features)
+        maybe_check_tensor(self.debug_tensor_stats, "pooling_classifier/features", features)
+        logits = self.classifier(features)
+        maybe_check_tensor(self.debug_tensor_stats, "pooling_classifier/logits", logits)
+        return logits
 
     def _mean_pool(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -527,6 +615,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
         :return torch.Tensor: (batch, channels, channels)
         """
         log_x = spd_log(x)
+        maybe_check_tensor(self.debug_tensor_stats, "mean_pool/log_x", log_x)
         token_dims = tuple(range(1, log_x.ndim - 2))
         return log_x.mean(dim=token_dims)
 
@@ -539,12 +628,17 @@ class SPDPoolingClassifier(SPDClassifierBase):
         batch_size = x.shape[0]
         spd_dim = x.shape[-1]
         log_x = spd_log(x)
+        maybe_check_tensor(self.debug_tensor_stats, "attention_pool/log_x", log_x)
         # log_tokens = (batch, tim x frequency_bands, channels, channels)
         log_tokens = log_x.reshape(batch_size, -1, spd_dim, spd_dim)
+        maybe_check_tensor(self.debug_tensor_stats, "attention_pool/log_tokens", log_tokens)
         token_features = self.upper_triangular_vectorize(log_tokens)
+        maybe_check_tensor(self.debug_tensor_stats, "attention_pool/token_features", token_features)
 
         scores = self.pool_score(token_features).squeeze(-1)
+        maybe_check_tensor(self.debug_tensor_stats, "attention_pool/scores", scores)
         weights = torch.softmax(scores, dim=-1)
+        maybe_check_tensor(self.debug_tensor_stats, "attention_pool/weights", weights)
         return torch.einsum("bt,btmn->bmn", weights, log_tokens)
 
 
@@ -569,6 +663,7 @@ class SPDTaskTagClassifier(SPDClassifierBase):
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
             debug_attention_shape: bool = False,
+            debug_tensor_stats: bool = False,
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
@@ -577,9 +672,11 @@ class SPDTaskTagClassifier(SPDClassifierBase):
         self.spd_in_dim = spd_in_dim
         self.spd_out_dim = spd_out_dim
         self.num_classes = num_classes
+        self.debug_tensor_stats = debug_tensor_stats
         self.feature_dim = spd_out_dim * (spd_out_dim + 1) // 2
 
-        self.task_log_token = nn.Parameter(torch.zeros(spd_in_dim, spd_in_dim))
+        task_log_init = torch.diag(torch.linspace(-1e-3, 1e-3, spd_in_dim))
+        self.task_log_token = nn.Parameter(task_log_init)
         self.encoder = SPDTransformer(
             spd_in_dim=spd_in_dim,
             spd_out_dim=spd_out_dim,
@@ -589,6 +686,7 @@ class SPDTaskTagClassifier(SPDClassifierBase):
             attention_dropout=attention_dropout,
             debug_attention_dropout=debug_attention_dropout,
             debug_attention_shape=debug_attention_shape,
+            debug_tensor_stats=debug_tensor_stats,
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
             metric_eps=metric_eps,
@@ -600,11 +698,18 @@ class SPDTaskTagClassifier(SPDClassifierBase):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/input", x)
         x = self._prepend_task_token(x)
+        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/with_task_token", x)
         x = self.encoder(x)
+        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/encoded", x)
         task_log = self._extract_task_log_feature(x)
+        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/task_log", task_log)
         features = self.upper_triangular_vectorize(task_log)
-        return self.classifier(features)
+        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/features", features)
+        logits = self.classifier(features)
+        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/logits", logits)
+        return logits
 
     def _prepend_task_token(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -619,8 +724,17 @@ class SPDTaskTagClassifier(SPDClassifierBase):
                 f"got {tuple(x.shape)}."
             )
 
-        task_log = 0.5 * (self.task_log_token + self.task_log_token.transpose(-1, -2))
-        task_token = spd_exp(task_log).to(device=x.device, dtype=x.dtype)
+        task_log = 0.5 * (self.task_log_token + self.task_log_token.transpose(-1, -2)) # sym
+        task_log = task_log.to(device=x.device, dtype=x.dtype)
+        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/task_log_parameter", task_log)
+
+        # Use matrix_exp for this learnable log token instead of the spectral
+        # spd_exp. The zero-initialized token has repeated eigenvalues, and
+        # backpropagating through eigh at repeated eigenvalues can produce NaNs.
+        task_token = torch.matrix_exp(task_log)  # Identity  matrix I
+        eye = torch.eye(self.spd_in_dim, device=x.device, dtype=x.dtype)
+        task_token = 0.5 * (task_token + task_token.transpose(-1, -2)) + 1e-5 * eye # sym
+        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/task_spd_token", task_token)
 
         if x.ndim == 4:
             batch_size = x.shape[0]
@@ -665,11 +779,13 @@ class SPDTransformerClassifier(nn.Module):
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
             debug_attention_shape: bool = False,
+            debug_tensor_stats: bool = False,
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
     ):
         super().__init__()
+        self.debug_tensor_stats = debug_tensor_stats
         if pooling == "task":
             classifier_type = "task"
             pooling = "attention"
@@ -694,11 +810,13 @@ class SPDTransformerClassifier(nn.Module):
                 attention_dropout=attention_dropout,
                 debug_attention_dropout=debug_attention_dropout,
                 debug_attention_shape=debug_attention_shape,
+                debug_tensor_stats=debug_tensor_stats,
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
                 metric_eps=metric_eps,
             )
         else:
+            print("initializing SPDTaskTagClassifier")
             self.model = SPDTaskTagClassifier(
                 spd_in_dim=spd_in_dim,
                 spd_out_dim=spd_out_dim,
@@ -710,10 +828,15 @@ class SPDTransformerClassifier(nn.Module):
                 attention_dropout=attention_dropout,
                 debug_attention_dropout=debug_attention_dropout,
                 debug_attention_shape=debug_attention_shape,
+                debug_tensor_stats=debug_tensor_stats,
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
                 metric_eps=metric_eps,
             )
+            print("SPDTaskTagClassifier built")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x)
+        maybe_check_tensor(self.debug_tensor_stats, "classifier/input", x)
+        logits = self.model(x)
+        maybe_check_tensor(self.debug_tensor_stats, "classifier/output", logits)
+        return logits

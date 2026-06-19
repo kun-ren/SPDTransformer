@@ -104,6 +104,27 @@ def stable_attention_softmax(
     return attention
 
 
+def check_tensor(name, t):
+    print(f"\n{name}")
+    print("shape:", t.shape)
+    print("dtype:", t.dtype)
+    print("device:", t.device)
+
+    if torch.is_floating_point(t):
+        print("min:", t.min().item())
+        print("max:", t.max().item())
+        print("mean:", t.mean().item())
+        print("std:", t.std().item())
+
+    print("has_nan:", torch.isnan(t).any().item() if torch.is_floating_point(t) else False)
+    print("has_inf:", torch.isinf(t).any().item() if torch.is_floating_point(t) else False)
+
+
+def maybe_check_tensor(enabled: bool, name: str, t: torch.Tensor) -> None:
+    if enabled:
+        check_tensor(name, t)
+
+
 class PositionBias(nn.Module):
     """
     Learnable scalar position bias for attention score
@@ -140,7 +161,8 @@ class SingleHeadAttention(nn.Module):
         learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
         learnable_metric_rank: int | None = None,
         metric_eps: float = 1e-6,
-        use_position: bool = False
+        use_position: bool = False,
+        debug_tensor_stats: bool = False,
     ):
         super().__init__()
         self.spd_in_dim = spd_in_dim
@@ -150,6 +172,7 @@ class SingleHeadAttention(nn.Module):
         self.metric_eps = metric_eps
         self.attention_dropout = nn.Dropout(attention_dropout)
         self.debug_attention_dropout = debug_attention_dropout
+        self.debug_tensor_stats = debug_tensor_stats
         self.affine_log_eps = metric_eps
         self.use_position = use_position
 
@@ -201,23 +224,34 @@ class SingleHeadAttention(nn.Module):
         self.position_bias = PositionBias(max_position=128) if self.use_position else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        maybe_check_tensor(self.debug_tensor_stats, "attention/input", x)
         q = self.query(x)
+        maybe_check_tensor(self.debug_tensor_stats, "attention/query", q)
         k = self.key(x)
+        maybe_check_tensor(self.debug_tensor_stats, "attention/key", k)
         v = self.value(x)
+        maybe_check_tensor(self.debug_tensor_stats, "attention/value", v)
 
         log_v = spd_log(v)
+        maybe_check_tensor(self.debug_tensor_stats, "attention/log_value", log_v)
         dis = self.learnableRiemannianDistance(q, k)
+        maybe_check_tensor(self.debug_tensor_stats, "attention/distance", dis)
         score = -dis
         if self.position_bias is not None:
             score += self.position_bias(dis.shape[-1])
+        maybe_check_tensor(self.debug_tensor_stats, "attention/score", score)
         attention = stable_attention_softmax(score, dim=-1)
+        maybe_check_tensor(self.debug_tensor_stats, "attention/softmax", attention)
         attention_before_dropout = attention
         attention = self.attention_dropout(attention)
+        maybe_check_tensor(self.debug_tensor_stats, "attention/after_dropout", attention)
         self._print_attention_dropout_debug(attention_before_dropout, attention)
 
         weighted_log_v = torch.einsum('...ij,...jmn->...imn', attention, log_v)
+        maybe_check_tensor(self.debug_tensor_stats, "attention/weighted_log_value", weighted_log_v)
 
         new_v = spd_exp(weighted_log_v)
+        maybe_check_tensor(self.debug_tensor_stats, "attention/output", new_v)
         return new_v
 
     def _print_attention_dropout_debug(
@@ -254,15 +288,20 @@ class SingleHeadAttention(nn.Module):
 
         if self.metric == MetricType.LogEuclidean:
             log_q = spd_log(q)
+            maybe_check_tensor(self.debug_tensor_stats, "distance/log_query", log_q)
             log_k = spd_log(k)
+            maybe_check_tensor(self.debug_tensor_stats, "distance/log_key", log_k)
 
             if log_q.ndim == 2 and log_k.ndim == 2:  # condition: only a metrix
                 diff = log_q - log_k
             else:  # pairwise qk score
                 diff = log_q.unsqueeze(-3) - log_k.unsqueeze(-4)
                 # diff [B, N_q, N_k, D, D]
+            maybe_check_tensor(self.debug_tensor_stats, "distance/log_diff", diff)
 
-            return torch.linalg.matrix_norm(diff, ord='fro', dim=(-2, -1))
+            distance = torch.linalg.matrix_norm(diff, ord='fro', dim=(-2, -1))
+            maybe_check_tensor(self.debug_tensor_stats, "distance/frobenius", distance)
+            return distance
             # [B, N_q, N_k]
 
         # if self.metric == MetricType.MLPLogFunction:
