@@ -398,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         subjects=args.subjects,
         imaged=args.imaged,
         executed=args.executed,
+        reject_threshold_uv=None,
     )
     print(f"Dataset X shape: {dataset['X'].shape}")
     print(f"Tasks: {sorted(set(dataset['y'].tolist()))}")

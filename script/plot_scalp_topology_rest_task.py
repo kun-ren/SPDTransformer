@@ -1,12 +1,9 @@
 """Plot task-related scalp topomaps for motor imagery EEG.
 
 This script generates one clean publication-style topomap per motor imagery class.
-Instead of plotting absolute rest/task power separately, it plots task-related
-ERD/ERS relative to rest:
+It plots task-related ERD/ERS relative to a fixed pre-task rest baseline:
 
     ERD/ERS (%) = (P_task - P_rest) / P_rest * 100
-
-This better reveals which electrodes are most related to each task.
 
 For each class:
     - all electrode positions are shown
@@ -18,8 +15,8 @@ Additional explanations are written separately to:
     - top_electrodes.csv
     - captions.txt
 
-Each ERD/ERS map is computed from two windows around task onset:
-    - rest: -3.5 to 0 s
+Each topomap is computed from a fixed pre-task rest window and a task window:
+    - rest: -2 to 0 s
     - task: 0 to 3.5 s
 
 The default frequency band is 8-30 Hz.
@@ -37,7 +34,6 @@ import argparse
 import csv
 import json
 import os
-import re
 import sys
 import tempfile
 from collections import defaultdict
@@ -61,7 +57,7 @@ DEFAULT_ROOT_DIR = PROJECT_ROOT / "data" / "MNE-eegbci-data" / "files" / "eegmmi
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "experiments" / "figures" / "task_related_topomap"
 
 TASK_ORDER = ("left_hand", "right_hand", "hands", "feet")
-RUN_IDS = {4, 6, 8, 10, 12, 14}
+REST_WINDOW = (-2.0, 0.0)
 
 
 @dataclass
@@ -101,48 +97,14 @@ def parse_classes(raw: str) -> list[str]:
     return classes
 
 
-def map_event_to_label(run_id: int, event_name: str) -> str | None:
-    # EEGBCI MI runs
-    # Runs 4,8,12 : T1 -> left hand, T2 -> right hand
-    # Runs 6,10,14: T1 -> both hands, T2 -> both feet
-    if run_id in {4, 8, 12}:
-        if event_name == "T1":
-            return "left_hand"
-        if event_name == "T2":
-            return "right_hand"
-    if run_id in {6, 10, 14}:
-        if event_name == "T1":
-            return "hands"
-        if event_name == "T2":
-            return "feet"
-    return None
-
-
-def subject_dir_name(subject_id: int) -> str:
-    return f"S{subject_id:03d}"
-
-
-def discover_edf_files(root_dir: Path, subjects: list[int] | None) -> list[Path]:
-    if subjects is None:
-        subject_dirs = sorted(root_dir.glob("S*"))
-    else:
-        subject_dirs = [root_dir / subject_dir_name(subject) for subject in subjects]
-
-    edf_files = []
-    for subject_dir in subject_dirs:
-        if not subject_dir.exists():
-            print(f"[WARN] Missing subject directory: {subject_dir}")
-            continue
-        for edf_file in sorted(subject_dir.glob("*.edf")):
-            match = re.search(r"R(\d+)", edf_file.name)
-            if match is None:
-                continue
-            if int(match.group(1)) in RUN_IDS:
-                edf_files.append(edf_file)
-
-    if not edf_files:
-        raise FileNotFoundError(f"No motor-imagery EDF files found under {root_dir}")
-    return edf_files
+def task_types_for_classes(classes: list[str]) -> tuple[str, ...]:
+    task_types = []
+    class_set = set(classes)
+    if class_set & {"left_hand", "right_hand"}:
+        task_types.append("unilateral_fist")
+    if class_set & {"hands", "feet"}:
+        task_types.append("both")
+    return tuple(task_types)
 
 
 def sensorimotor_roi_indices(ch_names: list[str]) -> np.ndarray:
@@ -181,12 +143,10 @@ def choose_top_electrodes(
 
     mode:
         "most_negative":
-            Select strongest ERD electrodes.
-            This is usually preferred for motor imagery.
+            Select electrodes with strongest ERD.
 
         "absolute":
-            Select electrodes with strongest absolute modulation,
-            regardless of ERD or ERS.
+            Select electrodes with strongest absolute task-related modulation.
     """
     if top_k <= 0:
         return np.array([], dtype=int)
@@ -210,10 +170,37 @@ def choose_top_electrodes(
 
     return np.asarray(selected_global, dtype=int)
 
-def standardize_and_filter_raw(edf_file: Path, low_freq: float, high_freq: float):
+def parse_channels(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    channels = [item.strip() for item in raw.split(",") if item.strip()]
+    return channels or None
+
+
+def first_available_edf_file(root_dir: Path, subjects: list[int] | None) -> Path:
+    subject_names = None
+    if subjects is not None:
+        subject_names = {f"S{subject:03d}" for subject in subjects}
+
+    for subject_dir in sorted(root_dir.glob("S*")):
+        if subject_names is not None and subject_dir.name not in subject_names:
+            continue
+        for edf_file in sorted(subject_dir.glob("*.edf")):
+            return edf_file
+    raise FileNotFoundError(f"No EDF file found under {root_dir}")
+
+
+def build_topomap_info(
+    root_dir: Path,
+    subjects: list[int] | None,
+    channels: list[str] | None,
+):
     import mne
 
-    raw = mne.io.read_raw_edf(edf_file, preload=True, verbose=False)
+    from src.datasets.PhysioNetMI_preprocess import pick_raw_channels
+
+    edf_file = first_available_edf_file(root_dir, subjects)
+    raw = mne.io.read_raw_edf(edf_file, preload=False, verbose=False)
 
     # Standardize EEGBCI channel names
     try:
@@ -223,69 +210,27 @@ def standardize_and_filter_raw(edf_file: Path, low_freq: float, high_freq: float
 
     montage = mne.channels.make_standard_montage("standard_1005")
     raw.set_montage(montage, match_case=False, on_missing="ignore", verbose=False)
+    raw = pick_raw_channels(raw, channels=channels)
 
-    # Keep EEG channels only.
-    raw.pick("eeg", exclude=[])
-
-    # Use MNE FIR filter for cleaner EEG filtering
-    raw.filter(
-        l_freq=low_freq,
-        h_freq=high_freq,
-        method="fir",
-        phase="zero",
-        fir_design="firwin",
-        pad="reflect_limited",
-        verbose=False,
-    )
-    return raw
-
-
-def eeg_picks_with_positions(raw) -> np.ndarray:
-    eeg_picks = np.asarray(
-        [
-            index
-            for index, channel_type in enumerate(raw.get_channel_types())
-            if channel_type == "eeg"
-        ],
-        dtype=int,
-    )
-    valid_picks = []
-
-    for pick in eeg_picks:
-        loc = raw.info["chs"][pick]["loc"][:3]
+    valid_indices = []
+    for idx, channel in enumerate(raw.info["chs"]):
+        loc = channel["loc"][:3]
         if np.isfinite(loc).all() and not np.allclose(loc, 0.0):
-            valid_picks.append(pick)
+            valid_indices.append(idx)
 
-    if not valid_picks:
+    if not valid_indices:
         raise RuntimeError("No EEG channels with valid montage positions were found.")
 
-    return np.asarray(valid_picks, dtype=int)
+    if len(valid_indices) != len(raw.ch_names):
+        missing = sorted(
+            set(raw.ch_names) - {raw.ch_names[index] for index in valid_indices}
+        )
+        raise RuntimeError(
+            "Some loaded EEG channels do not have valid montage positions: "
+            f"{', '.join(missing)}. Use --channels to restrict the topomap channels."
+        )
 
-
-def window_power(
-    data: np.ndarray,
-    sfreq: float,
-    onset: float,
-    start_offset: float,
-    end_offset: float,
-    eps: float,
-) -> np.ndarray | None:
-    """Compute channel-wise band power in one time window.
-
-    Parameters
-    ----------
-    data : np.ndarray
-        Shape: (n_channels, n_times)
-    """
-    start = int(round((onset + start_offset) * sfreq))
-    end = int(round((onset + end_offset) * sfreq))
-
-    if start < 0 or end > data.shape[1] or end <= start:
-        return None
-
-    segment = data[:, start:end]
-    power = np.mean(segment * segment, axis=1) + eps
-    return power
+    return raw.info.copy()
 
 
 def collect_class_power(
@@ -294,85 +239,64 @@ def collect_class_power(
     classes: list[str],
     low_freq: float,
     high_freq: float,
-    rest_window: tuple[float, float],
     task_window: tuple[float, float],
+    channels: list[str] | None,
+    reject_threshold_uv: float | None,
     eps: float,
-) -> tuple[dict[str, list[TrialPower]], object]:
-    import mne
+) -> dict[str, list[TrialPower]]:
+    from src.datasets.PhysioNetMI_preprocess import build_dataset
 
+    tmin = min(REST_WINDOW[0], task_window[0])
+    tmax = max(REST_WINDOW[1], task_window[1])
+
+    dataset = build_dataset(
+        root_dir=root_dir,
+        tmin=tmin,
+        tmax=tmax,
+        subjects=subjects,
+        imaged=True,
+        executed=False,
+        task_types=task_types_for_classes(classes),
+        low_freq=low_freq,
+        high_freq=high_freq,
+        channels=channels,
+        reject_threshold_uv=reject_threshold_uv,
+    )
+
+    X = dataset["X"]
+    labels = dataset["y"]
+    sfreq = 160.0
     class_power: dict[str, list[TrialPower]] = defaultdict(list)
-    reference_info = None
-    reference_channel_names = None
 
-    for edf_file in discover_edf_files(root_dir, subjects):
-        run_match = re.search(r"R(\d+)", edf_file.name)
-        if run_match is None:
+    rest_start = int(round((REST_WINDOW[0] - tmin) * sfreq))
+    rest_end = int(round((REST_WINDOW[1] - tmin) * sfreq))
+    task_start = int(round((task_window[0] - tmin) * sfreq))
+    task_end = int(round((task_window[1] - tmin) * sfreq))
+
+    if rest_start < 0 or rest_end > X.shape[-1] or rest_end <= rest_start:
+        raise ValueError(f"Invalid rest window {REST_WINDOW} for epoch [{tmin}, {tmax}].")
+    if task_start < 0 or task_end > X.shape[-1] or task_end <= task_start:
+        raise ValueError(f"Invalid task window {task_window} for epoch [{tmin}, {tmax}].")
+
+    for epoch, label in zip(X, labels):
+        if label not in classes:
             continue
-        run_id = int(run_match.group(1))
+        rest = np.mean(epoch[:, rest_start:rest_end] ** 2, axis=1) + eps
+        task = np.mean(epoch[:, task_start:task_end] ** 2, axis=1) + eps
+        class_power[str(label)].append(TrialPower(rest=rest, task=task))
 
-        raw = standardize_and_filter_raw(edf_file, low_freq, high_freq)
-        picks = eeg_picks_with_positions(raw)
-        picked_info = mne.pick_info(raw.info.copy(), picks, copy=True)
-
-        channel_names = tuple(picked_info["ch_names"])
-        if reference_info is None:
-            reference_info = picked_info
-            reference_channel_names = channel_names
-        else:
-            if channel_names != reference_channel_names:
-                raise RuntimeError(
-                    "The valid EEG channel set changed across files. "
-                    "Please check channel names and montage assignment."
-                )
-
-        data = raw.get_data(picks=picks)
-        sfreq = float(raw.info["sfreq"])
-
-        for onset, desc in zip(raw.annotations.onset, raw.annotations.description):
-            label = map_event_to_label(run_id, desc)
-            if label is None or label not in classes:
-                continue
-
-            rest = window_power(
-                data=data,
-                sfreq=sfreq,
-                onset=float(onset),
-                start_offset=rest_window[0],
-                end_offset=rest_window[1],
-                eps=eps,
-            )
-            task = window_power(
-                data=data,
-                sfreq=sfreq,
-                onset=float(onset),
-                start_offset=task_window[0],
-                end_offset=task_window[1],
-                eps=eps,
-            )
-
-            if rest is None or task is None:
-                continue
-
-            class_power[label].append(TrialPower(rest=rest, task=task))
-
-    if reference_info is None:
-        raise RuntimeError("No valid EEG data was collected.")
-
-    return class_power, reference_info
+    return class_power
 
 
 def compute_class_statistics(trials: list[TrialPower]) -> dict[str, np.ndarray]:
-    """Compute class-wise mean power and task-related effect."""
-    rest_power = np.stack([trial.rest for trial in trials], axis=0)   # (n_trials, n_channels)
+    """Compute class-wise mean power and task-related ERD/ERS."""
+    rest_power = np.stack([trial.rest for trial in trials], axis=0)
     task_power = np.stack([trial.task for trial in trials], axis=0)
-
     mean_rest = rest_power.mean(axis=0)
     mean_task = task_power.mean(axis=0)
-
     rest_db = 10.0 * np.log10(mean_rest)
     task_db = 10.0 * np.log10(mean_task)
     diff_db = task_db - rest_db
-
     erd_percent = (mean_task - mean_rest) / mean_rest * 100.0
 
     return {
@@ -514,7 +438,6 @@ def write_captions_txt(
     class_results: dict[str, dict],
     low_freq: float,
     high_freq: float,
-    rest_window: tuple[float, float],
     task_window: tuple[float, float],
 ) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -527,12 +450,12 @@ def write_captions_txt(
         f"All figures show task-related scalp topography in the {low_freq:g}-{high_freq:g} Hz band."
     )
     lines.append(
-        f"Rest window: [{rest_window[0]:g}, {rest_window[1]:g}] s relative to task onset."
+        f"Rest window: [{REST_WINDOW[0]:g}, {REST_WINDOW[1]:g}] s relative to task onset."
     )
     lines.append(
         f"Task window: [{task_window[0]:g}, {task_window[1]:g}] s relative to task onset."
     )
-    lines.append("Metric: ERD/ERS (%) = (P_task - P_rest) / P_rest × 100.")
+    lines.append("Metric: ERD/ERS (%) = (P_task - P_rest) / P_rest * 100.")
     lines.append("Negative values indicate event-related desynchronization (ERD).")
     lines.append("Positive values indicate event-related synchronization (ERS).")
     lines.append("All electrode locations are shown as black dots.")
@@ -584,15 +507,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--low-freq", type=float, default=8.0)
     parser.add_argument("--high-freq", type=float, default=30.0)
-
     parser.add_argument(
-        "--rest-window",
-        type=float,
-        nargs=2,
-        default=(-3.5, 0.0),
-        metavar=("START", "END"),
-        help="Rest window in seconds relative to task onset. Default: -3.5 0",
+        "--channels",
+        type=parse_channels,
+        default=None,
+        help=(
+            "Optional comma-separated EEG channels. Default: all EEG channels "
+            "provided by the shared PhysioNetMI preprocessing interface."
+        ),
     )
+    parser.add_argument(
+        "--reject-threshold-uv",
+        type=float,
+        default=None,
+        help=(
+            "Optional epoch-level peak-to-peak rejection threshold in microvolts. "
+            "This is passed through to build_dataset."
+        ),
+    )
+
     parser.add_argument(
         "--task-window",
         type=float,
@@ -626,20 +559,30 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if not args.root_dir.is_absolute():
+        args.root_dir = PROJECT_ROOT / args.root_dir
+    if not args.output_dir.is_absolute():
+        args.output_dir = PROJECT_ROOT / args.output_dir
+
     output_dir = args.output_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    rest_window = (float(args.rest_window[0]), float(args.rest_window[1]))
     task_window = (float(args.task_window[0]), float(args.task_window[1]))
 
-    class_power, info = collect_class_power(
+    class_power = collect_class_power(
         root_dir=args.root_dir,
         subjects=args.subjects,
         classes=args.classes,
         low_freq=args.low_freq,
         high_freq=args.high_freq,
-        rest_window=rest_window,
         task_window=task_window,
+        channels=args.channels,
+        reject_threshold_uv=args.reject_threshold_uv,
         eps=args.eps,
+    )
+    info = build_topomap_info(
+        root_dir=args.root_dir,
+        subjects=args.subjects,
+        channels=args.channels,
     )
 
     class_results: dict[str, dict] = {}
@@ -652,6 +595,12 @@ def main() -> int:
             continue
 
         stats = compute_class_statistics(trials)
+        if len(stats["erd_percent"]) != len(info["ch_names"]):
+            raise RuntimeError(
+                "Topomap metadata channel count does not match loaded epochs: "
+                f"{len(info['ch_names'])} info channels vs "
+                f"{len(stats['erd_percent'])} epoch channels."
+            )
         top_idx = choose_top_electrodes(
             values=stats["erd_percent"],
             ch_names=info["ch_names"],
@@ -677,9 +626,11 @@ def main() -> int:
     if not class_results:
         raise RuntimeError("No figures were generated because no valid trials were found.")
 
-    # Use a global symmetric color scale across classes for fair comparison
+    # Use a global symmetric color scale across classes for fair comparison.
     all_values = np.concatenate(all_effect_values)
     vmax = float(np.percentile(np.abs(all_values), 98))
+    if np.isclose(vmax, 0.0):
+        vmax = 1.0
     vlim = (-vmax, vmax)
 
     summary = {
@@ -687,8 +638,10 @@ def main() -> int:
         "subjects": args.subjects if args.subjects is not None else "all",
         "classes": args.classes,
         "frequency_band_hz": [args.low_freq, args.high_freq],
-        "rest_window_seconds": list(rest_window),
+        "rest_window_seconds": list(REST_WINDOW),
         "task_window_seconds": list(task_window),
+        "channels": args.channels if args.channels is not None else "all",
+        "reject_threshold_uv": args.reject_threshold_uv,
         "selection_mode": args.selection_mode,
         "top_k": args.top_k,
         "colorbar": "ERD/ERS (%)",
@@ -736,7 +689,6 @@ def main() -> int:
         class_results=class_results,
         low_freq=args.low_freq,
         high_freq=args.high_freq,
-        rest_window=rest_window,
         task_window=task_window,
     )
 

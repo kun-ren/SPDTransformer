@@ -19,6 +19,7 @@ os.environ.setdefault("_MNE_FAKE_HOME_DIR", str(MNE_HOME))
 from src.datasets.PhysioNetMI_preprocess import (
     build_dataset,
     encode_labels,
+    normalize_baseline_correction_mode,
     preprocess_spd,
     segment_epochs,
 )
@@ -175,6 +176,11 @@ def load_spd_like_train(
         imaged=bool(data_cfg.get("imaged", True)),
         executed=bool(data_cfg.get("executed", False)),
         task_types=parse_task_types(data_cfg.get("task_types")),
+        reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
+        baseline_correction=data_cfg.get("baseline_correction"),
+        baseline_window=data_cfg.get("baseline_window"),
+        epoch_tmin=float(data_cfg.get("epoch_tmin", -2.0)),
+        epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
     )
     if not np.isfinite(x_spd).all():
         raise ValueError("preprocess_spd returned NaN or Inf values.")
@@ -194,6 +200,11 @@ def load_segmented_epochs_like_train(
     task_types = parse_task_types(data_cfg.get("task_types"))
     imaged = bool(data_cfg.get("imaged", True))
     executed = bool(data_cfg.get("executed", False))
+    if normalize_baseline_correction_mode(data_cfg.get("baseline_correction")) is not None:
+        print(
+            "Ignoring SPD covariance baseline_correction for raw segmented "
+            "epoch baseline. It is only applied in preprocess_spd()."
+        )
 
     bands = []
     labels = None
@@ -201,8 +212,8 @@ def load_segmented_epochs_like_train(
     for low_freq, high_freq in filter_bank:
         dataset = build_dataset(
             root_dir,
-            tmin=-2.0,
-            tmax=4.0,
+            tmin=float(data_cfg.get("epoch_tmin", -2.0)),
+            tmax=float(data_cfg.get("epoch_tmax", 4.0)),
             subjects=subjects,
             imaged=imaged,
             executed=executed,
@@ -210,6 +221,7 @@ def load_segmented_epochs_like_train(
             low_freq=low_freq,
             high_freq=high_freq,
             channels=channels,
+            reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
         )
         x_band = dataset["X"]
         if labels is None:

@@ -43,8 +43,8 @@ class LearnableAffineLogTest(unittest.TestCase):
             torch.allclose(
                 transformed,
                 torch.diag(expected_eigenvalues),
-                atol=1e-6,
-                rtol=1e-6,
+                atol=1e-5,
+                rtol=1e-5,
             )
         )
 

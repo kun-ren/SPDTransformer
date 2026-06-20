@@ -616,6 +616,11 @@ def preprocess_dataset(data_cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray
         imaged=data_cfg.get("imaged", True),
         executed=data_cfg.get("executed", False),
         task_types=task_types,
+        reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
+        baseline_correction=data_cfg.get("baseline_correction"),
+        baseline_window=data_cfg.get("baseline_window"),
+        epoch_tmin=float(data_cfg.get("epoch_tmin", -2.0)),
+        epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
     )
     if not np.isfinite(x).all():
         bad_count = int((~np.isfinite(x)).sum())
