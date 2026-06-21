@@ -28,6 +28,7 @@ class SPDAddNorm(nn.Module):
             sequence_length: int,
             tau: float = 1.0,
             eps: float = 1e-5,
+            affine: bool = True,
     ):
         super().__init__()
 
@@ -41,7 +42,7 @@ class SPDAddNorm(nn.Module):
             sequence_length=sequence_length,
             tau=tau,
             eps=eps,
-            affine=True,
+            affine=affine,
             preserve_log_mean=False,
         )
 
@@ -204,6 +205,8 @@ class SPDEncoder(nn.Module):
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
+            use_position_bias: bool = True,
+            layer_norm_affine: bool = True,
     ):
         super().__init__()
         self.metric = metric
@@ -221,6 +224,8 @@ class SPDEncoder(nn.Module):
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
             metric_eps=metric_eps,
+            use_position=use_position_bias,
+            max_position=time_sequence_length,
             debug_tensor_stats=debug_tensor_stats,
         )
         self.time_add_norm1 = SPDAddNorm(
@@ -228,6 +233,7 @@ class SPDEncoder(nn.Module):
             sequence_length=time_sequence_length,
             tau=tau,
             eps=metric_eps,
+            affine=layer_norm_affine,
         )
         self.time_ffn = SPDFeedForward(
             spd_out_dim,
@@ -238,6 +244,7 @@ class SPDEncoder(nn.Module):
             sequence_length=time_sequence_length,
             tau=tau,
             eps=metric_eps,
+            affine=layer_norm_affine,
         )
 
         self.frequency_attention = SingleHeadAttention(
@@ -249,6 +256,8 @@ class SPDEncoder(nn.Module):
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
             metric_eps=metric_eps,
+            use_position=use_position_bias,
+            max_position=frequency_sequence_length,
             debug_tensor_stats=debug_tensor_stats,
         )
         self.frequency_add_norm1 = SPDAddNorm(
@@ -256,6 +265,7 @@ class SPDEncoder(nn.Module):
             sequence_length=frequency_sequence_length,
             tau=tau,
             eps=metric_eps,
+            affine=layer_norm_affine,
 
         )
         self.frequency_ffn = SPDFeedForward(
@@ -267,6 +277,7 @@ class SPDEncoder(nn.Module):
             sequence_length=frequency_sequence_length,
             tau=tau,
             eps=metric_eps,
+            affine=layer_norm_affine,
         )
 
         self.attention = self.time_attention
@@ -366,6 +377,8 @@ class SPDTransformer(nn.Module):
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
+            use_position_bias: bool = True,
+            layer_norm_affine: bool = True,
     ):
         super().__init__()
         if depth < 1:
@@ -391,6 +404,8 @@ class SPDTransformer(nn.Module):
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
                 metric_eps=metric_eps,
+                use_position_bias=use_position_bias,
+                layer_norm_affine=layer_norm_affine,
             ) for _ in range(depth)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -455,6 +470,8 @@ class SPDPoolingClassifier(SPDClassifierBase):
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
+            use_position_bias: bool = True,
+            layer_norm_affine: bool = True,
     ):
         super().__init__()
         if pooling not in {"mean", "attention"}:
@@ -484,6 +501,8 @@ class SPDPoolingClassifier(SPDClassifierBase):
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
             metric_eps=metric_eps,
+            use_position_bias=use_position_bias,
+            layer_norm_affine=layer_norm_affine,
         )
 
         if pooling == "attention":
@@ -578,6 +597,8 @@ class SPDTaskTagClassifier(SPDClassifierBase):
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
+            use_position_bias: bool = True,
+            layer_norm_affine: bool = True,
     ):
         super().__init__()
         self.spd_in_dim = spd_in_dim
@@ -591,7 +612,7 @@ class SPDTaskTagClassifier(SPDClassifierBase):
         self.encoder = SPDTransformer(
             spd_in_dim=spd_in_dim,
             spd_out_dim=spd_out_dim,
-            time_sequence_length=time_sequence_length,
+            time_sequence_length=time_sequence_length + 1,
             frequency_sequence_length=frequency_sequence_length,
             tau=tau,
             depth=depth,
@@ -604,6 +625,8 @@ class SPDTaskTagClassifier(SPDClassifierBase):
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
             metric_eps=metric_eps,
+            use_position_bias=use_position_bias,
+            layer_norm_affine=layer_norm_affine,
         )
         self.classifier = self.build_linear_classifier(
             feature_dim=self.feature_dim,
@@ -699,6 +722,8 @@ class SPDTransformerClassifier(nn.Module):
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
             metric_eps: float = 1e-6,
+            use_position_bias: bool = True,
+            layer_norm_affine: bool = True,
     ):
         super().__init__()
         self.debug_tensor_stats = debug_tensor_stats
@@ -733,6 +758,8 @@ class SPDTransformerClassifier(nn.Module):
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
                 metric_eps=metric_eps,
+                use_position_bias=use_position_bias,
+                layer_norm_affine=layer_norm_affine,
             )
         else:
             print("initializing SPDTaskTagClassifier")
@@ -754,6 +781,8 @@ class SPDTransformerClassifier(nn.Module):
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
                 metric_eps=metric_eps,
+                use_position_bias=use_position_bias,
+                layer_norm_affine=layer_norm_affine,
             )
             print("SPDTaskTagClassifier built")
 

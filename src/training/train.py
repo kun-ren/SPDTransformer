@@ -259,6 +259,8 @@ def build_model(
         learnable_metric_mode=str(model_cfg.get("learnable_metric_mode", "low-rank")),
         learnable_metric_rank=model_cfg.get("learnable_metric_rank"),
         metric_eps=float(model_cfg.get("metric_eps", 1e-6)),
+        use_position_bias=bool(model_cfg.get("use_position_bias", True)),
+        layer_norm_affine=bool(model_cfg.get("layer_norm_affine", True)),
     )
 
 

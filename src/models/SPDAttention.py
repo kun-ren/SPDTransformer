@@ -145,25 +145,39 @@ def maybe_check_tensor(enabled: bool, name: str, t: torch.Tensor) -> None:
 
 class PositionBias(nn.Module):
     """
-    Learnable scalar position bias for attention score
+    Learnable relative-position bias for one attention axis.
 
+    For query position i and key position j, the returned score bias is
+    indexed by the signed relative offset j - i. This keeps the bias tied to
+    relative distance instead of memorizing a separate value for every pair.
     """
 
     def __init__(self, max_position: int) -> None:
         super().__init__()
+        if max_position < 1:
+            raise ValueError(
+                f"max_position must be positive, got {max_position}."
+            )
+
         self.max_position = max_position
-        self.bias = nn.Parameter(torch.zeros(self.max_position, self.max_position))
+        self.relative_bias = nn.Parameter(
+            torch.zeros(2 * self.max_position - 1)
+        )
 
     def forward(self, attention_scope: int) -> torch.Tensor:
-        """
+        if not 1 <= attention_scope <= self.max_position:
+            raise ValueError(
+                "attention_scope must be in "
+                f"[1, {self.max_position}], got {attention_scope}."
+            )
 
-        :param attention_scope: the position values will be clipped in range [0, attention_scope]
-        :return: relative position values matrix
-
-        """
-        self.bias = self.bias.clip(0, attention_scope)
-
-        return self.bias[:attention_scope, :attention_scope]
+        positions = torch.arange(
+            attention_scope,
+            device=self.relative_bias.device,
+        )
+        relative_offset = positions[None, :] - positions[:, None]
+        relative_index = relative_offset + self.max_position - 1
+        return self.relative_bias[relative_index]
 
 class SingleHeadAttention(nn.Module):
 
@@ -180,6 +194,7 @@ class SingleHeadAttention(nn.Module):
         learnable_metric_rank: int | None = None,
         metric_eps: float = 1e-6,
         use_position: bool = False,
+        max_position: int = 128,
         debug_tensor_stats: bool = False,
     ):
         super().__init__()
@@ -239,7 +254,11 @@ class SingleHeadAttention(nn.Module):
             self.left_metric_cholesky = None
             self.right_metric_cholesky = None
 
-        self.position_bias = PositionBias(max_position=128) if self.use_position else None
+        self.position_bias = (
+            PositionBias(max_position=max_position)
+            if self.use_position
+            else None
+        )
 
     def forward(self, x: torch.Tensor) -> Tensor:
 
@@ -257,7 +276,7 @@ class SingleHeadAttention(nn.Module):
         maybe_check_tensor(self.debug_tensor_stats, "attention/distance", dis)
         score = -dis
         if self.position_bias is not None:
-            score += self.position_bias(dis.shape[-1])
+            score = score + self.position_bias(dis.shape[-1])
         maybe_check_tensor(self.debug_tensor_stats, "attention/score", score)
         attention = stable_attention_softmax(score, dim=-1)
         maybe_check_tensor(self.debug_tensor_stats, "attention/softmax", attention)
