@@ -4,81 +4,13 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from src.models.BiMap import BiMap
+from src.models.RiemannianLayerNorm import RiemannianLayerNorm
 from src.models.SPDAttention import (
     SingleHeadAttention,
     _safe_eigh,
     maybe_check_tensor,
-    spd_exp,
     spd_log,
 )
-
-
-class RiemannianLayerNorm(nn.Module):
-    """
-    Per-sample Riemannian Layer Norm for SPD matrices.
-
-    Normalizes in the full Sym(n) tangent space (Log-Euclidean),
-    computing statistics within each sample independently.
-
-    Input/output: (..., spd_dim, spd_dim)
-    """
-
-    def __init__(
-            self,
-            spd_dim: int,
-            eps: float = 1e-5,
-            affine: bool = True,
-            debug_tensor_stats: bool = False,
-    ):
-        super().__init__()
-        self.spd_dim = spd_dim
-        self.eps = eps
-        self.affine = affine
-        self.debug_tensor_stats = debug_tensor_stats
-
-        if affine:
-            # γ: scalar — keeps symmetry under multiplication
-            self.weight = nn.Parameter(torch.ones(()))
-            # β₀: raw parameter, symmetrized on forward pass
-            self.bias = nn.Parameter(torch.zeros(spd_dim, spd_dim))
-        else:
-            self.register_parameter("weight", None)
-            self.register_parameter("bias", None)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[-2:] != (self.spd_dim, self.spd_dim):
-            raise ValueError(
-                f"Expected (..., {self.spd_dim}, {self.spd_dim}), got {tuple(x.shape)}"
-            )
-
-        maybe_check_tensor(self.debug_tensor_stats, "layer_norm/input", x)
-        S = spd_log(x)  # (..., n, n)
-        maybe_check_tensor(self.debug_tensor_stats, "layer_norm/log_input", S)
-
-        # ── Per-sample scalar mean ────────────────────────────────────────
-        mu = S.diagonal(dim1=-2, dim2=-1).mean(dim=-1)  # (...,)
-        mu = mu[..., None, None]  # (..., 1, 1)
-        eye = torch.eye(self.spd_dim, device=x.device, dtype=x.dtype)
-        Z = S - mu * eye
-        # tr(Z) = 0  →  det(exp(Z)) = 1
-
-        # ── Per-sample scalar variance (Frobenius-based) ──────────────────
-        # σ² = mean squared entry of Z  =  ‖Z‖²_F / n²
-        var = Z.pow(2).mean(dim=(-2, -1), keepdim=True)  # (..., 1, 1)
-        maybe_check_tensor(self.debug_tensor_stats, "layer_norm/variance", var)
-
-        Z_hat = Z / (var + self.eps).sqrt()  # (..., n, n)
-        maybe_check_tensor(self.debug_tensor_stats, "layer_norm/normalized_log", Z_hat)
-
-        # ── Affine transform ──────────────────────────────────────────────
-        if self.affine:
-            B = 0.5 * (self.bias + self.bias.transpose(-1, -2))  # symmetrize β
-            Z_hat = self.weight * Z_hat + B
-
-        # ── Map back to SPD manifold ──────────────────────────────────────
-        out = spd_exp(Z_hat)  # (..., n, n)
-        maybe_check_tensor(self.debug_tensor_stats, "layer_norm/output", out)
-        return out
 
 
 class SPDAddNorm(nn.Module):
@@ -93,122 +25,43 @@ class SPDAddNorm(nn.Module):
     def __init__(
             self,
             spd_in_dim: int,
-            spd_out_dim: int,
-            residual_weight: float = 0.5,
+            sequence_length: int,
+            tau: float = 1.0,
             eps: float = 1e-5,
-            affine: bool = True,
-            debug_tensor_stats: bool = False,
     ):
         super().__init__()
-        if not 0.0 <= residual_weight <= 1.0:
-            raise ValueError(
-                f"residual_weight must be in [0, 1], got {residual_weight}."
-            )
 
         self.spd_in_dim = spd_in_dim
-        self.spd_out_dim = spd_out_dim
-        self.residual_weight = residual_weight
-        self.debug_tensor_stats = debug_tensor_stats
-        self.residual_projection = (
-            nn.Identity()
-            if spd_in_dim == spd_out_dim
-            else BiMap(in_dim=spd_in_dim, out_dim=spd_out_dim)
+        self.residual_weight = nn.Parameter(
+            torch.tensor(-2.0)
         )
+
         self.norm = RiemannianLayerNorm(
-            spd_out_dim,
+            spd_dim=spd_in_dim,
+            sequence_length=sequence_length,
+            tau=tau,
             eps=eps,
-            affine=affine,
-            debug_tensor_stats=debug_tensor_stats,
+            affine=True,
+            preserve_log_mean=False,
         )
 
-    def forward(self, residual: torch.Tensor, sublayer_output: torch.Tensor) -> torch.Tensor:
-        maybe_check_tensor(self.debug_tensor_stats, "add_norm/residual_input", residual)
-        maybe_check_tensor(self.debug_tensor_stats, "add_norm/sublayer_output", sublayer_output)
-        residual = self.residual_projection(residual)
-        maybe_check_tensor(self.debug_tensor_stats, "add_norm/projected_residual", residual)
+    def forward(self, residual_log: torch.Tensor, sublayer_output_log: torch.Tensor) -> torch.Tensor:
 
-        expected_shape = (self.spd_out_dim, self.spd_out_dim)
-        if residual.shape[-2:] != expected_shape:
-            raise ValueError(
-                f"Expected residual shape (..., {self.spd_out_dim}, {self.spd_out_dim}), "
-                f"got {tuple(residual.shape)}."
-            )
-        if sublayer_output.shape[-2:] != expected_shape:
-            raise ValueError(
-                f"Expected sublayer_output shape (..., {self.spd_out_dim}, {self.spd_out_dim}), "
-                f"got {tuple(sublayer_output.shape)}."
-            )
+        # Constrain the residual scale to (0, 1).
+        eta = torch.sigmoid(self.residual_weight)
 
-        alpha = self.residual_weight
-        merged_log = (1.0 - alpha) * spd_log(residual) + alpha * spd_log(sublayer_output)
-        maybe_check_tensor(self.debug_tensor_stats, "add_norm/merged_log", merged_log)
-        merged = spd_exp(merged_log)
-        maybe_check_tensor(self.debug_tensor_stats, "add_norm/merged_spd", merged)
-        out = self.norm(merged)
-        maybe_check_tensor(self.debug_tensor_stats, "add_norm/output", out)
-        return out
+        S_res = (
+                residual_log
+                + eta * sublayer_output_log
+        )
 
+        # Protect against small floating-point asymmetry.
+        S_res = 0.5 * (
+                S_res + S_res.transpose(-1, -2)
+        )
 
-class _LegacySPDActivation(nn.Module):
-    """
-    SPD-preserving activation via eigenvalue-domain nonlinearity.
-
-    The matrix is decomposed as  X = U Λ Uᵀ,  the chosen function is
-    applied element-wise to the eigenvalues Λ, and the matrix is
-    reconstructed.  The result is always SPD as long as all activated
-    eigenvalues are strictly positive.
-
-    Modes
-    -----
-    'relu' → ReEig  : λᵢ ← max(ε, λᵢ)
-    'gelu' → GeEig  : λᵢ ← GELU(λᵢ),  then global shift so min(λᵢ) ≥ ε
-
-    Parameters
-    ----------
-    activation : 'relu' | 'gelu'
-    eps        : lower bound / shift margin for eigenvalue positivity
-    """
-
-    def __init__(
-        self,
-        activation: Literal["relu", "gelu"] = "gelu",
-        eps: float = 1e-4,
-    ) -> None:
-        super().__init__()
-        if activation not in ("relu", "gelu"):
-            raise ValueError(f"activation must be 'relu' or 'gelu', got {activation!r}")
-        self.activation = activation
-        self.eps = eps
-
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters
-        ----------
-        X : Tensor  shape (..., n, n)
-
-        Returns
-        -------
-        Y : Tensor  shape (..., n, n)  SPD
-        """
-        eigvals, eigvecs = _safe_eigh(X, eps=self.eps)        # (..., n), (..., n, n)
-
-        if self.activation == "relu":
-            eigvals = eigvals.clamp(min=self.eps)
-
-        else:  # gelu
-            eigvals = F.gelu(eigvals)
-            min_val = eigvals.amin(dim=-1, keepdim=True)
-            shift = (self.eps - min_val).clamp(min=0.0)        # 合并 where，等价且更简洁
-            eigvals = eigvals + shift
-
-        # Reconstruct:  U · diag(λ) · Uᵀ
-        y = (eigvecs * eigvals.unsqueeze(-2)) @ eigvecs.transpose(-2, -1)
-        return 0.5 * (y + y.transpose(-2, -1))
-
-    def extra_repr(self) -> str:
-        return f"activation={self.activation!r}, eps={self.eps}"
-
-
+        output_log = self.norm(S_res)
+        return output_log
 
 class SPDActivation(nn.Module):
     """SPD-safe activation applied in the eigenvalue domain."""
@@ -231,24 +84,30 @@ class SPDActivation(nn.Module):
         if self.activation == "relu":
             eigvals = eigvals.clamp_min(self.eps)
         else:
-            eigvals = F.gelu(eigvals)
-            min_val = eigvals.amin(dim=-1, keepdim=True)
-            eigvals = eigvals + (self.eps - min_val).clamp_min(0.0)
+            eigvals = F.gelu(eigvals).clamp_min(self.eps)
 
         y = (eigvecs * eigvals.unsqueeze(-2)) @ eigvecs.transpose(-1, -2)
         return 0.5 * (y + y.transpose(-1, -2))
 
-
 class SPDFeedForward(nn.Module):
     """
-    SPDNet-style feed-forward block.
+    Log-space feed-forward block for SPD Transformer.
 
-    Classic SPDNet uses repeated BiMap + ReEig blocks while features stay on
-    the SPD manifold. LogEig is usually used only at the final classifier head
-    to move SPD features into Euclidean space.
+    Input:
+        x_log: (..., spd_dim, spd_dim)
+               already computed matrix logarithm of SPD matrix.
+               It is symmetric but not necessarily positive definite.
 
-    Here the Transformer block still needs SPD output, so the FFN is:
-        BiMap -> ReEig -> BiMap -> ReEig
+    Pipeline:
+        x_log
+        -> upper-triangular vectorization
+        -> ordinary Linear FFN
+        -> reconstruct symmetric log matrix
+        -> matrix exponential
+        -> SPD output
+
+    Output:
+        out: (..., spd_dim, spd_dim), SPD matrix
     """
 
     def __init__(
@@ -259,22 +118,73 @@ class SPDFeedForward(nn.Module):
             debug_tensor_stats: bool = False,
     ):
         super().__init__()
-        hidden_spd_dim = hidden_spd_dim or spd_dim
 
         self.spd_dim = spd_dim
-        self.hidden_spd_dim = hidden_spd_dim
+        self.eps = eps
         self.debug_tensor_stats = debug_tensor_stats
+
+        # Number of unique entries in a symmetric matrix
+        self.feature_dim = spd_dim * (spd_dim + 1) // 2
+
+        # Here hidden_spd_dim is treated as hidden feature dimension.
+        # If None, use standard Transformer-style expansion.
+        hidden_feature_dim = hidden_spd_dim or 4 * self.feature_dim
+
+        row, col = torch.triu_indices(spd_dim, spd_dim)
+        self.register_buffer("tri_row", row, persistent=False)
+        self.register_buffer("tri_col", col, persistent=False)
+
         self.ffn = nn.Sequential(
-            BiMap(in_dim=spd_dim, out_dim=hidden_spd_dim),
-            SPDActivation(eps=eps),
-            BiMap(in_dim=hidden_spd_dim, out_dim=spd_dim),
+            nn.LayerNorm(self.feature_dim),
+            nn.Linear(self.feature_dim, hidden_feature_dim),
+            nn.GELU(),
+            nn.Linear(hidden_feature_dim, self.feature_dim),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        maybe_check_tensor(self.debug_tensor_stats, "ffn/input", x)
-        out = self.ffn(x)
-        maybe_check_tensor(self.debug_tensor_stats, "ffn/output", out)
-        return out
+    def forward(self, x_log: torch.Tensor) -> torch.Tensor:
+        """
+        x_log: (..., spd_dim, spd_dim), already in log/tangent space.
+        return: (..., spd_dim, spd_dim), log space matrix.
+        """
+
+        if x_log.shape[-2:] != (self.spd_dim, self.spd_dim):
+            raise ValueError(
+                f"Expected x_log shape (..., {self.spd_dim}, {self.spd_dim}), "
+                f"got {tuple(x_log.shape)}."
+            )
+
+        # Make sure the tangent matrix is symmetric
+        x_log = 0.5 * (x_log + x_log.transpose(-1, -2))
+
+        # (..., C, C) -> (..., C * (C + 1) // 2)
+        x_vec = self._upper_triangular_vectorize(x_log)
+
+
+        # ordinary Euclidean FFN
+        out_vec = self.ffn(x_vec)
+
+
+        # (..., D) -> (..., C, C), symmetric log matrix
+        out_log = self._upper_triangular_unvectorize(out_vec)
+
+        return out_log
+
+    def _upper_triangular_vectorize(self, x: torch.Tensor) -> torch.Tensor:
+        return x[..., self.tri_row, self.tri_col]
+
+    def _upper_triangular_unvectorize(self, x_vec: torch.Tensor) -> torch.Tensor:
+        out = torch.zeros(
+            *x_vec.shape[:-1],
+            self.spd_dim,
+            self.spd_dim,
+            device=x_vec.device,
+            dtype=x_vec.dtype,
+        )
+
+        out[..., self.tri_row, self.tri_col] = x_vec
+        out[..., self.tri_col, self.tri_row] = x_vec
+
+        return 0.5 * (out + out.transpose(-1, -2))
 
 
 class SPDEncoder(nn.Module):
@@ -282,6 +192,9 @@ class SPDEncoder(nn.Module):
             self,
             spd_in_dim,
             spd_out_dim,
+            time_sequence_length,
+            frequency_sequence_length,
+            tau=1.0,
             ffn_hidden_spd_dim=None,
             metric='log-euclidean',
             attention_dropout: float = 0.0,
@@ -311,19 +224,20 @@ class SPDEncoder(nn.Module):
             debug_tensor_stats=debug_tensor_stats,
         )
         self.time_add_norm1 = SPDAddNorm(
-            spd_in_dim,
             spd_out_dim,
-            debug_tensor_stats=debug_tensor_stats,
+            sequence_length=time_sequence_length,
+            tau=tau,
+            eps=metric_eps,
         )
         self.time_ffn = SPDFeedForward(
             spd_out_dim,
             ffn_hidden_spd_dim,
-            debug_tensor_stats=debug_tensor_stats,
         )
         self.time_add_norm2 = SPDAddNorm(
             spd_out_dim,
-            spd_out_dim,
-            debug_tensor_stats=debug_tensor_stats,
+            sequence_length=time_sequence_length,
+            tau=tau,
+            eps=metric_eps,
         )
 
         self.frequency_attention = SingleHeadAttention(
@@ -339,18 +253,20 @@ class SPDEncoder(nn.Module):
         )
         self.frequency_add_norm1 = SPDAddNorm(
             spd_out_dim,
-            spd_out_dim,
-            debug_tensor_stats=debug_tensor_stats,
+            sequence_length=frequency_sequence_length,
+            tau=tau,
+            eps=metric_eps,
+
         )
         self.frequency_ffn = SPDFeedForward(
             spd_out_dim,
             ffn_hidden_spd_dim,
-            debug_tensor_stats=debug_tensor_stats,
         )
         self.frequency_add_norm2 = SPDAddNorm(
             spd_out_dim,
-            spd_out_dim,
-            debug_tensor_stats=debug_tensor_stats,
+            sequence_length=frequency_sequence_length,
+            tau=tau,
+            eps=metric_eps,
         )
 
         self.attention = self.time_attention
@@ -383,15 +299,15 @@ class SPDEncoder(nn.Module):
             perm.insert(seq_pos, moved_axis)
             x = x.permute(perm)
 
-        y = attention(x)
+        y_log = attention(x)
 
         if axis != seq_pos:
             inverse_perm = [0] * len(perm)
             for new_axis, old_axis in enumerate(perm):
                 inverse_perm[old_axis] = new_axis
-            y = y.permute(inverse_perm)
+            y_log = y_log.permute(inverse_perm)
 
-        return y
+        return y_log
 
     def forward(self, x):
         if x.ndim not in {4, 5}:
@@ -400,42 +316,34 @@ class SPDEncoder(nn.Module):
                 "(batch, time, frequency_bands, channels, channels), "
                 f"got {tuple(x.shape)}."
             )
-
-        maybe_check_tensor(self.debug_tensor_stats, "encoder/input", x)
-        self._print_attention_shape("time/input", x)
-        time_output = self._apply_attention_along_axis(
+        time_output_log = self._apply_attention_along_axis(
             self.time_attention,
             x,
             axis=1,
         )
-        self._print_attention_shape("time/output", time_output)
-        maybe_check_tensor(self.debug_tensor_stats, "encoder/time_attention_output", time_output)
-        x = self.time_add_norm1(x, time_output)
-        maybe_check_tensor(self.debug_tensor_stats, "encoder/after_time_add_norm1", x)
-        x = self.time_add_norm2(x, self.time_ffn(x))
-        maybe_check_tensor(self.debug_tensor_stats, "encoder/after_time_ffn_add_norm", x)
+        x_log = self.time_add_norm1(spd_log(x), time_output_log)
+
+        x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
+
 
         # if (batch, time, frequency_bands, channels, channels)
         if x.ndim == 5:
-            self._print_attention_shape("frequency/input", x)
-            frequency_output = self._apply_attention_along_axis(
+            x_spd = torch.matrix_exp(
+                0.5 * (x_log + x_log.transpose(-1, -2))
+            )
+            frequency_output_log = self._apply_attention_along_axis(
                 self.frequency_attention,
-                x,
+                x_spd,
                 axis=2,
             )
-            self._print_attention_shape("frequency/output", frequency_output)
-            maybe_check_tensor(self.debug_tensor_stats, "encoder/frequency_attention_output", frequency_output)
-            x = self.frequency_add_norm1(x, frequency_output)
-            maybe_check_tensor(self.debug_tensor_stats, "encoder/after_frequency_add_norm1", x)
-            x = self.frequency_add_norm2(x, self.frequency_ffn(x))
-            maybe_check_tensor(self.debug_tensor_stats, "encoder/after_frequency_ffn_add_norm", x)
 
-        maybe_check_tensor(self.debug_tensor_stats, "encoder/output", x)
-        return x
+            x_log = self.frequency_add_norm1(x_log, frequency_output_log)
 
-    def _print_attention_shape(self, name: str, x: torch.Tensor) -> None:
-        if self.debug_attention_shape:
-            print(f"[SPDAttentionShape] {name}: shape={tuple(x.shape)}")
+            x_log = self.frequency_add_norm2(x_log, self.frequency_ffn(x_log))
+
+        x_log = 0.5 * (x_log + x_log.transpose(-1, -2))
+        x_spd = torch.matrix_exp(x_log)
+        return 0.5 * (x_spd + x_spd.transpose(-1, -2))
 
 
 class SPDTransformer(nn.Module):
@@ -445,6 +353,9 @@ class SPDTransformer(nn.Module):
             self,
             spd_in_dim: int,
             spd_out_dim: int,
+            time_sequence_length,
+            frequency_sequence_length,
+            tau=1.0,
             depth: int = 1,
             ffn_hidden_spd_dim=None,
             metric: str = "log-euclidean",
@@ -468,6 +379,9 @@ class SPDTransformer(nn.Module):
         self.layers = nn.ModuleList([SPDEncoder(
                 spd_in_dim=spd_in_dim,
                 spd_out_dim=spd_out_dim,
+                time_sequence_length=time_sequence_length,
+                frequency_sequence_length=frequency_sequence_length,
+                tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
                 metric=metric,
                 attention_dropout=attention_dropout,
@@ -480,20 +394,8 @@ class SPDTransformer(nn.Module):
             ) for _ in range(depth)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        maybe_check_tensor(self.debug_tensor_stats, "transformer/input", x)
         for layer_index, layer in enumerate(self.layers):
-            maybe_check_tensor(
-                self.debug_tensor_stats,
-                f"transformer/layer_{layer_index}_input",
-                x,
-            )
             x = layer(x)
-            maybe_check_tensor(
-                self.debug_tensor_stats,
-                f"transformer/layer_{layer_index}_output",
-                x,
-            )
-        maybe_check_tensor(self.debug_tensor_stats, "transformer/output", x)
         return x
 
 
@@ -538,6 +440,9 @@ class SPDPoolingClassifier(SPDClassifierBase):
             spd_in_dim: int,
             spd_out_dim: int,
             num_classes: int,
+            time_sequence_length: int,
+            frequency_sequence_length: int,
+            tau=1.0,
             ffn_hidden_spd_dim=None,
             metric: str = "log-euclidean",
             depth: int = 1,
@@ -567,6 +472,9 @@ class SPDPoolingClassifier(SPDClassifierBase):
             spd_in_dim=spd_in_dim,
             spd_out_dim=spd_out_dim,
             depth=depth,
+            time_sequence_length=time_sequence_length,
+            frequency_sequence_length=frequency_sequence_length,
+            tau=tau,
             ffn_hidden_spd_dim=ffn_hidden_spd_dim,
             metric=metric,
             attention_dropout=attention_dropout,
@@ -656,6 +564,9 @@ class SPDTaskTagClassifier(SPDClassifierBase):
             spd_in_dim: int,
             spd_out_dim: int,
             num_classes: int,
+            time_sequence_length: int,
+            frequency_sequence_length: int,
+            tau=1.0,
             ffn_hidden_spd_dim=None,
             metric: str = "log-euclidean",
             depth: int = 1,
@@ -680,6 +591,9 @@ class SPDTaskTagClassifier(SPDClassifierBase):
         self.encoder = SPDTransformer(
             spd_in_dim=spd_in_dim,
             spd_out_dim=spd_out_dim,
+            time_sequence_length=time_sequence_length,
+            frequency_sequence_length=frequency_sequence_length,
+            tau=tau,
             depth=depth,
             ffn_hidden_spd_dim=ffn_hidden_spd_dim,
             metric=metric,
@@ -728,9 +642,8 @@ class SPDTaskTagClassifier(SPDClassifierBase):
         task_log = task_log.to(device=x.device, dtype=x.dtype)
         maybe_check_tensor(self.debug_tensor_stats, "task_classifier/task_log_parameter", task_log)
 
-        # Use matrix_exp for this learnable log token instead of the spectral
-        # spd_exp. The zero-initialized token has repeated eigenvalues, and
-        # backpropagating through eigh at repeated eigenvalues can produce NaNs.
+        # matrix_exp remains differentiable when the log token has repeated
+        # eigenvalues, unlike an eigendecomposition-based implementation.
         task_token = torch.matrix_exp(task_log)  # Identity  matrix I
         eye = torch.eye(self.spd_in_dim, device=x.device, dtype=x.dtype)
         task_token = 0.5 * (task_token + task_token.transpose(-1, -2)) + 1e-5 * eye # sym
@@ -770,6 +683,9 @@ class SPDTransformerClassifier(nn.Module):
             spd_in_dim: int,
             spd_out_dim: int,
             num_classes: int,
+            time_sequence_length,
+            frequency_sequence_length,
+            tau=1.0,
             ffn_hidden_spd_dim=None,
             metric: str = "log-euclidean",
             depth: int = 1,
@@ -802,6 +718,9 @@ class SPDTransformerClassifier(nn.Module):
                 spd_in_dim=spd_in_dim,
                 spd_out_dim=spd_out_dim,
                 num_classes=num_classes,
+                time_sequence_length=time_sequence_length,
+                frequency_sequence_length=frequency_sequence_length,
+                tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
                 metric=metric,
                 depth=depth,
@@ -821,6 +740,9 @@ class SPDTransformerClassifier(nn.Module):
                 spd_in_dim=spd_in_dim,
                 spd_out_dim=spd_out_dim,
                 num_classes=num_classes,
+                time_sequence_length=time_sequence_length,
+                frequency_sequence_length=frequency_sequence_length,
+                tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
                 metric=metric,
                 depth=depth,

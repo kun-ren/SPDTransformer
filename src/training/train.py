@@ -28,17 +28,16 @@ from src.datasets.PhysioNetMI_preprocess import preprocess_spd
 from src.models.SPDTransformer import SPDTransformerClassifier
 from src.training.shared_split import load_or_create_split_indices
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_grid.yaml"
 
 
 class MotorImageryDataset(Dataset):
     def __init__(
-        self,
-        x: np.ndarray,
-        y: np.ndarray,
-        dtype: torch.dtype = torch.float64,
+            self,
+            x: np.ndarray,
+            y: np.ndarray,
+            dtype: torch.dtype = torch.float64,
     ) -> None:
         self.x = torch.from_numpy(x).to(dtype=dtype)
         self.y = torch.from_numpy(y).long()
@@ -130,9 +129,9 @@ def expand_experiments(config: dict[str, Any]) -> list[dict[str, Any]]:
 
     experiments = []
     for data_cfg, model_cfg, training_cfg in itertools.product(
-        data_grid,
-        model_grid,
-        training_grid,
+            data_grid,
+            model_grid,
+            training_grid,
     ):
         experiments.append(
             {
@@ -200,14 +199,14 @@ def parse_task_types(task_types: Any) -> tuple[str, ...]:
 
 
 def make_loaders(
-    x: np.ndarray,
-    y: np.ndarray,
-    train_idx: np.ndarray,
-    val_idx: np.ndarray,
-    test_idx: np.ndarray,
-    batch_size: int,
-    num_workers: int,
-    dtype: torch.dtype,
+        x: np.ndarray,
+        y: np.ndarray,
+        train_idx: np.ndarray,
+        val_idx: np.ndarray,
+        test_idx: np.ndarray,
+        batch_size: int,
+        num_workers: int,
+        dtype: torch.dtype,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     train_loader = DataLoader(
         MotorImageryDataset(x[train_idx], y[train_idx], dtype=dtype),
@@ -234,13 +233,18 @@ def make_loaders(
 
 
 def build_model(
-    model_cfg: dict[str, Any],
-    spd_in_dim: int,
-    num_classes: int,
+        model_cfg: dict[str, Any],
+        spd_in_dim: int,
+        num_classes: int,
+        time_sequence_length,
+        frequency_sequence_length,
 ) -> SPDTransformerClassifier:
     return SPDTransformerClassifier(
         spd_in_dim=spd_in_dim,
         spd_out_dim=int(model_cfg.get("spd_out_dim", spd_in_dim)),
+        time_sequence_length=time_sequence_length,
+        frequency_sequence_length=frequency_sequence_length,
+        tau=model_cfg.get("tau", 1.0),
         num_classes=num_classes,
         ffn_hidden_spd_dim=model_cfg.get("ffn_hidden_spd_dim"),
         metric=str(model_cfg.get("metric", "log-euclidean")),
@@ -259,10 +263,10 @@ def build_model(
 
 
 def evaluate(
-    model: nn.Module,
-    loader: DataLoader,
-    criterion: nn.Module,
-    device: torch.device,
+        model: nn.Module,
+        loader: DataLoader,
+        criterion: nn.Module,
+        device: torch.device,
 ) -> dict[str, float]:
     predictions = predict_loader(model, loader, criterion, device)
     return {
@@ -273,10 +277,10 @@ def evaluate(
 
 
 def predict_loader(
-    model: nn.Module,
-    loader: DataLoader,
-    criterion: nn.Module,
-    device: torch.device,
+        model: nn.Module,
+        loader: DataLoader,
+        criterion: nn.Module,
+        device: torch.device,
 ) -> dict[str, Any]:
     model.eval()
     total_loss = 0.0
@@ -307,9 +311,9 @@ def predict_loader(
 
 
 def save_per_class_metrics(
-    path: Path,
-    split_predictions: dict[str, dict[str, Any]],
-    class_names: list[str],
+        path: Path,
+        split_predictions: dict[str, dict[str, Any]],
+        class_names: list[str],
 ) -> None:
     labels = np.arange(len(class_names))
     rows = []
@@ -339,9 +343,9 @@ def save_per_class_metrics(
 
 
 def save_confusion_matrices(
-    path: Path,
-    split_predictions: dict[str, dict[str, Any]],
-    class_names: list[str],
+        path: Path,
+        split_predictions: dict[str, dict[str, Any]],
+        class_names: list[str],
 ) -> None:
     labels = np.arange(len(class_names))
     rows = []
@@ -375,12 +379,12 @@ def save_confusion_matrices(
 
 
 def train_one_epoch(
-    model: nn.Module,
-    loader: DataLoader,
-    criterion: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    device: torch.device,
-    gradient_clip_norm: float | None = None,
+        model: nn.Module,
+        loader: DataLoader,
+        criterion: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        device: torch.device,
+        gradient_clip_norm: float | None = None,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
@@ -439,13 +443,13 @@ def append_history(path: Path, row: dict[str, Any]) -> None:
 
 
 def train_experiment(
-    run_index: int,
-    experiment_cfg: dict[str, Any],
-    x: np.ndarray,
-    y: np.ndarray,
-    class_names: list[str],
-    base_output_dir: Path,
-    device: torch.device,
+        run_index: int,
+        experiment_cfg: dict[str, Any],
+        x: np.ndarray,
+        y: np.ndarray,
+        class_names: list[str],
+        base_output_dir: Path,
+        device: torch.device,
 ) -> dict[str, Any]:
     training_cfg = experiment_cfg["training"]
     model_cfg = experiment_cfg["model"]
@@ -475,9 +479,13 @@ def train_experiment(
         dtype=dtype,
     )
 
+    time_sequence_length = x.shape[-4]
+    frequency_sequence_length = x.shape[-3]
     model = build_model(
         model_cfg=model_cfg,
         spd_in_dim=x.shape[-1],
+        time_sequence_length=time_sequence_length,
+        frequency_sequence_length=frequency_sequence_length,
         num_classes=len(class_names),
     ).to(device=device, dtype=dtype)
 

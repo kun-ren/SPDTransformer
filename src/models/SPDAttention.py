@@ -1,9 +1,9 @@
 from enum import Enum
 import math
-from typing import Literal
+from typing import Literal, Tuple, Dict
 
 import torch
-from torch import nn
+from torch import nn, Tensor
 import torch.nn.functional as F
 
 from src.models.BiMap import BiMap
@@ -35,19 +35,51 @@ def _safe_eigh(
     if not torch.isfinite(x).all():
         raise ValueError("SPD spectral operation received NaN or Inf values.")
 
+    try:
+        return torch.linalg.eigh(x)
+    except RuntimeError as error:
+        last_error = error
+        print(
+            "[safe_eigh] torch.linalg.eigh failed without jitter; "
+            f"retrying with diagonal jitter starting at {eps:.1e}. "
+            f"Original error: {error}",
+            flush=True,
+        )
+
     eye = _eye_like(x)
     jitter = eps
-    last_error = None
-    for _ in range(max_tries):
+    for attempt in range(1, max_tries + 1):
         try:
-            return torch.linalg.eigh(x + jitter * eye)
+            eigenvalues, eigenvectors = torch.linalg.eigh(x + jitter * eye)
+            print(
+                f"[safe_eigh] succeeded on jitter attempt "
+                f"{attempt}/{max_tries} with jitter={jitter:.1e}.",
+                flush=True,
+            )
+            return eigenvalues, eigenvectors
         except RuntimeError as error:
             last_error = error
+            print(
+                f"[safe_eigh] jitter attempt {attempt}/{max_tries} failed "
+                f"with jitter={jitter:.1e}; increasing jitter. "
+                f"Error: {error}",
+                flush=True,
+            )
             jitter *= 10.0
 
+    print(
+        "[safe_eigh] all jitter retries failed; "
+        f"trying float64 fallback with jitter={jitter:.1e}.",
+        flush=True,
+    )
     try:
         eigenvalues, eigenvectors = torch.linalg.eigh(
             (x + jitter * eye).to(torch.float64)
+        )
+        print(
+            "[safe_eigh] float64 fallback succeeded "
+            f"with jitter={jitter:.1e}.",
+            flush=True,
         )
         return eigenvalues.to(dtype=x.dtype), eigenvectors.to(dtype=x.dtype)
     except RuntimeError as error:
@@ -62,20 +94,6 @@ def spd_log(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     log_eigenvalues = eigenvalues.clamp_min(eps).log()
     y = (eigenvectors * log_eigenvalues.unsqueeze(-2)) @ eigenvectors.transpose(-1, -2)
     return _symmetrize(y)
-
-
-def spd_exp(
-    x: torch.Tensor,
-    eps: float = 1e-5,
-    max_log_value: float = 30.0,
-) -> torch.Tensor:
-    eigenvalues, eigenvectors = _safe_eigh(x, eps=eps)
-    exp_eigenvalues = eigenvalues.clamp(
-        min=-max_log_value,
-        max=max_log_value,
-    ).exp()
-    y = (eigenvectors * exp_eigenvalues.unsqueeze(-2)) @ eigenvectors.transpose(-1, -2)
-    return _symmetrize(y) + eps * _eye_like(y)
 
 
 def stable_attention_softmax(
@@ -223,7 +241,8 @@ class SingleHeadAttention(nn.Module):
 
         self.position_bias = PositionBias(max_position=128) if self.use_position else None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Tensor:
+
         maybe_check_tensor(self.debug_tensor_stats, "attention/input", x)
         q = self.query(x)
         maybe_check_tensor(self.debug_tensor_stats, "attention/query", q)
@@ -250,9 +269,7 @@ class SingleHeadAttention(nn.Module):
         weighted_log_v = torch.einsum('...ij,...jmn->...imn', attention, log_v)
         maybe_check_tensor(self.debug_tensor_stats, "attention/weighted_log_value", weighted_log_v)
 
-        new_v = spd_exp(weighted_log_v)
-        maybe_check_tensor(self.debug_tensor_stats, "attention/output", new_v)
-        return new_v
+        return weighted_log_v
 
     def _print_attention_dropout_debug(
         self,
@@ -288,19 +305,14 @@ class SingleHeadAttention(nn.Module):
 
         if self.metric == MetricType.LogEuclidean:
             log_q = spd_log(q)
-            maybe_check_tensor(self.debug_tensor_stats, "distance/log_query", log_q)
             log_k = spd_log(k)
-            maybe_check_tensor(self.debug_tensor_stats, "distance/log_key", log_k)
 
             if log_q.ndim == 2 and log_k.ndim == 2:  # condition: only a metrix
                 diff = log_q - log_k
             else:  # pairwise qk score
                 diff = log_q.unsqueeze(-3) - log_k.unsqueeze(-4)
                 # diff [B, N_q, N_k, D, D]
-            maybe_check_tensor(self.debug_tensor_stats, "distance/log_diff", diff)
-
             distance = torch.linalg.matrix_norm(diff, ord='fro', dim=(-2, -1))
-            maybe_check_tensor(self.debug_tensor_stats, "distance/frobenius", distance)
             return distance
             # [B, N_q, N_k]
 
