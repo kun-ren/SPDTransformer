@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from script.load_moabb_dataset import parse_int_list
 from src.datasets.PhysioNetMI_preprocess import preprocess_spd
+from src.models.RiemannianLayerNorm import RiemannianLayerNorm
 from src.models.SPDTransformer import SPDTransformerClassifier
 from src.training.shared_split import load_or_create_split_indices
 
@@ -264,6 +265,83 @@ def build_model(
     )
 
 
+def build_adamw_parameter_groups(
+        model: nn.Module,
+        weight_decay: float,
+        apply_weight_decay_to_special_parameters: bool,
+) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+    """Build AdamW groups and report exactly which parameters are decayed."""
+    trainable_parameters = {
+        name: parameter
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+
+    if apply_weight_decay_to_special_parameters:
+        return (
+            [{
+                "params": list(trainable_parameters.values()),
+                "weight_decay": weight_decay,
+            }],
+            {
+                "decay": list(trainable_parameters),
+                "no_decay": [],
+            },
+        )
+
+    normalization_parameter_ids = {
+        id(parameter)
+        for module in model.modules()
+        if isinstance(module, (nn.LayerNorm, RiemannianLayerNorm))
+        for parameter in module.parameters(recurse=False)
+        if parameter.requires_grad
+    }
+    spd_metric_parameter_markers = (
+        "metric_low_rank",
+        "metric_cholesky",
+        "affine_log_scale_raw",
+    )
+
+    decay_parameters = []
+    no_decay_parameters = []
+    decay_names = []
+    no_decay_names = []
+
+    for name, parameter in trainable_parameters.items():
+        exclude_from_decay = (
+            name.endswith("bias")
+            or id(parameter) in normalization_parameter_ids
+            or any(
+                marker in name
+                for marker in spd_metric_parameter_markers
+            )
+        )
+
+        if exclude_from_decay:
+            no_decay_parameters.append(parameter)
+            no_decay_names.append(name)
+        else:
+            decay_parameters.append(parameter)
+            decay_names.append(name)
+
+    parameter_groups = []
+    if decay_parameters:
+        parameter_groups.append({
+            "params": decay_parameters,
+            "weight_decay": weight_decay,
+        })
+    if no_decay_parameters:
+        parameter_groups.append({
+            "params": no_decay_parameters,
+            "weight_decay": 0.0,
+        })
+
+    return parameter_groups, {
+        "decay": decay_names,
+        "no_decay": no_decay_names,
+    }
+
+
 def evaluate(
         model: nn.Module,
         loader: DataLoader,
@@ -492,10 +570,22 @@ def train_experiment(
     ).to(device=device, dtype=dtype)
 
     criterion = nn.CrossEntropyLoss()
+    weight_decay = float(training_cfg.get("weight_decay", 1e-4))
+    apply_weight_decay_to_special_parameters = bool(
+        training_cfg.get("apply_weight_decay_to_special_parameters", False)
+    )
+    optimizer_parameter_groups, optimizer_group_names = (
+        build_adamw_parameter_groups(
+            model=model,
+            weight_decay=weight_decay,
+            apply_weight_decay_to_special_parameters=(
+                apply_weight_decay_to_special_parameters
+            ),
+        )
+    )
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        optimizer_parameter_groups,
         lr=float(training_cfg.get("learning_rate", 1e-3)),
-        weight_decay=float(training_cfg.get("weight_decay", 1e-4)),
     )
 
     best_val_macro_f1 = -1.0
@@ -510,6 +600,14 @@ def train_experiment(
     print(f"\n[Run {run_index}] {run_dir.name}")
     print(f"  model={model_cfg}")
     print(f"  training={training_cfg}")
+    print(
+        "  weight_decay_parameters="
+        f"{optimizer_group_names['decay']}"
+    )
+    print(
+        "  no_weight_decay_parameters="
+        f"{optimizer_group_names['no_decay']}"
+    )
 
     print(f"thread: {torch.get_num_threads()}")
     print(torch.get_num_interop_threads())
