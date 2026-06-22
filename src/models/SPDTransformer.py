@@ -520,20 +520,20 @@ class SPDPoolingClassifier(SPDClassifierBase):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        maybe_check_tensor(self.debug_tensor_stats, "pooling_classifier/input", x)
+
         x = self.encoder(x)
-        maybe_check_tensor(self.debug_tensor_stats, "pooling_classifier/encoded", x)
+
 
         if self.pooling == "mean":
             pooled_log = self._mean_pool(x)
         else:
             pooled_log = self._attention_pool(x)
-        maybe_check_tensor(self.debug_tensor_stats, "pooling_classifier/pooled_log", pooled_log)
+
 
         features = self.upper_triangular_vectorize(pooled_log)
-        maybe_check_tensor(self.debug_tensor_stats, "pooling_classifier/features", features)
+
         logits = self.classifier(features)
-        maybe_check_tensor(self.debug_tensor_stats, "pooling_classifier/logits", logits)
+
         return logits
 
     def _mean_pool(self, x: torch.Tensor) -> torch.Tensor:
