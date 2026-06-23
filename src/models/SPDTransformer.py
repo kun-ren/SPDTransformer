@@ -115,6 +115,7 @@ class SPDFeedForward(nn.Module):
             self,
             spd_dim: int,
             hidden_spd_dim: int | None = None,
+            dropout: float = 0.0,
             eps: float = 1e-4,
             debug_tensor_stats: bool = False,
     ):
@@ -139,7 +140,9 @@ class SPDFeedForward(nn.Module):
             nn.LayerNorm(self.feature_dim),
             nn.Linear(self.feature_dim, hidden_feature_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_feature_dim, self.feature_dim),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x_log: torch.Tensor) -> torch.Tensor:
@@ -207,6 +210,7 @@ class SPDEncoder(nn.Module):
             metric_eps: float = 1e-6,
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
+            dropout: float = 0.0,
     ):
         super().__init__()
         self.metric = metric
@@ -238,6 +242,7 @@ class SPDEncoder(nn.Module):
         self.time_ffn = SPDFeedForward(
             spd_out_dim,
             ffn_hidden_spd_dim,
+            dropout=dropout,
         )
         self.time_add_norm2 = SPDAddNorm(
             spd_out_dim,
@@ -271,6 +276,7 @@ class SPDEncoder(nn.Module):
         self.frequency_ffn = SPDFeedForward(
             spd_out_dim,
             ffn_hidden_spd_dim,
+            dropout=dropout,
         )
         self.frequency_add_norm2 = SPDAddNorm(
             spd_out_dim,
@@ -379,6 +385,7 @@ class SPDTransformer(nn.Module):
             metric_eps: float = 1e-6,
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
+            dropout: float = 0.0,
     ):
         super().__init__()
         if depth < 1:
@@ -406,6 +413,7 @@ class SPDTransformer(nn.Module):
                 metric_eps=metric_eps,
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
+                dropout=dropout,
             ) for _ in range(depth)])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -432,7 +440,7 @@ class SPDClassifierBase(nn.Module):
             dropout: float,
     ) -> nn.Module:
         return nn.Sequential(
-            #nn.Dropout(dropout),
+            nn.Dropout(dropout),
             nn.Linear(feature_dim, num_classes),
         )
 
@@ -503,6 +511,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             metric_eps=metric_eps,
             use_position_bias=use_position_bias,
             layer_norm_affine=layer_norm_affine,
+            dropout=dropout,
         )
 
         if pooling == "attention":
@@ -627,6 +636,7 @@ class SPDTaskTagClassifier(SPDClassifierBase):
             metric_eps=metric_eps,
             use_position_bias=use_position_bias,
             layer_norm_affine=layer_norm_affine,
+            dropout=dropout,
         )
         self.classifier = self.build_linear_classifier(
             feature_dim=self.feature_dim,
