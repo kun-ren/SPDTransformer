@@ -31,6 +31,8 @@ from src.training.shared_split import load_or_create_split_indices
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_grid.yaml"
+DATASET_CACHE_VERSION = 1
+DEFAULT_DATASET_CACHE_DIR = PROJECT_ROOT / "experiments" / "cache" / "preprocessed_datasets"
 
 
 class MotorImageryDataset(Dataset):
@@ -156,6 +158,23 @@ def set_seed(seed: int) -> None:
 def config_hash(config: dict[str, Any]) -> str:
     payload = json.dumps(config, sort_keys=True, default=str)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
+
+
+def dataset_cache_key(data_cfg: dict[str, Any]) -> str:
+    return config_hash({"data": data_cfg})
+
+
+def resolve_project_path(path_value: Any, default: Path) -> Path:
+    if path_value in {None, ""}:
+        return default
+    path = Path(str(path_value))
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
+
+
+def dataset_cache_path(cache_dir: Path, data_key: str) -> Path:
+    return cache_dir / f"spd_dataset_{data_key}.npz"
 
 
 def make_run_dir(base_dir: Path, run_index: int, config: dict[str, Any]) -> Path:
@@ -738,6 +757,96 @@ def preprocess_dataset(data_cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray
     return x.astype(np.float32), y.astype(np.int64), list(class_names)
 
 
+def load_cached_dataset(
+        cache_path: Path,
+        data_cfg: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, list[str]] | None:
+    if not cache_path.exists():
+        return None
+
+    try:
+        with np.load(cache_path, allow_pickle=False) as payload:
+            metadata_json = str(payload["metadata_json"].item())
+            metadata = json.loads(metadata_json)
+            if metadata.get("cache_version") != DATASET_CACHE_VERSION:
+                print(
+                    f"  Dataset cache format changed, rebuilding: {cache_path}"
+                )
+                return None
+            if metadata.get("data_config") != data_cfg:
+                print(
+                    f"  Dataset cache key collision or config mismatch, rebuilding: {cache_path}"
+                )
+                return None
+
+            x = np.asarray(payload["x"], dtype=np.float32)
+            y = np.asarray(payload["y"], dtype=np.int64)
+            class_names = [str(name) for name in payload["class_names"].tolist()]
+
+        if not np.isfinite(x).all():
+            bad_count = int((~np.isfinite(x)).sum())
+            print(
+                f"  Cached SPD dataset contains {bad_count} NaN or Inf values, rebuilding."
+            )
+            return None
+
+        return x, y, class_names
+    except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
+        print(f"  Failed to read dataset cache {cache_path}: {error}. Rebuilding.")
+        return None
+
+
+def save_cached_dataset(
+        cache_path: Path,
+        data_cfg: dict[str, Any],
+        x: np.ndarray,
+        y: np.ndarray,
+        class_names: list[str],
+) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "cache_version": DATASET_CACHE_VERSION,
+        "data_config": data_cfg,
+    }
+    tmp_path = cache_path.with_name(
+        f"{cache_path.stem}.{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.tmp"
+    )
+    with tmp_path.open("wb") as handle:
+        np.savez(
+            handle,
+            x=x.astype(np.float32, copy=False),
+            y=y.astype(np.int64, copy=False),
+            class_names=np.asarray(class_names, dtype=np.str_),
+            metadata_json=np.asarray(
+                json.dumps(metadata, sort_keys=True, default=str),
+                dtype=np.str_,
+            ),
+        )
+    tmp_path.replace(cache_path)
+
+
+def load_or_preprocess_dataset(
+        data_cfg: dict[str, Any],
+        cache_dir: Path,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    data_key = dataset_cache_key(data_cfg)
+    cache_path = dataset_cache_path(cache_dir, data_key)
+    cached_dataset = load_cached_dataset(cache_path, data_cfg)
+    if cached_dataset is not None:
+        print(f"\nLoaded preprocessed data from cache {data_key}: {cache_path}")
+        x_cached, y_cached, names_cached = cached_dataset
+        print(f"  X.shape={x_cached.shape}, y.shape={y_cached.shape}, classes={names_cached}")
+        return cached_dataset
+
+    print(f"\nPreprocessing data config {data_key}: {data_cfg}")
+    dataset = preprocess_dataset(data_cfg)
+    x_cached, y_cached, names_cached = dataset
+    print(f"  X.shape={x_cached.shape}, y.shape={y_cached.shape}, classes={names_cached}")
+    save_cached_dataset(cache_path, data_cfg, x_cached, y_cached, names_cached)
+    print(f"  Saved preprocessed data cache: {cache_path}")
+    return dataset
+
+
 def main() -> int:
     args = parse_args()
     config = load_yaml(args.config)
@@ -750,6 +859,10 @@ def main() -> int:
     output_cfg = config.get("output", {})
     base_output_dir = PROJECT_ROOT / str(output_cfg.get("dir", "experiments/results")) / timestamp
     base_output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_cache_dir = resolve_project_path(
+        output_cfg.get("dataset_cache_dir"),
+        DEFAULT_DATASET_CACHE_DIR,
+    )
 
     # Preprocess once from the first expanded data config. If you grid data
     # preprocessing parameters, each distinct data config will be handled below.
@@ -760,15 +873,16 @@ def main() -> int:
 
     print(f"Generated {len(experiments)} experiment(s)")
     print(f"Saving runs under: {base_output_dir}")
+    print(f"Dataset cache: {dataset_cache_dir}")
     print(f"Device: {device}")
 
     for run_index, experiment_cfg in enumerate(experiments, start=1):
-        data_key = config_hash({"data": experiment_cfg["data"]})
+        data_key = dataset_cache_key(experiment_cfg["data"])
         if data_key not in data_cache:
-            print(f"\nPreprocessing data config {data_key}: {experiment_cfg['data']}")
-            data_cache[data_key] = preprocess_dataset(experiment_cfg["data"])
-            x_cached, y_cached, names_cached = data_cache[data_key]
-            print(f"  X.shape={x_cached.shape}, y.shape={y_cached.shape}, classes={names_cached}")
+            data_cache[data_key] = load_or_preprocess_dataset(
+                experiment_cfg["data"],
+                dataset_cache_dir,
+            )
 
         x, y, class_names = data_cache[data_key]
         metrics = train_experiment(
