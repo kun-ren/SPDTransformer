@@ -748,6 +748,14 @@ def preprocess_dataset(data_cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray
         baseline_window=data_cfg.get("baseline_window"),
         epoch_tmin=float(data_cfg.get("epoch_tmin", -2.0)),
         epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
+        use_ica=bool(data_cfg.get("use_ica", False)),
+        ica_n_components=data_cfg.get("ica_n_components", 20),
+        ica_random_state=int(data_cfg.get("ica_random_state", 42)),
+        ica_eog_channels=data_cfg.get("ica_eog_channels"),
+        use_autoreject=bool(data_cfg.get("use_autoreject", False)),
+        autoreject_random_state=int(data_cfg.get("autoreject_random_state", 42)),
+        autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
+        autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
     )
     if not np.isfinite(x).all():
         bad_count = int((~np.isfinite(x)).sum())

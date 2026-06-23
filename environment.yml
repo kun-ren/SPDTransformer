@@ -33,3 +33,4 @@ dependencies:
       - mne>=1.6
       - moabb>=1.0
       - pyriemann>=0.6
+      - autoreject

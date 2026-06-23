@@ -38,6 +38,13 @@ def bandpass_filter(X, sfreq=160.0, low_freq=8.0, high_freq=30.0, **kwargs):
 
 def pick_raw_channels(raw, channels=None):
     raw.pick("eeg", exclude=[])
+    rename_mapping = {
+        channel_name: normalize_channel_name(channel_name)
+        for channel_name in raw.ch_names
+        if normalize_channel_name(channel_name) != channel_name
+    }
+    if rename_mapping:
+        raw.rename_channels(rename_mapping)
     channels = normalize_channels(channels)
     if channels is None:
         return raw
@@ -63,6 +70,22 @@ def pick_raw_channels(raw, channels=None):
     return raw
 
 
+def set_standard_eeg_montage(raw, montage_name="standard_1005"):
+    try:
+        raw.set_montage(
+            montage_name,
+            match_case=False,
+            on_missing="ignore",
+            verbose=False,
+        )
+    except Exception as error:
+        print(
+            f"Could not set EEG montage {montage_name!r}; "
+            f"AutoReject interpolation may be limited. Error: {error}"
+        )
+    return raw
+
+
 def filter_raw_band(raw, low_freq, high_freq):
     raw = raw.copy()
     raw.filter(
@@ -75,6 +98,135 @@ def filter_raw_band(raw, low_freq, high_freq):
         verbose=False,
     )
     return raw
+
+
+def normalize_optional_channels(channels):
+    if channels is None:
+        return None
+    if isinstance(channels, str):
+        cleaned = channels.strip()
+        if cleaned.lower() in {"", "none", "null", "false"}:
+            return None
+        return [channel.strip() for channel in cleaned.split(",") if channel.strip()]
+    return [str(channel).strip() for channel in channels if str(channel).strip()]
+
+
+def apply_ica_artifact_removal(
+    raw,
+    n_components=20,
+    random_state=42,
+    eog_channels=None,
+):
+    """
+    Fit ICA on continuous Raw and remove EOG-related components when they can
+    be detected.
+
+    PhysioNet EEGBCI usually has no dedicated EOG channel, so this function is
+    intentionally conservative: if no EOG/proxy channel is available, it leaves
+    Raw unchanged instead of excluding arbitrary ICA components.
+    """
+    eog_channels = normalize_optional_channels(eog_channels)
+    n_eeg_channels = len(raw.ch_names)
+    if n_eeg_channels < 2:
+        print("ICA artifact removal skipped: fewer than 2 EEG channels.")
+        return raw
+
+    if n_components is None:
+        effective_n_components = None
+    else:
+        effective_n_components = min(int(n_components), n_eeg_channels - 1)
+        if effective_n_components < 1:
+            print("ICA artifact removal skipped: n_components < 1.")
+            return raw
+
+    raw = raw.copy()
+    print(
+        "Fitting ICA artifact removal "
+        f"(n_components={effective_n_components}, random_state={random_state})."
+    )
+    ica = mne.preprocessing.ICA(
+        n_components=effective_n_components,
+        random_state=int(random_state),
+        max_iter="auto",
+    )
+    ica.fit(raw, verbose=False)
+
+    try:
+        eog_indices, _ = ica.find_bads_eog(
+            raw,
+            ch_name=eog_channels,
+            verbose=False,
+        )
+    except Exception as error:
+        print(
+            "ICA fitted, but EOG component detection was skipped/failed "
+            f"({error}). Raw is left unchanged."
+        )
+        return raw
+
+    if not eog_indices:
+        print("ICA found no EOG-related components to exclude.")
+        return raw
+
+    ica.exclude = eog_indices
+    raw = ica.apply(raw, verbose=False)
+    print(f"ICA excluded EOG-related component(s): {eog_indices}")
+    return raw
+
+
+def autoreject_keep_mask(
+    epochs,
+    info,
+    tmin,
+    random_state=42,
+    n_jobs=1,
+    cv=10,
+):
+    """
+    Use autoreject.AutoReject on an EpochsArray and return the kept epoch mask.
+
+    The cleaned Epochs object may also contain interpolated channels, but this
+    preprocessing pipeline uses AutoReject primarily to decide which trials to
+    drop consistently before SPD covariance estimation.
+    """
+    epochs = np.asarray(epochs)
+    if len(epochs) < 2:
+        return np.ones(len(epochs), dtype=bool)
+
+    try:
+        from autoreject import AutoReject
+    except ImportError as error:
+        raise ImportError(
+            "data.use_autoreject=True requires the 'autoreject' package. "
+            "Install it in the spd_transformer environment first."
+        ) from error
+
+    cv = int(cv)
+    cv = max(2, min(cv, len(epochs)))
+    events = np.column_stack(
+        [
+            np.arange(len(epochs), dtype=int),
+            np.zeros(len(epochs), dtype=int),
+            np.ones(len(epochs), dtype=int),
+        ]
+    )
+    epochs_mne = mne.EpochsArray(
+        epochs,
+        info.copy(),
+        events=events,
+        event_id={"artifact": 1},
+        tmin=float(tmin),
+        verbose=False,
+    )
+    ar = AutoReject(
+        random_state=int(random_state),
+        n_jobs=int(n_jobs),
+        cv=cv,
+    )
+    epochs_clean = ar.fit_transform(epochs_mne)
+    keep_mask = np.zeros(len(epochs), dtype=bool)
+    keep_mask[np.asarray(epochs_clean.selection, dtype=int)] = True
+    return keep_mask
 
 
 
@@ -376,6 +528,14 @@ def extract_transition_epochs(
     high_freq=None,
     channels=None,
     reject_threshold_uv=None,
+    use_ica=False,
+    ica_n_components=20,
+    ica_random_state=42,
+    ica_eog_channels=None,
+    use_autoreject=False,
+    autoreject_random_state=42,
+    autoreject_n_jobs=1,
+    autoreject_cv=10,
 ):
     """
     take T1/T2 onset as the anchor
@@ -393,9 +553,18 @@ def extract_transition_epochs(
     # Re-reference before filtering and epoching
     raw.set_eeg_reference("average", projection=False)
     raw = pick_raw_channels(raw, channels=channels)
+    raw = set_standard_eeg_montage(raw)
     raw.filter(l_freq=0.5, h_freq=None)
     raw.filter(l_freq=None, h_freq=40)
     raw.notch_filter(freqs=60)
+    if use_ica:
+        raw = apply_ica_artifact_removal(
+            raw,
+            n_components=ica_n_components,
+            random_state=ica_random_state,
+            eog_channels=ica_eog_channels,
+        )
+    artifact_info = raw.info.copy()
     artifact_data = raw.get_data()
 
     if low_freq is not None or high_freq is not None:
@@ -459,6 +628,28 @@ def extract_transition_epochs(
     artifact_epochs = np.asarray(artifact_epochs)
     X = np.asarray(X)
     y = np.asarray(y)
+
+    if use_autoreject:
+        autoreject_mask = autoreject_keep_mask(
+            artifact_epochs,
+            info=artifact_info,
+            tmin=tmin,
+            random_state=autoreject_random_state,
+            n_jobs=autoreject_n_jobs,
+            cv=autoreject_cv,
+        )
+        autoreject_rejected = int((~autoreject_mask).sum())
+        if autoreject_rejected:
+            print(
+                f"AutoReject rejected {autoreject_rejected} epoch(s) "
+                f"from {edf_file}."
+            )
+        X = X[autoreject_mask]
+        y = y[autoreject_mask]
+        artifact_epochs = artifact_epochs[autoreject_mask]
+        if len(X) == 0:
+            return [], []
+
     _, y, keep_mask = reject_bad_epochs(
         artifact_epochs,
         y,
@@ -492,6 +683,14 @@ def load_subject(
     high_freq=None,
     channels=None,
     reject_threshold_uv=None,
+    use_ica=False,
+    ica_n_components=20,
+    ica_random_state=42,
+    ica_eog_channels=None,
+    use_autoreject=False,
+    autoreject_random_state=42,
+    autoreject_n_jobs=1,
+    autoreject_cv=10,
 ):
     X_all = []
     y_all = []
@@ -529,6 +728,14 @@ def load_subject(
             high_freq=high_freq,
             channels=channels,
             reject_threshold_uv=reject_threshold_uv,
+            use_ica=use_ica,
+            ica_n_components=ica_n_components,
+            ica_random_state=ica_random_state,
+            ica_eog_channels=ica_eog_channels,
+            use_autoreject=use_autoreject,
+            autoreject_random_state=autoreject_random_state,
+            autoreject_n_jobs=autoreject_n_jobs,
+            autoreject_cv=autoreject_cv,
         )
         if X and y:
             X_all.append(X)
@@ -551,6 +758,14 @@ def build_dataset(
     high_freq=None,
     channels=None,
     reject_threshold_uv=None,
+    use_ica=False,
+    ica_n_components=20,
+    ica_random_state=42,
+    ica_eog_channels=None,
+    use_autoreject=False,
+    autoreject_random_state=42,
+    autoreject_n_jobs=1,
+    autoreject_cv=10,
 ):
     X_all = []
     y_all = []
@@ -595,6 +810,14 @@ def build_dataset(
             high_freq=high_freq,
             channels=channels,
             reject_threshold_uv=reject_threshold_uv,
+            use_ica=use_ica,
+            ica_n_components=ica_n_components,
+            ica_random_state=ica_random_state,
+            ica_eog_channels=ica_eog_channels,
+            use_autoreject=use_autoreject,
+            autoreject_random_state=autoreject_random_state,
+            autoreject_n_jobs=autoreject_n_jobs,
+            autoreject_cv=autoreject_cv,
         )
         if X is None:
             print(
@@ -653,6 +876,14 @@ def preprocess_spd(
     baseline_window=None,
     epoch_tmin=-2.0,
     epoch_tmax=4.0,
+    use_ica=False,
+    ica_n_components=20,
+    ica_random_state=42,
+    ica_eog_channels=None,
+    use_autoreject=False,
+    autoreject_random_state=42,
+    autoreject_n_jobs=1,
+    autoreject_cv=10,
 ):
     from pyriemann.estimation import Covariances
 
@@ -677,6 +908,14 @@ def preprocess_spd(
             high_freq=filter[1],
             channels=channels,
             reject_threshold_uv=reject_threshold_uv,
+            use_ica=use_ica,
+            ica_n_components=ica_n_components,
+            ica_random_state=ica_random_state,
+            ica_eog_channels=ica_eog_channels,
+            use_autoreject=use_autoreject,
+            autoreject_random_state=autoreject_random_state,
+            autoreject_n_jobs=autoreject_n_jobs,
+            autoreject_cv=autoreject_cv,
         )
         temp_x = dataset['X']   #[n_epochs, n_channels, n_samples_per_epoch]
         print(f"Band {filter}: raw-filtered epoch shape {temp_x.shape}")
