@@ -645,17 +645,15 @@ class SPDTaskTagClassifier(SPDClassifierBase):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/input", x)
+
         x = self._prepend_task_token(x)
-        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/with_task_token", x)
+
         x = self.encoder(x)
-        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/encoded", x)
+
         task_log = self._extract_task_log_feature(x)
-        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/task_log", task_log)
+
         features = self.upper_triangular_vectorize(task_log)
-        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/features", features)
         logits = self.classifier(features)
-        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/logits", logits)
         return logits
 
     def _prepend_task_token(self, x: torch.Tensor) -> torch.Tensor:
