@@ -30,16 +30,16 @@ data:
 
 model:
   spd_out_dim: [21]
-  ffn_hidden_spd_dim: [42]
-  tau: [1.2, 1.3, 1.4]
+  ffn_hidden_spd_dim: [462, 924]
+  tau: [1.3]
   metric: ["learnable-metric"]
-  depth: [1]
+  depth: [1, 2]
   classifier_type: ["pooling"]
   pooling: ["mean"]
   dropout: [0.2]
   attention_dropout: [0.0]   #   fix to 0.0 or 0.1
-  use_position_bias: [true]
-  layer_norm_affine: [true]
+  use_position_bias: [true, false]
+  layer_norm_affine: [true, false]
   debug_attention_dropout: [false]
   debug_attention_shape: [false]
   debug_tensor_stats: [False]
@@ -52,10 +52,10 @@ training:
   precision: ["float64"]
   epochs: [16]
   batch_size: [128]
-  learning_rate: [0.0015, 0.002]
-  weight_decay: [1.0e-3]
-  apply_weight_decay_to_special_parameters: [true]
-  gradient_clip_norm: [0.8]
+  learning_rate: [0.002] # best 0.002
+  weight_decay: [1.0e-3, 5.0e-4, 5.0e-3]
+  apply_weight_decay_to_special_parameters: [true, false]
+  gradient_clip_norm: [0.8]  # best 0.8
   test_size: [0.15]
   val_size: [0.15]
   split_file: ["experiments/splits/physionet_mi_seed42.json"]
