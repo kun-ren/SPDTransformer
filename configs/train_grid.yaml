@@ -58,7 +58,7 @@ training:
   gradient_clip_norm: [0.8]  # best 0.8
   test_size: [0.15]
   val_size: [0.15]
-  allow_subject_overlap: [false]  # false = subject-level split for cross-subject generalization
+  allow_subject_overlap: [true]  # false = subject-level split for cross-subject generalization
   split_file: ["experiments/splits/physionet_mi_seed42_subject_split.json"]
   num_workers: [0]
 
