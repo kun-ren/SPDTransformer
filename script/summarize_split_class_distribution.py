@@ -126,7 +126,11 @@ def main() -> int:
             data_cache[data_key] = load_labels_like_train(data_cfg)
 
         y, class_names, subject_labels = data_cache[data_key]
-        train_idx, val_idx, test_idx = get_split_indices(y, training_cfg)
+        train_idx, val_idx, test_idx = get_split_indices(
+            y,
+            training_cfg,
+            subject_labels=subject_labels,
+        )
         split_indices = {
             "train": train_idx,
             "val": val_idx,

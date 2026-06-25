@@ -63,8 +63,12 @@ def run_experiment(
     data_cfg = experiment_cfg["data"]
     training_cfg = experiment_cfg["training"]
 
-    x, y, class_names, filter_bank = load_segmented_epochs_like_train(data_cfg)
-    train_idx, val_idx, test_idx = get_split_indices(y, training_cfg)
+    x, y, subject_labels, class_names, filter_bank = load_segmented_epochs_like_train(data_cfg)
+    train_idx, val_idx, test_idx = get_split_indices(
+        y,
+        training_cfg,
+        subject_labels=subject_labels,
+    )
     split_indices = {
         "train": train_idx,
         "val": val_idx,

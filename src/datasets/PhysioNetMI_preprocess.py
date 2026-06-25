@@ -884,6 +884,7 @@ def preprocess_spd(
     autoreject_random_state=42,
     autoreject_n_jobs=1,
     autoreject_cv=10,
+    return_subjects=False,
 ):
     from pyriemann.estimation import Covariances
 
@@ -983,5 +984,8 @@ def preprocess_spd(
 
     # Output shape: (n_trials, segment, frequency, n_channels, n_channels)
     X_spd = np.stack(frequencies, axis=2)
+
+    if return_subjects:
+        return X_spd, y, class_names, np.asarray(subject_labels)
 
     return X_spd, y, class_names

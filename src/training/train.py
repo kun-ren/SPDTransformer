@@ -31,7 +31,7 @@ from src.training.shared_split import load_or_create_split_indices
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_grid.yaml"
-DATASET_CACHE_VERSION = 1
+DATASET_CACHE_VERSION = 2
 DEFAULT_DATASET_CACHE_DIR = PROJECT_ROOT / "experiments" / "cache" / "preprocessed_datasets"
 
 
@@ -216,6 +216,21 @@ def parse_task_types(task_types: Any) -> tuple[str, ...]:
     if isinstance(task_types, str):
         return tuple(part.strip() for part in task_types.split(",") if part.strip())
     return tuple(str(part).strip() for part in task_types if str(part).strip())
+
+
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Cannot parse boolean value: {value!r}")
 
 
 def make_loaders(
@@ -546,6 +561,7 @@ def train_experiment(
         experiment_cfg: dict[str, Any],
         x: np.ndarray,
         y: np.ndarray,
+        subject_labels: np.ndarray,
         class_names: list[str],
         base_output_dir: Path,
         device: torch.device,
@@ -560,13 +576,33 @@ def train_experiment(
     save_yaml(run_dir / "config.yaml", experiment_cfg)
 
     split_file = resolve_split_file(training_cfg.get("split_file"))
+    allow_subject_overlap = parse_bool(
+        training_cfg.get("allow_subject_overlap", True),
+        default=True,
+    )
     train_idx, val_idx, test_idx = load_or_create_split_indices(
         y=y,
         test_size=float(training_cfg.get("test_size", 0.15)),
         val_size=float(training_cfg.get("val_size", 0.15)),
         seed=seed,
         split_file=split_file,
+        subjects=subject_labels,
+        allow_subject_overlap=allow_subject_overlap,
     )
+    train_subjects = set(subject_labels[train_idx].tolist())
+    val_subjects = set(subject_labels[val_idx].tolist())
+    test_subjects = set(subject_labels[test_idx].tolist())
+    if not allow_subject_overlap:
+        train_test_overlap = train_subjects & test_subjects
+        train_val_overlap = train_subjects & val_subjects
+        val_test_overlap = val_subjects & test_subjects
+        if train_test_overlap or train_val_overlap or val_test_overlap:
+            raise RuntimeError(
+                "Subject-level split failed: subject overlap detected between "
+                f"splits. train-test={sorted(train_test_overlap)}, "
+                f"train-val={sorted(train_val_overlap)}, "
+                f"val-test={sorted(val_test_overlap)}."
+            )
     train_loader, val_loader, test_loader = make_loaders(
         x=x,
         y=y,
@@ -619,6 +655,12 @@ def train_experiment(
     print(f"\n[Run {run_index}] {run_dir.name}")
     print(f"  model={model_cfg}")
     print(f"  training={training_cfg}")
+    print(
+        "  split="
+        f"{'epoch-level' if allow_subject_overlap else 'subject-level'} "
+        f"subjects train/val/test="
+        f"{len(train_subjects)}/{len(val_subjects)}/{len(test_subjects)}"
+    )
     print(
         "  weight_decay_parameters="
         f"{optimizer_group_names['decay']}"
@@ -709,6 +751,10 @@ def train_experiment(
         "n_train": int(len(train_idx)),
         "n_val": int(len(val_idx)),
         "n_test": int(len(test_idx)),
+        "allow_subject_overlap": allow_subject_overlap,
+        "n_train_subjects": int(len(train_subjects)),
+        "n_val_subjects": int(len(val_subjects)),
+        "n_test_subjects": int(len(test_subjects)),
     }
 
     with (run_dir / "metrics.json").open("w", encoding="utf-8") as handle:
@@ -723,14 +769,16 @@ def train_experiment(
     return metrics
 
 
-def preprocess_dataset(data_cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, list[str]]:
+def preprocess_dataset(
+        data_cfg: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
 
     subjects = parse_int_list(data_cfg["subjects"])
     # for dataset in data_cfg["datasets"]:
     #     dataset["filter_bank"] = filter_bank
     task_types = parse_task_types(data_cfg.get("task_types"))
-    x, y, class_names = preprocess_spd(
+    x, y, class_names, subject_labels = preprocess_spd(
         filter_bank=filter_bank,
         root_dir=str(data_cfg.get("root_dir", "data/MNE-eegbci-data/files/eegmmidb/1.0.0")),
         subjects=subjects,
@@ -756,19 +804,25 @@ def preprocess_dataset(data_cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray
         autoreject_random_state=int(data_cfg.get("autoreject_random_state", 42)),
         autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
         autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
+        return_subjects=True,
     )
     if not np.isfinite(x).all():
         bad_count = int((~np.isfinite(x)).sum())
         raise ValueError(
             f"Preprocessed SPD dataset contains {bad_count} NaN or Inf values."
         )
-    return x.astype(np.float32), y.astype(np.int64), list(class_names)
+    return (
+        x.astype(np.float32),
+        y.astype(np.int64),
+        np.asarray(subject_labels, dtype=np.str_),
+        list(class_names),
+    )
 
 
 def load_cached_dataset(
         cache_path: Path,
         data_cfg: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray, list[str]] | None:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]] | None:
     if not cache_path.exists():
         return None
 
@@ -789,6 +843,7 @@ def load_cached_dataset(
 
             x = np.asarray(payload["x"], dtype=np.float32)
             y = np.asarray(payload["y"], dtype=np.int64)
+            subject_labels = np.asarray(payload["subject_labels"], dtype=np.str_)
             class_names = [str(name) for name in payload["class_names"].tolist()]
 
         if not np.isfinite(x).all():
@@ -798,7 +853,13 @@ def load_cached_dataset(
             )
             return None
 
-        return x, y, class_names
+        if len(subject_labels) != len(y):
+            print(
+                "  Cached subject label count does not match y length, rebuilding."
+            )
+            return None
+
+        return x, y, subject_labels, class_names
     except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
         print(f"  Failed to read dataset cache {cache_path}: {error}. Rebuilding.")
         return None
@@ -809,6 +870,7 @@ def save_cached_dataset(
         data_cfg: dict[str, Any],
         x: np.ndarray,
         y: np.ndarray,
+        subject_labels: np.ndarray,
         class_names: list[str],
 ) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -824,6 +886,7 @@ def save_cached_dataset(
             handle,
             x=x.astype(np.float32, copy=False),
             y=y.astype(np.int64, copy=False),
+            subject_labels=np.asarray(subject_labels, dtype=np.str_),
             class_names=np.asarray(class_names, dtype=np.str_),
             metadata_json=np.asarray(
                 json.dumps(metadata, sort_keys=True, default=str),
@@ -836,21 +899,34 @@ def save_cached_dataset(
 def load_or_preprocess_dataset(
         data_cfg: dict[str, Any],
         cache_dir: Path,
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
     data_key = dataset_cache_key(data_cfg)
     cache_path = dataset_cache_path(cache_dir, data_key)
     cached_dataset = load_cached_dataset(cache_path, data_cfg)
     if cached_dataset is not None:
         print(f"\nLoaded preprocessed data from cache {data_key}: {cache_path}")
-        x_cached, y_cached, names_cached = cached_dataset
-        print(f"  X.shape={x_cached.shape}, y.shape={y_cached.shape}, classes={names_cached}")
+        x_cached, y_cached, subjects_cached, names_cached = cached_dataset
+        print(
+            f"  X.shape={x_cached.shape}, y.shape={y_cached.shape}, "
+            f"subjects={len(set(subjects_cached.tolist()))}, classes={names_cached}"
+        )
         return cached_dataset
 
     print(f"\nPreprocessing data config {data_key}: {data_cfg}")
     dataset = preprocess_dataset(data_cfg)
-    x_cached, y_cached, names_cached = dataset
-    print(f"  X.shape={x_cached.shape}, y.shape={y_cached.shape}, classes={names_cached}")
-    save_cached_dataset(cache_path, data_cfg, x_cached, y_cached, names_cached)
+    x_cached, y_cached, subjects_cached, names_cached = dataset
+    print(
+        f"  X.shape={x_cached.shape}, y.shape={y_cached.shape}, "
+        f"subjects={len(set(subjects_cached.tolist()))}, classes={names_cached}"
+    )
+    save_cached_dataset(
+        cache_path,
+        data_cfg,
+        x_cached,
+        y_cached,
+        subjects_cached,
+        names_cached,
+    )
     print(f"  Saved preprocessed data cache: {cache_path}")
     return dataset
 
@@ -876,7 +952,7 @@ def main() -> int:
     # preprocessing parameters, each distinct data config will be handled below.
 
     # cache loaded dataset
-    data_cache: dict[str, tuple[np.ndarray, np.ndarray, list[str]]] = {}
+    data_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]] = {}
     all_metrics = []
 
     print(f"Generated {len(experiments)} experiment(s)")
@@ -892,12 +968,13 @@ def main() -> int:
                 dataset_cache_dir,
             )
 
-        x, y, class_names = data_cache[data_key]
+        x, y, subject_labels, class_names = data_cache[data_key]
         metrics = train_experiment(
             run_index=run_index,
             experiment_cfg=experiment_cfg,
             x=x,
             y=y,
+            subject_labels=subject_labels,
             class_names=class_names,
             base_output_dir=base_output_dir,
             device=device,

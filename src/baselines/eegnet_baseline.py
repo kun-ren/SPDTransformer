@@ -255,8 +255,12 @@ def run_experiment(
     seed = int(training_cfg.get("seed", 42))
     set_seed(seed)
 
-    x, y, class_names, filter_bank = load_segmented_epochs_like_train(data_cfg)
-    train_idx, val_idx, test_idx = get_split_indices(y, training_cfg)
+    x, y, subject_labels, class_names, filter_bank = load_segmented_epochs_like_train(data_cfg)
+    train_idx, val_idx, test_idx = get_split_indices(
+        y,
+        training_cfg,
+        subject_labels=subject_labels,
+    )
 
     dtype = resolve_precision(training_cfg.get("precision", "float32"))
     batch_size = int(training_cfg.get("batch_size", 16))

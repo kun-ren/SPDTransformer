@@ -135,6 +135,21 @@ def parse_task_types(task_types: Any) -> tuple[str, ...]:
     return tuple(str(part).strip() for part in task_types if str(part).strip())
 
 
+def parse_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Cannot parse boolean value: {value!r}")
+
+
 def resolve_split_file(split_file: Any) -> Path | None:
     if split_file in {None, ""}:
         return None
@@ -147,6 +162,7 @@ def resolve_split_file(split_file: Any) -> Path | None:
 def get_split_indices(
     y: np.ndarray,
     training_cfg: dict[str, Any],
+    subject_labels: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return load_or_create_split_indices(
         y=y,
@@ -154,14 +170,19 @@ def get_split_indices(
         val_size=float(training_cfg.get("val_size", 0.15)),
         seed=int(training_cfg.get("seed", 42)),
         split_file=resolve_split_file(training_cfg.get("split_file")),
+        subjects=subject_labels,
+        allow_subject_overlap=parse_bool(
+            training_cfg.get("allow_subject_overlap", True),
+            default=True,
+        ),
     )
 
 
 def load_spd_like_train(
     data_cfg: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
-    x_spd, y, class_names = preprocess_spd(
+    x_spd, y, class_names, subject_labels = preprocess_spd(
         filter_bank=filter_bank,
         root_dir=str(
             data_cfg.get("root_dir", "data/MNE-eegbci-data/files/eegmmidb/1.0.0")
@@ -181,15 +202,21 @@ def load_spd_like_train(
         baseline_window=data_cfg.get("baseline_window"),
         epoch_tmin=float(data_cfg.get("epoch_tmin", -2.0)),
         epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
+        return_subjects=True,
     )
     if not np.isfinite(x_spd).all():
         raise ValueError("preprocess_spd returned NaN or Inf values.")
-    return x_spd.astype(np.float64), y.astype(np.int64), list(class_names)
+    return (
+        x_spd.astype(np.float64),
+        y.astype(np.int64),
+        np.asarray(subject_labels, dtype=np.str_),
+        list(class_names),
+    )
 
 
 def load_segmented_epochs_like_train(
     data_cfg: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray, list[str], list[list[float]]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], list[list[float]]]:
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
     root_dir = str(data_cfg.get("root_dir", "data/MNE-eegbci-data/files/eegmmidb/1.0.0"))
     subjects = parse_subjects(data_cfg.get("subjects"))
@@ -248,7 +275,13 @@ def load_segmented_epochs_like_train(
     # Shape: (n_trials, n_segments, n_frequency_bands, n_channels, n_samples)
     if not np.isfinite(x).all():
         raise ValueError("Segmented EEG dataset contains NaN or Inf values.")
-    return x, y.astype(np.int64), list(class_names), filter_bank
+    return (
+        x,
+        y.astype(np.int64),
+        np.asarray(subject_labels, dtype=np.str_),
+        list(class_names),
+        filter_bank,
+    )
 
 
 def matrix_log(x: np.ndarray, eps: float = 1e-8) -> np.ndarray:

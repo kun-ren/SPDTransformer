@@ -33,13 +33,13 @@ model:
   ffn_hidden_spd_dim: [462, 924]
   tau: [1.3]
   metric: ["learnable-metric"]
-  depth: [1, 2]
+  depth: [1]
   classifier_type: ["pooling"]
   pooling: ["mean"]
   dropout: [0.2]
   attention_dropout: [0.0]   #   fix to 0.0 or 0.1
-  use_position_bias: [true, false]
-  layer_norm_affine: [true, false]
+  use_position_bias: [false] # slightly better than true in low-rank
+  layer_norm_affine: [true] # true
   debug_attention_dropout: [false]
   debug_attention_shape: [false]
   debug_tensor_stats: [False]
@@ -53,12 +53,13 @@ training:
   epochs: [16]
   batch_size: [128]
   learning_rate: [0.002] # best 0.002
-  weight_decay: [1.0e-3, 5.0e-4, 5.0e-3]
-  apply_weight_decay_to_special_parameters: [true, false]
+  weight_decay: [0.001, 0.1]    # 0.001 is worse than 0.005 and 0.05
+  apply_weight_decay_to_special_parameters: [true, false]  # no big difference to be determined
   gradient_clip_norm: [0.8]  # best 0.8
   test_size: [0.15]
   val_size: [0.15]
-  split_file: ["experiments/splits/physionet_mi_seed42.json"]
+  allow_subject_overlap: [false]  # false = subject-level split for cross-subject generalization
+  split_file: ["experiments/splits/physionet_mi_seed42_subject_split.json"]
   num_workers: [0]
 
 output:

@@ -40,9 +40,13 @@ def run_experiment(
     data_cfg = experiment_cfg["data"]
     training_cfg = experiment_cfg["training"]
 
-    x_spd, y, class_names = load_spd_like_train(data_cfg)
+    x_spd, y, subject_labels, class_names = load_spd_like_train(data_cfg)
     x_trial_spd = log_euclidean_token_mean(x_spd)
-    train_idx, val_idx, test_idx = get_split_indices(y, training_cfg)
+    train_idx, val_idx, test_idx = get_split_indices(
+        y,
+        training_cfg,
+        subject_labels=subject_labels,
+    )
 
     classifier = MDM(metric=metric)
     classifier.fit(x_trial_spd[train_idx], y[train_idx])
