@@ -194,14 +194,25 @@ def load_spd_like_train(
         sfreq=float(data_cfg.get("sfreq", 160)),
         segment_duration=float(data_cfg.get("segment_duration", 1.0)),
         stride_duration=data_cfg.get("stride_duration", 0.5),
-        imaged=bool(data_cfg.get("imaged", True)),
-        executed=bool(data_cfg.get("executed", False)),
+        imaged=parse_bool(data_cfg.get("imaged", True), default=True),
+        executed=parse_bool(data_cfg.get("executed", False), default=False),
         task_types=parse_task_types(data_cfg.get("task_types")),
         reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
         baseline_correction=data_cfg.get("baseline_correction"),
         baseline_window=data_cfg.get("baseline_window"),
         epoch_tmin=float(data_cfg.get("epoch_tmin", -2.0)),
         epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
+        use_ica=parse_bool(data_cfg.get("use_ica", False), default=False),
+        ica_n_components=data_cfg.get("ica_n_components", 20),
+        ica_random_state=int(data_cfg.get("ica_random_state", 42)),
+        ica_eog_channels=data_cfg.get("ica_eog_channels"),
+        use_autoreject=parse_bool(
+            data_cfg.get("use_autoreject", False),
+            default=False,
+        ),
+        autoreject_random_state=int(data_cfg.get("autoreject_random_state", 42)),
+        autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
+        autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
         return_subjects=True,
     )
     if not np.isfinite(x_spd).all():
@@ -225,8 +236,10 @@ def load_segmented_epochs_like_train(
     segment_duration = float(data_cfg.get("segment_duration", 1.0))
     stride_duration = data_cfg.get("stride_duration", 0.5)
     task_types = parse_task_types(data_cfg.get("task_types"))
-    imaged = bool(data_cfg.get("imaged", True))
-    executed = bool(data_cfg.get("executed", False))
+    imaged = parse_bool(data_cfg.get("imaged", True), default=True)
+    executed = parse_bool(data_cfg.get("executed", False), default=False)
+    use_ica = parse_bool(data_cfg.get("use_ica", False), default=False)
+    use_autoreject = parse_bool(data_cfg.get("use_autoreject", False), default=False)
     if normalize_baseline_correction_mode(data_cfg.get("baseline_correction")) is not None:
         print(
             "Ignoring SPD covariance baseline_correction for raw segmented "
@@ -249,6 +262,14 @@ def load_segmented_epochs_like_train(
             high_freq=high_freq,
             channels=channels,
             reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
+            use_ica=use_ica,
+            ica_n_components=data_cfg.get("ica_n_components", 20),
+            ica_random_state=int(data_cfg.get("ica_random_state", 42)),
+            ica_eog_channels=data_cfg.get("ica_eog_channels"),
+            use_autoreject=use_autoreject,
+            autoreject_random_state=int(data_cfg.get("autoreject_random_state", 42)),
+            autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
+            autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
         )
         x_band = dataset["X"]
         if labels is None:

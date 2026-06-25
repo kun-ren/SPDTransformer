@@ -18,6 +18,21 @@ def normalize_channels(channels):
     return channels or None
 
 
+def normalize_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off", "none", "null", ""}:
+        return False
+    raise ValueError(f"Cannot parse boolean value: {value!r}")
+
+
 def bandpass_filter(X, sfreq=160.0, low_freq=8.0, high_freq=30.0, **kwargs):
     """
     X shape: (n_trials, n_channels, n_times).
@@ -544,6 +559,8 @@ def extract_transition_epochs(
 
     label = task type
     """
+    use_ica = normalize_bool(use_ica, default=False)
+    use_autoreject = normalize_bool(use_autoreject, default=False)
 
     raw = mne.io.read_raw_edf(
         edf_file,
@@ -660,7 +677,7 @@ def extract_transition_epochs(
     if rejected:
         ptp_uv = epoch_peak_to_peak_uv(artifact_epochs)
         print(
-            f"Rejected {rejected} bad epoch(s) from {edf_file} "
+            f"Peak-to-peak rejected {rejected} bad epoch(s) from {edf_file} "
             f"(threshold={float(reject_threshold_uv):.1f} uV, "
             f"ptp_uv median={np.median(ptp_uv):.1f}, "
             f"p90={np.percentile(ptp_uv, 90):.1f}, "
@@ -692,6 +709,10 @@ def load_subject(
     autoreject_n_jobs=1,
     autoreject_cv=10,
 ):
+    imaged = normalize_bool(imaged, default=True)
+    executed = normalize_bool(executed, default=False)
+    use_ica = normalize_bool(use_ica, default=False)
+    use_autoreject = normalize_bool(use_autoreject, default=False)
     X_all = []
     y_all = []
 
@@ -767,6 +788,10 @@ def build_dataset(
     autoreject_n_jobs=1,
     autoreject_cv=10,
 ):
+    imaged = normalize_bool(imaged, default=True)
+    executed = normalize_bool(executed, default=False)
+    use_ica = normalize_bool(use_ica, default=False)
+    use_autoreject = normalize_bool(use_autoreject, default=False)
     X_all = []
     y_all = []
     subject_labels = []
@@ -887,6 +912,11 @@ def preprocess_spd(
     return_subjects=False,
 ):
     from pyriemann.estimation import Covariances
+
+    imaged = normalize_bool(imaged, default=True)
+    executed = normalize_bool(executed, default=False)
+    use_ica = normalize_bool(use_ica, default=False)
+    use_autoreject = normalize_bool(use_autoreject, default=False)
 
     frequencies = []
     labels = None
