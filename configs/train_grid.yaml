@@ -52,7 +52,7 @@ training:
   seed: [42]
   precision: ["float64"]
   epochs: [25]
-  batch_size: [64, 256]
+  batch_size: [128]
   learning_rate: [0.002] # best 0.002
   weight_decay: [0.005]    # 0.001 is worse than 0.005 and 0.05
   apply_weight_decay_to_special_parameters: [true]  # no big difference to be determined
