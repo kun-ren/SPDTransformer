@@ -122,25 +122,6 @@ def stable_attention_softmax(
     return attention
 
 
-def check_tensor(name, t):
-    print(f"\n{name}")
-    print("shape:", t.shape)
-    print("dtype:", t.dtype)
-    print("device:", t.device)
-
-    if torch.is_floating_point(t):
-        print("min:", t.min().item())
-        print("max:", t.max().item())
-        print("mean:", t.mean().item())
-        print("std:", t.std().item())
-
-    print("has_nan:", torch.isnan(t).any().item() if torch.is_floating_point(t) else False)
-    print("has_inf:", torch.isinf(t).any().item() if torch.is_floating_point(t) else False)
-
-
-def maybe_check_tensor(enabled: bool, name: str, t: torch.Tensor) -> None:
-    if enabled:
-        check_tensor(name, t)
 
 
 class PositionBias(nn.Module):
@@ -262,31 +243,30 @@ class SingleHeadAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Tensor:
 
-        maybe_check_tensor(self.debug_tensor_stats, "attention/input", x)
+
         q = self.query(x)
-        maybe_check_tensor(self.debug_tensor_stats, "attention/query", q)
+
         k = self.key(x)
-        maybe_check_tensor(self.debug_tensor_stats, "attention/key", k)
+
         v = self.value(x)
-        maybe_check_tensor(self.debug_tensor_stats, "attention/value", v)
+
 
         log_v = spd_log(v)
-        maybe_check_tensor(self.debug_tensor_stats, "attention/log_value", log_v)
+
         dis = self.learnableRiemannianDistance(q, k)
-        maybe_check_tensor(self.debug_tensor_stats, "attention/distance", dis)
+
         score = -dis
         if self.position_bias is not None:
             score = score + self.position_bias(dis.shape[-1])
-        maybe_check_tensor(self.debug_tensor_stats, "attention/score", score)
+
         attention = stable_attention_softmax(score, dim=-1)
-        maybe_check_tensor(self.debug_tensor_stats, "attention/softmax", attention)
+
         attention_before_dropout = attention
         attention = self.attention_dropout(attention)
-        maybe_check_tensor(self.debug_tensor_stats, "attention/after_dropout", attention)
+
         self._print_attention_dropout_debug(attention_before_dropout, attention)
 
         weighted_log_v = torch.einsum('...ij,...jmn->...imn', attention, log_v)
-        maybe_check_tensor(self.debug_tensor_stats, "attention/weighted_log_value", weighted_log_v)
 
         return weighted_log_v
 

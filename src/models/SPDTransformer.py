@@ -8,7 +8,6 @@ from src.models.RiemannianLayerNorm import RiemannianLayerNorm
 from src.models.SPDAttention import (
     SingleHeadAttention,
     _safe_eigh,
-    maybe_check_tensor,
     spd_log,
 )
 
@@ -48,7 +47,7 @@ class SPDAddNorm(nn.Module):
 
     def forward(self, residual_log: torch.Tensor, sublayer_output_log: torch.Tensor) -> torch.Tensor:
 
-        # Constrain the residual scale to (0, 1).
+        #Constrain the residual scale to (0, 1).
         eta = torch.sigmoid(self.residual_weight)
 
         S_res = (
@@ -551,7 +550,6 @@ class SPDPoolingClassifier(SPDClassifierBase):
         :return torch.Tensor: (batch, channels, channels)
         """
         log_x = spd_log(x)
-        maybe_check_tensor(self.debug_tensor_stats, "mean_pool/log_x", log_x)
         token_dims = tuple(range(1, log_x.ndim - 2))
         return log_x.mean(dim=token_dims)
 
@@ -564,17 +562,15 @@ class SPDPoolingClassifier(SPDClassifierBase):
         batch_size = x.shape[0]
         spd_dim = x.shape[-1]
         log_x = spd_log(x)
-        maybe_check_tensor(self.debug_tensor_stats, "attention_pool/log_x", log_x)
         # log_tokens = (batch, tim x frequency_bands, channels, channels)
         log_tokens = log_x.reshape(batch_size, -1, spd_dim, spd_dim)
-        maybe_check_tensor(self.debug_tensor_stats, "attention_pool/log_tokens", log_tokens)
         token_features = self.upper_triangular_vectorize(log_tokens)
-        maybe_check_tensor(self.debug_tensor_stats, "attention_pool/token_features", token_features)
+
 
         scores = self.pool_score(token_features).squeeze(-1)
-        maybe_check_tensor(self.debug_tensor_stats, "attention_pool/scores", scores)
+
         weights = torch.softmax(scores, dim=-1)
-        maybe_check_tensor(self.debug_tensor_stats, "attention_pool/weights", weights)
+
         return torch.einsum("bt,btmn->bmn", weights, log_tokens)
 
 
@@ -671,14 +667,12 @@ class SPDTaskTagClassifier(SPDClassifierBase):
 
         task_log = 0.5 * (self.task_log_token + self.task_log_token.transpose(-1, -2)) # sym
         task_log = task_log.to(device=x.device, dtype=x.dtype)
-        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/task_log_parameter", task_log)
 
         # matrix_exp remains differentiable when the log token has repeated
         # eigenvalues, unlike an eigendecomposition-based implementation.
         task_token = torch.matrix_exp(task_log)  # Identity  matrix I
         eye = torch.eye(self.spd_in_dim, device=x.device, dtype=x.dtype)
         task_token = 0.5 * (task_token + task_token.transpose(-1, -2)) + 1e-5 * eye # sym
-        maybe_check_tensor(self.debug_tensor_stats, "task_classifier/task_spd_token", task_token)
 
         if x.ndim == 4:
             batch_size = x.shape[0]
@@ -795,7 +789,6 @@ class SPDTransformerClassifier(nn.Module):
             print("SPDTaskTagClassifier built")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        maybe_check_tensor(self.debug_tensor_stats, "classifier/input", x)
+
         logits = self.model(x)
-        maybe_check_tensor(self.debug_tensor_stats, "classifier/output", logits)
         return logits
