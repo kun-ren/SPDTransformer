@@ -129,7 +129,7 @@ class SPDFeedForward(nn.Module):
 
         # Here hidden_spd_dim is treated as hidden feature dimension.
         # If None, use standard Transformer-style expansion.
-        hidden_feature_dim = hidden_spd_dim or 4 * self.feature_dim
+        hidden_feature_dim = hidden_spd_dim or 2 * self.feature_dim
 
         row, col = torch.triu_indices(spd_dim, spd_dim)
         self.register_buffer("tri_row", row, persistent=False)
@@ -206,7 +206,7 @@ class SPDEncoder(nn.Module):
             debug_tensor_stats: bool = False,
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
-            metric_eps: float = 1e-6,
+            eps: float = 1e-6,
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
             dropout: float = 0.0,
@@ -226,7 +226,7 @@ class SPDEncoder(nn.Module):
             debug_attention_dropout=debug_attention_dropout,
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
-            metric_eps=metric_eps,
+            eps=eps,
             use_position=use_position_bias,
             max_position=time_sequence_length,
             debug_tensor_stats=debug_tensor_stats,
@@ -235,19 +235,20 @@ class SPDEncoder(nn.Module):
             spd_out_dim,
             sequence_length=time_sequence_length,
             tau=tau,
-            eps=metric_eps,
+            eps=eps,
             affine=layer_norm_affine,
         )
         self.time_ffn = SPDFeedForward(
             spd_out_dim,
             ffn_hidden_spd_dim,
             dropout=dropout,
+            eps=eps
         )
         self.time_add_norm2 = SPDAddNorm(
             spd_out_dim,
             sequence_length=time_sequence_length,
             tau=tau,
-            eps=metric_eps,
+            eps=eps,
             affine=layer_norm_affine,
         )
 
@@ -259,7 +260,7 @@ class SPDEncoder(nn.Module):
             debug_attention_dropout=debug_attention_dropout,
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
-            metric_eps=metric_eps,
+            eps=eps,
             use_position=use_position_bias,
             max_position=frequency_sequence_length,
             debug_tensor_stats=debug_tensor_stats,
@@ -268,7 +269,7 @@ class SPDEncoder(nn.Module):
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
-            eps=metric_eps,
+            eps=eps,
             affine=layer_norm_affine,
 
         )
@@ -276,12 +277,13 @@ class SPDEncoder(nn.Module):
             spd_out_dim,
             ffn_hidden_spd_dim,
             dropout=dropout,
+            eps=eps
         )
         self.frequency_add_norm2 = SPDAddNorm(
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
-            eps=metric_eps,
+            eps=eps,
             affine=layer_norm_affine,
         )
 
@@ -381,7 +383,7 @@ class SPDTransformer(nn.Module):
             debug_tensor_stats: bool = False,
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
-            metric_eps: float = 1e-6,
+            eps: float = 1e-8,
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
             dropout: float = 0.0,
@@ -409,7 +411,7 @@ class SPDTransformer(nn.Module):
                 debug_tensor_stats=debug_tensor_stats,
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
-                metric_eps=metric_eps,
+                eps=eps,
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
@@ -476,7 +478,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             debug_tensor_stats: bool = False,
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
-            metric_eps: float = 1e-6,
+            eps: float = 1e-6,
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
     ):
@@ -513,7 +515,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             debug_tensor_stats=debug_tensor_stats,
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
-            metric_eps=metric_eps,
+            eps=eps,
             use_position_bias=use_position_bias,
             layer_norm_affine=layer_norm_affine,
             dropout=dropout,
@@ -633,7 +635,7 @@ class SPDTaskTagClassifier(SPDClassifierBase):
             debug_tensor_stats: bool = False,
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
-            metric_eps: float = 1e-6,
+            eps: float = 1e-6,
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
     ):
@@ -661,7 +663,7 @@ class SPDTaskTagClassifier(SPDClassifierBase):
             debug_tensor_stats=debug_tensor_stats,
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
-            metric_eps=metric_eps,
+            eps=eps,
             use_position_bias=use_position_bias,
             layer_norm_affine=layer_norm_affine,
             dropout=dropout,
@@ -704,7 +706,7 @@ class SPDTaskTagClassifier(SPDClassifierBase):
         # eigenvalues, unlike an eigendecomposition-based implementation.
         task_token = torch.matrix_exp(task_log)  # Identity  matrix I
         eye = torch.eye(self.spd_in_dim, device=x.device, dtype=x.dtype)
-        task_token = 0.5 * (task_token + task_token.transpose(-1, -2)) + 1e-5 * eye # sym
+        task_token = 0.5 * (task_token + task_token.transpose(-1, -2)) + self.eps * eye # sym
 
         if x.ndim == 4:
             batch_size = x.shape[0]
@@ -755,7 +757,7 @@ class SPDTransformerClassifier(nn.Module):
             debug_tensor_stats: bool = False,
             learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
             learnable_metric_rank: int | None = None,
-            metric_eps: float = 1e-6,
+            eps: float = 1e-8,
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
     ):
@@ -791,7 +793,7 @@ class SPDTransformerClassifier(nn.Module):
                 debug_tensor_stats=debug_tensor_stats,
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
-                metric_eps=metric_eps,
+                eps=eps,
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
             )
@@ -814,7 +816,7 @@ class SPDTransformerClassifier(nn.Module):
                 debug_tensor_stats=debug_tensor_stats,
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
-                metric_eps=metric_eps,
+                eps=eps,
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
             )

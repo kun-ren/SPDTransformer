@@ -29,12 +29,12 @@ class BiMap(nn.Module):
         # numerical symmetry correction
         y = 0.5 * (y + y.transpose(-1, -2))
 
-        # optional jitter for numerical stability
-        eye = torch.eye(
-            self.out_dim,
-            device=x.device,
-            dtype=x.dtype,
-        )
-        y = y + self.eps * eye
+        # # optional jitter for numerical stability
+        # eye = torch.eye(
+        #     self.out_dim,
+        #     device=x.device,
+        #     dtype=x.dtype,
+        # )
+        # y = y + self.eps * eye
 
         return y

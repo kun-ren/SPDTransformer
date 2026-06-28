@@ -28,7 +28,7 @@ def _eye_like(x: torch.Tensor) -> torch.Tensor:
 
 def _safe_eigh(
     x: torch.Tensor,
-    eps: float = 1e-5,
+    eps: float = 1e-9,
     max_tries: int = 6,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     x = _symmetrize(x)
@@ -173,7 +173,7 @@ class SingleHeadAttention(nn.Module):
         tangent_out_dim: int | None = None,
         learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
         learnable_metric_rank: int | None = None,
-        metric_eps: float = 1e-6,
+        eps: float = 1e-6,
         use_position: bool = False,
         max_position: int = 128,
         debug_tensor_stats: bool = False,
@@ -183,16 +183,16 @@ class SingleHeadAttention(nn.Module):
         self.spd_out_dim = spd_out_dim
         self.metric = MetricType(metric)
         self.learnable_metric_mode = learnable_metric_mode
-        self.metric_eps = metric_eps
+        self.eps = eps
         self.attention_dropout = nn.Dropout(attention_dropout)
         self.debug_attention_dropout = debug_attention_dropout
         self.debug_tensor_stats = debug_tensor_stats
-        self.affine_log_eps = metric_eps
+        self.affine_log_eps = eps
         self.use_position = use_position
 
-        self.query = BiMap(in_dim=spd_in_dim, out_dim=spd_out_dim, )
-        self.key = BiMap(in_dim=spd_in_dim, out_dim=spd_out_dim, )
-        self.value = BiMap(in_dim=spd_in_dim, out_dim=self.spd_out_dim, )
+        self.query = BiMap(in_dim=spd_in_dim, out_dim=spd_out_dim, eps=self.eps)
+        self.key = BiMap(in_dim=spd_in_dim, out_dim=spd_out_dim, eps=self.eps)
+        self.value = BiMap(in_dim=spd_in_dim, out_dim=self.spd_out_dim, eps= self.eps)
         if self.metric == MetricType.LearnableAffineLogFunction:
             # softplus(inverse_softplus(1)) = 1, so the initial transform is
             # g(lambda) = log(lambda + eps).
@@ -243,7 +243,6 @@ class SingleHeadAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Tensor:
 
-
         q = self.query(x)
 
         k = self.key(x)
@@ -267,6 +266,7 @@ class SingleHeadAttention(nn.Module):
         self._print_attention_dropout_debug(attention_before_dropout, attention)
 
         weighted_log_v = torch.einsum('...ij,...jmn->...imn', attention, log_v)
+
 
         return weighted_log_v
 
@@ -341,7 +341,7 @@ class SingleHeadAttention(nn.Module):
                 projected_diff = diff @ self.metric_low_rank
                 squared_distance = (
                     projected_diff.square().sum(dim=-1)
-                    + self.metric_eps * diff.square().sum(dim=-1)
+                    + self.eps * diff.square().sum(dim=-1)
                 )
                 return torch.sqrt(squared_distance.clamp_min(0.0))
 
@@ -359,8 +359,8 @@ class SingleHeadAttention(nn.Module):
                 device=diff.device,
                 dtype=diff.dtype,
             )
-            g1 = left_cholesky @ left_cholesky.transpose(-1, -2) + self.metric_eps * eye
-            g2 = right_cholesky @ right_cholesky.transpose(-1, -2) + self.metric_eps * eye
+            g1 = left_cholesky @ left_cholesky.transpose(-1, -2) + self.eps * eye
+            g2 = right_cholesky @ right_cholesky.transpose(-1, -2) + self.eps * eye
 
             left_metric_diff = torch.einsum("ab,...bc->...ac", g1, diff)
             metric_diff = torch.einsum("...ab,bc->...ac", left_metric_diff, g2)

@@ -31,7 +31,7 @@ from src.training.shared_split import load_or_create_split_indices
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_grid.yaml"
-DATASET_CACHE_VERSION = 2
+DATASET_CACHE_VERSION = 3
 DEFAULT_DATASET_CACHE_DIR = PROJECT_ROOT / "experiments" / "cache" / "preprocessed_datasets"
 
 
@@ -293,7 +293,7 @@ def build_model(
         debug_tensor_stats=bool(model_cfg.get("debug_tensor_stats", False)),
         learnable_metric_mode=str(model_cfg.get("learnable_metric_mode", "low-rank")),
         learnable_metric_rank=model_cfg.get("learnable_metric_rank"),
-        metric_eps=float(model_cfg.get("metric_eps", 1e-6)),
+        eps=float(model_cfg.get("eps", 1e-6)),
         use_position_bias=bool(model_cfg.get("use_position_bias", True)),
         layer_norm_affine=bool(model_cfg.get("layer_norm_affine", True)),
     )
@@ -580,6 +580,11 @@ def train_experiment(
         training_cfg.get("allow_subject_overlap", True),
         default=True,
     )
+    global_max = np.max(x)
+    global_min = np.min(np.abs(x))
+    print(f"max: {global_max}")
+    print(f"min: {global_min}")
+
     train_idx, val_idx, test_idx = load_or_create_split_indices(
         y=y,
         test_size=float(training_cfg.get("test_size", 0.15)),
@@ -603,6 +608,8 @@ def train_experiment(
                 f"train-val={sorted(train_val_overlap)}, "
                 f"val-test={sorted(val_test_overlap)}."
             )
+
+
     train_loader, val_loader, test_loader = make_loaders(
         x=x,
         y=y,
@@ -719,7 +726,11 @@ def train_experiment(
             f"mf1={val_metrics['macro_f1']:.4f}"
         )
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=True,
+    )
     model.load_state_dict(checkpoint["model_state_dict"])
     split_predictions = {
         "train": predict_loader(model, train_loader, criterion, device),
@@ -808,6 +819,9 @@ def preprocess_dataset(
         autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
         autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
         return_subjects=True,
+        covariance_signal_scale=float(
+            data_cfg.get("covariance_signal_scale", 1e6)
+        ),
     )
     if not np.isfinite(x).all():
         bad_count = int((~np.isfinite(x)).sum())

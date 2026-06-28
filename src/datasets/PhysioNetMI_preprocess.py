@@ -910,6 +910,7 @@ def preprocess_spd(
     autoreject_n_jobs=1,
     autoreject_cv=10,
     return_subjects=False,
+    covariance_signal_scale=1e6,
 ):
     from pyriemann.estimation import Covariances
 
@@ -978,9 +979,19 @@ def preprocess_spd(
             f"trials: {n_epochs}, n_segments: {n_segments}, n_channels: {n_channels}, in_segment_samples: {segment_samples}"
         )
 
-        # 3. Compute covariance matrices using pyriemann
+        # 3. Compute covariance matrices using pyriemann.
+        # MNE EEG data are in Volts, so raw covariance values are in V^2
+        # and can be around 1e-12..1e-8. Scaling to microvolts keeps the
+        # covariance estimator and diagonal regularization away from tiny
+        # floating-point magnitudes; trace normalization below removes this
+        # global scale before the model sees the matrices.
+        covariance_input = temp_x * float(covariance_signal_scale)
         cov_x = Covariances(estimator=estimator).fit_transform(
-            temp_x.reshape(n_epochs * n_segments, n_channels, segment_samples)
+            covariance_input.reshape(
+                n_epochs * n_segments,
+                n_channels,
+                segment_samples,
+            )
         )
         cov_x = cov_x.reshape(n_epochs, n_segments, n_channels, n_channels)
 

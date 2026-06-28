@@ -7,6 +7,7 @@ data:
   estimator: ["lwf"]
   sfreq: [160]
   eps: [1.0e-6]
+  covariance_signal_scale: [1.0e6]
   subjects: 1-87,89-109
   channels: "FC5, FC3, FC1, FCz, FC2, FC4, FC6, C5, C3, C1, Cz, C2, C4, C6, CP5, CP3, CP1, CPz, CP2, CP4, CP6"
   reject_threshold_uv: [500]  # set e.g. 500 to enable peak-to-peak epoch rejection
@@ -14,7 +15,7 @@ data:
   ica_n_components: [13]
   ica_random_state: [42]
   ica_eog_channels: ["FP1,FP2"]
-  use_autoreject: [false]
+  use_autoreject: [true]
   autoreject_random_state: [42]
   autoreject_n_jobs: [2]
   autoreject_cv: [10]
@@ -36,7 +37,7 @@ model:
   metric: ["learnable-metric"]
   depth: [1]
   classifier_type: ["pooling"]
-  pooling: ["band_mean"]
+  pooling: ["mean"]
   dropout: [0.2]
   attention_dropout: [0.0]   #   fix to 0.0 or 0.1
   use_position_bias: [true] # slightly better than true in low-rank
@@ -46,7 +47,7 @@ model:
   debug_tensor_stats: [False]
   learnable_metric_mode: ["low-rank"]
   learnable_metric_rank: [null]
-  metric_eps: [1.0e-6]
+  eps: [1.0e-6]
 
 training:
   seed: [42]
