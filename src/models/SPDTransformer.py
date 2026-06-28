@@ -422,7 +422,7 @@ class SPDTransformer(nn.Module):
 
 
 ClassifierType = Literal["pooling", "task"]
-SPDPoolingMode = Literal["mean", "attention"]
+SPDPoolingMode = Literal["mean", "band_mean", "attention"]
 
 
 class SPDClassifierBase(nn.Module):
@@ -481,9 +481,10 @@ class SPDPoolingClassifier(SPDClassifierBase):
             layer_norm_affine: bool = True,
     ):
         super().__init__()
-        if pooling not in {"mean", "attention"}:
+        if pooling not in {"mean", "band_mean", "attention"}:
             raise ValueError(
-                f"SPDPoolingClassifier pooling must be 'mean' or 'attention', got {pooling!r}."
+                "SPDPoolingClassifier pooling must be 'mean', "
+                f"'band_mean', or 'attention', got {pooling!r}."
             )
 
         self.spd_out_dim = spd_out_dim
@@ -491,6 +492,11 @@ class SPDPoolingClassifier(SPDClassifierBase):
         self.pooling = pooling
         self.debug_tensor_stats = debug_tensor_stats
         self.feature_dim = spd_out_dim * (spd_out_dim + 1) // 2
+        self.classifier_feature_dim = (
+            self.feature_dim * frequency_sequence_length
+            if pooling == "band_mean"
+            else self.feature_dim
+        )
 
         self.encoder = SPDTransformer(
             spd_in_dim=spd_in_dim,
@@ -522,7 +528,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             self.pool_score = None
 
         self.classifier = self.build_linear_classifier(
-            feature_dim=self.feature_dim,
+            feature_dim=self.classifier_feature_dim,
             num_classes=num_classes,
             dropout=dropout,
         )
@@ -534,11 +540,12 @@ class SPDPoolingClassifier(SPDClassifierBase):
 
         if self.pooling == "mean":
             pooled_log = self._mean_pool(x)
+            features = self.upper_triangular_vectorize(pooled_log)
+        elif self.pooling == "band_mean":
+            features = self._band_mean_pool_features(x)
         else:
             pooled_log = self._attention_pool(x)
-
-
-        features = self.upper_triangular_vectorize(pooled_log)
+            features = self.upper_triangular_vectorize(pooled_log)
 
         logits = self.classifier(features)
 
@@ -552,6 +559,31 @@ class SPDPoolingClassifier(SPDClassifierBase):
         log_x = spd_log(x)
         token_dims = tuple(range(1, log_x.ndim - 2))
         return log_x.mean(dim=token_dims)
+
+    def _band_mean_pool_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Average over time but keep frequency-band features separate.
+
+        For 5D input, this returns one tangent feature vector per frequency
+        band and concatenates them. For 4D input, it falls back to temporal
+        mean pooling.
+        """
+        log_x = spd_log(x)
+        if log_x.ndim == 4:
+            pooled_log = log_x.mean(dim=1)
+            return self.upper_triangular_vectorize(pooled_log)
+
+        if log_x.ndim != 5:
+            raise ValueError(
+                "Expected encoder output shape "
+                "(batch, time, channels, channels) or "
+                "(batch, time, frequency, channels, channels), "
+                f"got {tuple(log_x.shape)}."
+            )
+
+        band_log = log_x.mean(dim=1)
+        band_features = self.upper_triangular_vectorize(band_log)
+        return band_features.reshape(band_features.shape[0], -1)
 
     def _attention_pool(self, x: torch.Tensor) -> torch.Tensor:
         """

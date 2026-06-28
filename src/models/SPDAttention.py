@@ -255,7 +255,7 @@ class SingleHeadAttention(nn.Module):
 
         dis = self.learnableRiemannianDistance(q, k)
 
-        score = -dis
+        score = - dis
         if self.position_bias is not None:
             score = score + self.position_bias(dis.shape[-1])
 
