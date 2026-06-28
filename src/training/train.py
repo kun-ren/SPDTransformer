@@ -729,7 +729,10 @@ def train_experiment(
     checkpoint = torch.load(
         checkpoint_path,
         map_location=device,
-        weights_only=True,
+        # This checkpoint is written by this training run and contains
+        # metadata such as config/class names in addition to tensor weights.
+        # weights_only=True rejects those numpy/Python objects.
+        weights_only=False,
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     split_predictions = {
