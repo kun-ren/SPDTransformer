@@ -3,7 +3,8 @@ from typing import Literal, Any
 import torch
 from torch import nn
 import torch.nn.functional as F
-from src.models.BiMap import BiMap
+
+from src.models.GeooptBiMap import GeooptBiMap
 from src.models.RiemannianLayerNorm import RiemannianLayerNorm
 from src.models.SPDAttention import (
     SingleHeadAttention,
@@ -225,7 +226,7 @@ class SPDEncoder(nn.Module):
 
         self.stage_projection = None
         if self.stage_transition:
-            self.stage_projection = BiMap(spd_in_dim, attention_dim)
+            self.stage_projection = GeooptBiMap(spd_in_dim, attention_dim)
 
         if self.stage_projection is not None:
             spd_out_dim = attention_dim

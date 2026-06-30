@@ -1,12 +1,12 @@
 from enum import Enum
 import math
-from typing import Literal, Tuple, Dict
+from typing import Literal
 
 import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
 
-from src.models.BiMap import BiMap
+from src.models.GeooptBiMap import GeooptBiMap
 
 
 class MetricType(Enum):
@@ -193,13 +193,13 @@ class SingleHeadAttention(nn.Module):
         self.use_position = use_position
 
         if self.stage_transition:
-            self.query = BiMap(in_dim=spd_in_dim, out_dim=spd_in_dim, eps=self.eps)
-            self.key = BiMap(in_dim=spd_in_dim, out_dim=spd_in_dim, eps=self.eps)
-            self.value = BiMap(in_dim=spd_in_dim, out_dim=self.spd_in_dim, eps=self.eps)
+            self.query = GeooptBiMap(in_dim=spd_in_dim, out_dim=spd_in_dim, eps=self.eps)
+            self.key = GeooptBiMap(in_dim=spd_in_dim, out_dim=spd_in_dim, eps=self.eps)
+            self.value = GeooptBiMap(in_dim=spd_in_dim, out_dim=self.spd_in_dim, eps=self.eps)
         else:
-            self.query = BiMap(in_dim=spd_in_dim, out_dim=attention_dim, eps=self.eps)
-            self.key = BiMap(in_dim=spd_in_dim, out_dim=attention_dim, eps=self.eps)
-            self.value = BiMap(in_dim=spd_in_dim, out_dim=self.spd_in_dim, eps=self.eps)
+            self.query = GeooptBiMap(in_dim=spd_in_dim, out_dim=attention_dim, eps=self.eps)
+            self.key = GeooptBiMap(in_dim=spd_in_dim, out_dim=attention_dim, eps=self.eps)
+            self.value = GeooptBiMap(in_dim=spd_in_dim, out_dim=self.spd_in_dim, eps=self.eps)
 
         if self.metric == MetricType.LearnableAffineLogFunction:
             # softplus(inverse_softplus(1)) = 1, so the initial transform is
