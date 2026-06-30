@@ -1,6 +1,11 @@
-import torch
+from typing import Literal
 
+import torch
+from torch import nn
+
+from src.models.SPDAttention import spd_log
 from src.models.SPDClassifierBase import SPDClassifierBase
+from src.models.SPDTransformer import SPDTransformer
 
 
 class SPDTaskTagClassifier(SPDClassifierBase):
