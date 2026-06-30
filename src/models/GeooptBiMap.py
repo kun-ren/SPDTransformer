@@ -19,7 +19,7 @@ class GeooptBiMap(nn.Module):
         W^T W = I
     """
 
-    def __init__(self, in_dim: int, out_dim: int):
+    def __init__(self, in_dim: int, out_dim: int, eps: float = 1e-9):
         super().__init__()
 
         if out_dim > in_dim:
