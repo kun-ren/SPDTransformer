@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import geoopt
 import numpy as np
 import torch
 import yaml
@@ -25,7 +26,6 @@ from torch.utils.data import DataLoader, Dataset
 
 from script.load_moabb_dataset import parse_int_list
 from src.datasets.PhysioNetMI_preprocess import preprocess_spd
-from src.models.RiemannianLayerNorm import RiemannianLayerNorm
 from src.models.SPDTransformer import SPDTransformerClassifier
 from src.training.shared_split import load_or_create_split_indices
 
@@ -33,23 +33,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_grid.yaml"
 DATASET_CACHE_VERSION = 3
 DEFAULT_DATASET_CACHE_DIR = PROJECT_ROOT / "experiments" / "cache" / "preprocessed_datasets"
-
-
-class MotorImageryDataset(Dataset):
-    def __init__(
-            self,
-            x: np.ndarray,
-            y: np.ndarray,
-            dtype: torch.dtype = torch.float64,
-    ) -> None:
-        self.x = torch.from_numpy(x).to(dtype=dtype)
-        self.y = torch.from_numpy(y).long()
-
-    def __len__(self) -> int:
-        return len(self.y)
-
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.x[index], self.y[index]
 
 
 def parse_args() -> argparse.Namespace:
@@ -276,7 +259,8 @@ def build_model(
 ) -> SPDTransformerClassifier:
     return SPDTransformerClassifier(
         spd_in_dim=spd_in_dim,
-        spd_out_dim=int(model_cfg.get("spd_out_dim", spd_in_dim)),
+        attention_dim=int(model_cfg.get("attention_dim", spd_in_dim)),
+        stage_transition=bool(model_cfg.get("stage_transition", True)),
         time_sequence_length=time_sequence_length,
         frequency_sequence_length=frequency_sequence_length,
         tau=model_cfg.get("tau", 1.0),
@@ -298,82 +282,43 @@ def build_model(
         layer_norm_affine=bool(model_cfg.get("layer_norm_affine", True)),
     )
 
+def condition_regularization(P, eps=1e-5):
+    """
+    P: (..., d, d), SPD matrix after BiMap
+    """
+    eigvals = torch.linalg.eigvalsh(P)
+    eigvals = torch.clamp(eigvals, min=eps)
 
-def build_adamw_parameter_groups(
-        model: nn.Module,
-        weight_decay: float,
-        apply_weight_decay_to_special_parameters: bool,
-) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
-    """Build AdamW groups and report exactly which parameters are decayed."""
-    trainable_parameters = {
-        name: parameter
-        for name, parameter in model.named_parameters()
-        if parameter.requires_grad
-    }
+    cond = eigvals[..., -1] / eigvals[..., 0]
+    return torch.log(cond).mean()
 
-    if apply_weight_decay_to_special_parameters:
-        return (
-            [{
-                "params": list(trainable_parameters.values()),
-                "weight_decay": weight_decay,
-            }],
-            {
-                "decay": list(trainable_parameters),
-                "no_decay": [],
-            },
-        )
 
-    normalization_parameter_ids = {
-        id(parameter)
-        for module in model.modules()
-        if isinstance(module, (nn.LayerNorm, RiemannianLayerNorm))
-        for parameter in module.parameters(recurse=False)
-        if parameter.requires_grad
-    }
-    spd_metric_parameter_markers = (
-        "metric_low_rank",
-        "metric_cholesky",
-        "affine_log_scale_raw",
-    )
+def split_params(model: nn.Module):
+    stiefel_params = []
+    decay_params = []
+    no_decay_params = []
 
-    decay_parameters = []
-    no_decay_parameters = []
-    decay_names = []
-    no_decay_names = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
 
-    for name, parameter in trainable_parameters.items():
-        exclude_from_decay = (
-            name.endswith("bias")
-            or id(parameter) in normalization_parameter_ids
-            or any(
-                marker in name
-                for marker in spd_metric_parameter_markers
-            )
-        )
+        # Geoopt manifold parameters: BiMap W
+        if isinstance(param, geoopt.ManifoldParameter):
+            stiefel_params.append(param)
+            continue
 
-        if exclude_from_decay:
-            no_decay_parameters.append(parameter)
-            no_decay_names.append(name)
+        # Bias and normalization layers: no weight decay
+        if (
+            name.endswith(".bias")
+            or "norm" in name.lower()
+            or "layernorm" in name.lower()
+            or "bn" in name.lower()
+        ):
+            no_decay_params.append(param)
         else:
-            decay_parameters.append(parameter)
-            decay_names.append(name)
+            decay_params.append(param)
 
-    parameter_groups = []
-    if decay_parameters:
-        parameter_groups.append({
-            "params": decay_parameters,
-            "weight_decay": weight_decay,
-        })
-    if no_decay_parameters:
-        parameter_groups.append({
-            "params": no_decay_parameters,
-            "weight_decay": 0.0,
-        })
-
-    return parameter_groups, {
-        "decay": decay_names,
-        "no_decay": no_decay_names,
-    }
+    return stiefel_params, decay_params, no_decay_params
 
 
 def evaluate(
@@ -406,8 +351,14 @@ def predict_loader(
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
 
-            logits = model(x_batch)
-            loss = criterion(logits, y_batch)
+            logits, aux = model(x_batch)
+            cond_loss = 0.0
+            for name, P_bimap in aux:
+                cond_loss = cond_loss + condition_regularization(P_bimap)
+
+            cond_loss = cond_loss / len(aux["P_bimap"])
+
+            loss = criterion(logits, y_batch) + 1e-3 * cond_loss
 
             total_loss += loss.item() * y_batch.size(0)
             y_true.extend(y_batch.cpu().numpy().tolist())
@@ -496,7 +447,8 @@ def train_one_epoch(
         model: nn.Module,
         loader: DataLoader,
         criterion: nn.Module,
-        optimizer: torch.optim.Optimizer,
+        optimizer_euclid: torch.optim.Optimizer,
+        optimizer_stiefel:  geoopt.optim.RiemannianAdam,
         device: torch.device,
         gradient_clip_norm: float | None = None,
 ) -> dict[str, float]:
@@ -508,24 +460,43 @@ def train_one_epoch(
     for x_batch, y_batch in loader:
         x_batch = x_batch.to(device)
         y_batch = y_batch.to(device)
-        logits = model(x_batch)
-        loss = criterion(logits, y_batch)
-        if not torch.isfinite(loss):
+        logits, aux = model(x_batch)
+        cls_loss = criterion(logits, y_batch)
+
+        cond_loss = 0.0
+        for name, P_bimap in aux:
+            cond_loss = cond_loss + condition_regularization(P_bimap)
+
+        cond_loss = cond_loss / len(aux["P_bimap"])
+
+        loss = cls_loss + 1e-3 * cond_loss
+        if not torch.isfinite(cls_loss):
             raise RuntimeError(
                 "Non-finite training loss detected. "
                 "Check input SPD matrices, learning rate, and model numerical stability."
             )
 
-        optimizer.zero_grad(set_to_none=True)
+        optimizer_euclid.zero_grad()
+        optimizer_stiefel.zero_grad()
+
         loss.backward()
         assert_model_finite(model, "backward")
+
         if gradient_clip_norm is not None and gradient_clip_norm > 0:
+            params_to_clip = [
+                p
+                for group in optimizer_euclid.param_groups
+                for p in group["params"]
+                if p.grad is not None
+            ]
+
             torch.nn.utils.clip_grad_norm_(
-                model.parameters(),
+                params_to_clip,
                 max_norm=gradient_clip_norm,
             )
-            assert_model_finite(model, "gradient clipping")
-        optimizer.step()
+
+        optimizer_euclid.step()
+        optimizer_stiefel.step()
         assert_model_finite(model, "optimizer step")
 
         total_loss += loss.item() * y_batch.size(0)
@@ -633,21 +604,31 @@ def train_experiment(
 
     criterion = nn.CrossEntropyLoss()
     weight_decay = float(training_cfg.get("weight_decay", 1e-4))
-    apply_weight_decay_to_special_parameters = bool(
-        training_cfg.get("apply_weight_decay_to_special_parameters", False)
-    )
-    optimizer_parameter_groups, optimizer_group_names = (
-        build_adamw_parameter_groups(
-            model=model,
-            weight_decay=weight_decay,
-            apply_weight_decay_to_special_parameters=(
-                apply_weight_decay_to_special_parameters
-            ),
-        )
-    )
-    optimizer = torch.optim.AdamW(
-        optimizer_parameter_groups,
+    #apply_weight_decay_to_special_parameters = bool(
+    #    training_cfg.get("apply_weight_decay_to_special_parameters", False)
+    #)
+
+    stiefel_params, decay_params, no_decay_params = split_params(model)
+
+    optimizer_euclid = torch.optim.AdamW(
+        [
+            {
+                "params": decay_params,
+                "weight_decay": weight_decay,
+            },
+            {
+                "params": no_decay_params,
+                "weight_decay": 0.0,
+            },
+        ],
         lr=float(training_cfg.get("learning_rate", 1e-3)),
+    )
+
+    optimizer_stiefel = geoopt.optim.RiemannianAdam(
+        stiefel_params,
+        lr=float(training_cfg.get("stiefel_learning_rate", 1e-3)),
+        weight_decay=0.0,
+        stabilize=10,
     )
 
     best_val_macro_f1 = -1.0
@@ -668,14 +649,6 @@ def train_experiment(
         f"subjects train/val/test="
         f"{len(train_subjects)}/{len(val_subjects)}/{len(test_subjects)}"
     )
-    print(
-        "  weight_decay_parameters="
-        f"{optimizer_group_names['decay']}"
-    )
-    print(
-        "  no_weight_decay_parameters="
-        f"{optimizer_group_names['no_decay']}"
-    )
 
     print(f"thread: {torch.get_num_threads()}")
     print(torch.get_num_interop_threads())
@@ -685,7 +658,8 @@ def train_experiment(
             model,
             train_loader,
             criterion,
-            optimizer,
+            optimizer_euclid,
+            optimizer_stiefel,
             device,
             gradient_clip_norm=gradient_clip_norm,
         )

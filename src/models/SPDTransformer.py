@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Tuple, Any
 
 import torch
 from torch import nn
@@ -10,6 +10,9 @@ from src.models.SPDAttention import (
     _safe_eigh,
     spd_log,
 )
+from src.models.SPDPoolingClassifier import SPDPoolingClassifier, SPDPoolingMode
+from src.models.SPDTaskTagClassifier import SPDTaskTagClassifier
+from src.models.TraceAddNorm import TraceAddNorm
 
 
 class SPDAddNorm(nn.Module):
@@ -194,11 +197,12 @@ class SPDEncoder(nn.Module):
     def __init__(
             self,
             spd_in_dim,
-            spd_out_dim,
+            attention_dim,
             time_sequence_length,
             frequency_sequence_length,
             tau=1.0,
             ffn_hidden_spd_dim=None,
+            stage_transition=True,
             metric='log-euclidean',
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
@@ -214,14 +218,25 @@ class SPDEncoder(nn.Module):
         super().__init__()
         self.metric = metric
         self.spd_in_dim = spd_in_dim
-        self.spd_out_dim = spd_out_dim
+        self.attention_dim = attention_dim
         self.debug_attention_shape = debug_attention_shape
         self.debug_tensor_stats = debug_tensor_stats
+        self.stage_transition = stage_transition
+
+        self.stage_projection = None
+        if self.stage_transition:
+            self.stage_projection = BiMap(spd_in_dim, attention_dim)
+
+        if self.stage_projection is not None:
+            spd_out_dim = attention_dim
+        else:
+            spd_out_dim = spd_in_dim
 
         self.time_attention = SingleHeadAttention(
-            spd_in_dim,
             spd_out_dim,
+            attention_dim,
             self.metric,
+            stage_transition=self.stage_transition,
             attention_dropout=attention_dropout,
             debug_attention_dropout=debug_attention_dropout,
             learnable_metric_mode=learnable_metric_mode,
@@ -231,7 +246,8 @@ class SPDEncoder(nn.Module):
             max_position=time_sequence_length,
             debug_tensor_stats=debug_tensor_stats,
         )
-        self.time_add_norm1 = SPDAddNorm(
+
+        self.time_add_norm1 = TraceAddNorm(
             spd_out_dim,
             sequence_length=time_sequence_length,
             tau=tau,
@@ -244,7 +260,7 @@ class SPDEncoder(nn.Module):
             dropout=dropout,
             eps=eps
         )
-        self.time_add_norm2 = SPDAddNorm(
+        self.time_add_norm2 = TraceAddNorm(
             spd_out_dim,
             sequence_length=time_sequence_length,
             tau=tau,
@@ -254,9 +270,10 @@ class SPDEncoder(nn.Module):
 
         self.frequency_attention = SingleHeadAttention(
             spd_out_dim,
-            spd_out_dim,
+            attention_dim,
             self.metric,
             attention_dropout=attention_dropout,
+            stage_transition=self.stage_transition,
             debug_attention_dropout=debug_attention_dropout,
             learnable_metric_mode=learnable_metric_mode,
             learnable_metric_rank=learnable_metric_rank,
@@ -265,7 +282,7 @@ class SPDEncoder(nn.Module):
             max_position=frequency_sequence_length,
             debug_tensor_stats=debug_tensor_stats,
         )
-        self.frequency_add_norm1 = SPDAddNorm(
+        self.frequency_add_norm1 = TraceAddNorm(
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
@@ -279,7 +296,7 @@ class SPDEncoder(nn.Module):
             dropout=dropout,
             eps=eps
         )
-        self.frequency_add_norm2 = SPDAddNorm(
+        self.frequency_add_norm2 = TraceAddNorm(
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
@@ -294,7 +311,7 @@ class SPDEncoder(nn.Module):
             attention: SingleHeadAttention,
             x: torch.Tensor,
             axis: int,
-    ) -> torch.Tensor:
+    ) -> tuple[Any, Any]:
         if x.ndim < 4:
             raise ValueError(
                 "Expected SPD input with shape (..., sequence, channels, channels), "
@@ -317,7 +334,7 @@ class SPDEncoder(nn.Module):
             perm.insert(seq_pos, moved_axis)
             x = x.permute(perm)
 
-        y_log = attention(x)
+        y_log, aux = attention(x)
 
         if axis != seq_pos:
             inverse_perm = [0] * len(perm)
@@ -325,7 +342,7 @@ class SPDEncoder(nn.Module):
                 inverse_perm[old_axis] = new_axis
             y_log = y_log.permute(inverse_perm)
 
-        return y_log
+        return y_log, aux
 
     def forward(self, x):
         if x.ndim not in {4, 5}:
@@ -334,7 +351,13 @@ class SPDEncoder(nn.Module):
                 "(batch, time, frequency_bands, channels, channels), "
                 f"got {tuple(x.shape)}."
             )
-        time_output_log = self._apply_attention_along_axis(
+        all_aux = {}
+        # first above all
+        if self.stage_transition:
+            x = self.stage_projection(x)
+            all_aux["P_x"] = x
+
+        time_output_log, aux = self._apply_attention_along_axis(
             self.time_attention,
             x,
             axis=1,
@@ -349,7 +372,7 @@ class SPDEncoder(nn.Module):
             x_spd = torch.matrix_exp(
                 0.5 * (x_log + x_log.transpose(-1, -2))
             )
-            frequency_output_log = self._apply_attention_along_axis(
+            frequency_output_log, aux = self._apply_attention_along_axis(
                 self.frequency_attention,
                 x_spd,
                 axis=2,
@@ -361,7 +384,9 @@ class SPDEncoder(nn.Module):
 
         x_log = 0.5 * (x_log + x_log.transpose(-1, -2))
         x_spd = torch.matrix_exp(x_log)
-        return 0.5 * (x_spd + x_spd.transpose(-1, -2))
+
+        all_aux.update(aux)
+        return 0.5 * (x_spd + x_spd.transpose(-1, -2)), all_aux
 
 
 class SPDTransformer(nn.Module):
@@ -370,8 +395,9 @@ class SPDTransformer(nn.Module):
     def __init__(
             self,
             spd_in_dim: int,
-            spd_out_dim: int,
+            attention_dim: int,
             time_sequence_length,
+            stage_transition: True,
             frequency_sequence_length,
             tau=1.0,
             depth: int = 1,
@@ -393,13 +419,23 @@ class SPDTransformer(nn.Module):
             raise ValueError(f"depth must be >= 1, got {depth}.")
 
         self.spd_in_dim = spd_in_dim
-        self.spd_out_dim = spd_out_dim
+        self.attention_dim = attention_dim
         self.depth = depth
         self.debug_tensor_stats = debug_tensor_stats
+        self.stage_transition = stage_transition
+
+        base_step, remainder = divmod(attention_dim - spd_in_dim, depth)
+
+        result = [spd_in_dim, spd_in_dim + base_step + remainder]
+        for _ in range(depth - 1):
+            result.append(result[-1] + base_step)
+
+        self.dims = result
 
         self.layers = nn.ModuleList([SPDEncoder(
-                spd_in_dim=spd_in_dim,
-                spd_out_dim=spd_out_dim,
+                spd_in_dim=self.dims[index-1],
+                attention_dim=dim,
+                stage_transition=self.stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
                 tau=tau,
@@ -415,315 +451,19 @@ class SPDTransformer(nn.Module):
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
-            ) for _ in range(depth)])
+            ) for index, dim in enumerate(self.dims)])
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor):
+        all_aux = {}
         for layer_index, layer in enumerate(self.layers):
-            x = layer(x)
-        return x
+            x, aux = layer(x)
+            for name, param in aux:
+                all_aux[name + "_" + layer_index] = param
+
+        return x, all_aux
 
 
 ClassifierType = Literal["pooling", "task"]
-SPDPoolingMode = Literal["mean", "band_mean", "attention"]
-
-
-class SPDClassifierBase(nn.Module):
-    @staticmethod
-    def upper_triangular_vectorize(x: torch.Tensor) -> torch.Tensor:
-        spd_dim = x.shape[-1]
-        row, col = torch.triu_indices(spd_dim, spd_dim, device=x.device)
-        return x[..., row, col]
-
-    @staticmethod
-    def build_linear_classifier(
-            feature_dim: int,
-            num_classes: int,
-            dropout: float,
-    ) -> nn.Module:
-        return nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(feature_dim, num_classes),
-        )
-
-
-class SPDPoolingClassifier(SPDClassifierBase):
-    """
-    Classifier that pools all SPD tokens after the SPDTransformer encoder.
-
-    Input:
-        4D: (batch, time, channels, channels)
-        5D: (batch, time, frequency_bands, channels, channels)
-
-    Classification:
-        encoder -> log map -> mean/attention pooling over all tokens
-        -> upper triangular vector -> linear classifier
-    """
-
-    def __init__(
-            self,
-            spd_in_dim: int,
-            spd_out_dim: int,
-            num_classes: int,
-            time_sequence_length: int,
-            frequency_sequence_length: int,
-            tau=1.0,
-            ffn_hidden_spd_dim=None,
-            metric: str = "log-euclidean",
-            depth: int = 1,
-            pooling: SPDPoolingMode = "attention",
-            dropout: float = 0.0,
-            attention_dropout: float = 0.0,
-            debug_attention_dropout: bool = False,
-            debug_attention_shape: bool = False,
-            debug_tensor_stats: bool = False,
-            learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
-            learnable_metric_rank: int | None = None,
-            eps: float = 1e-6,
-            use_position_bias: bool = True,
-            layer_norm_affine: bool = True,
-    ):
-        super().__init__()
-        if pooling not in {"mean", "band_mean", "attention"}:
-            raise ValueError(
-                "SPDPoolingClassifier pooling must be 'mean', "
-                f"'band_mean', or 'attention', got {pooling!r}."
-            )
-
-        self.spd_out_dim = spd_out_dim
-        self.num_classes = num_classes
-        self.pooling = pooling
-        self.debug_tensor_stats = debug_tensor_stats
-        self.feature_dim = spd_out_dim * (spd_out_dim + 1) // 2
-        self.classifier_feature_dim = (
-            self.feature_dim * frequency_sequence_length
-            if pooling == "band_mean"
-            else self.feature_dim
-        )
-
-        self.encoder = SPDTransformer(
-            spd_in_dim=spd_in_dim,
-            spd_out_dim=spd_out_dim,
-            depth=depth,
-            time_sequence_length=time_sequence_length,
-            frequency_sequence_length=frequency_sequence_length,
-            tau=tau,
-            ffn_hidden_spd_dim=ffn_hidden_spd_dim,
-            metric=metric,
-            attention_dropout=attention_dropout,
-            debug_attention_dropout=debug_attention_dropout,
-            debug_attention_shape=debug_attention_shape,
-            debug_tensor_stats=debug_tensor_stats,
-            learnable_metric_mode=learnable_metric_mode,
-            learnable_metric_rank=learnable_metric_rank,
-            eps=eps,
-            use_position_bias=use_position_bias,
-            layer_norm_affine=layer_norm_affine,
-            dropout=dropout,
-        )
-
-        if pooling == "attention":
-            self.pool_score = nn.Sequential(
-                nn.LayerNorm(self.feature_dim),
-                nn.Linear(self.feature_dim, 1),
-            )
-        else:
-            self.pool_score = None
-
-        self.classifier = self.build_linear_classifier(
-            feature_dim=self.classifier_feature_dim,
-            num_classes=num_classes,
-            dropout=dropout,
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-
-        x = self.encoder(x)
-
-
-        if self.pooling == "mean":
-            pooled_log = self._mean_pool(x)
-            features = self.upper_triangular_vectorize(pooled_log)
-        elif self.pooling == "band_mean":
-            features = self._band_mean_pool_features(x)
-        else:
-            pooled_log = self._attention_pool(x)
-            features = self.upper_triangular_vectorize(pooled_log)
-
-        logits = self.classifier(features)
-
-        return logits
-
-    def _mean_pool(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Compute the mean value across all tokens that belong to one trial
-        :return torch.Tensor: (batch, channels, channels)
-        """
-        log_x = spd_log(x)
-        token_dims = tuple(range(1, log_x.ndim - 2))
-        return log_x.mean(dim=token_dims)
-
-    def _band_mean_pool_features(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Average over time but keep frequency-band features separate.
-
-        For 5D input, this returns one tangent feature vector per frequency
-        band and concatenates them. For 4D input, it falls back to temporal
-        mean pooling.
-        """
-        log_x = spd_log(x)
-        if log_x.ndim == 4:
-            pooled_log = log_x.mean(dim=1)
-            return self.upper_triangular_vectorize(pooled_log)
-
-        if log_x.ndim != 5:
-            raise ValueError(
-                "Expected encoder output shape "
-                "(batch, time, channels, channels) or "
-                "(batch, time, frequency, channels, channels), "
-                f"got {tuple(log_x.shape)}."
-            )
-
-        band_log = log_x.mean(dim=1)
-        band_features = self.upper_triangular_vectorize(band_log)
-        return band_features.reshape(band_features.shape[0], -1)
-
-    def _attention_pool(self, x: torch.Tensor) -> torch.Tensor:
-        """
-
-        :param x:
-        :return: pooled spd matrix, (batch, channels, channels)
-        """
-        batch_size = x.shape[0]
-        spd_dim = x.shape[-1]
-        log_x = spd_log(x)
-        # log_tokens = (batch, tim x frequency_bands, channels, channels)
-        log_tokens = log_x.reshape(batch_size, -1, spd_dim, spd_dim)
-        token_features = self.upper_triangular_vectorize(log_tokens)
-
-
-        scores = self.pool_score(token_features).squeeze(-1)
-
-        weights = torch.softmax(scores, dim=-1)
-
-        return torch.einsum("bt,btmn->bmn", weights, log_tokens)
-
-
-class SPDTaskTagClassifier(SPDClassifierBase):
-    """
-    Classifier that inserts an SPD [TASK] token before the encoder.
-
-    For 5D input, one task token is inserted on the time axis for every
-    frequency band. After encoding, only task-token outputs are used for
-    classification; non-task tokens are not pooled into the classifier.
-    """
-
-    def __init__(
-            self,
-            spd_in_dim: int,
-            spd_out_dim: int,
-            num_classes: int,
-            time_sequence_length: int,
-            frequency_sequence_length: int,
-            tau=1.0,
-            ffn_hidden_spd_dim=None,
-            metric: str = "log-euclidean",
-            depth: int = 1,
-            dropout: float = 0.0,
-            attention_dropout: float = 0.0,
-            debug_attention_dropout: bool = False,
-            debug_attention_shape: bool = False,
-            debug_tensor_stats: bool = False,
-            learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
-            learnable_metric_rank: int | None = None,
-            eps: float = 1e-6,
-            use_position_bias: bool = True,
-            layer_norm_affine: bool = True,
-    ):
-        super().__init__()
-        self.spd_in_dim = spd_in_dim
-        self.spd_out_dim = spd_out_dim
-        self.num_classes = num_classes
-        self.debug_tensor_stats = debug_tensor_stats
-        self.feature_dim = spd_out_dim * (spd_out_dim + 1) // 2
-
-        task_log_init = torch.diag(torch.linspace(-1e-3, 1e-3, spd_in_dim))
-        self.task_log_token = nn.Parameter(task_log_init)
-        self.encoder = SPDTransformer(
-            spd_in_dim=spd_in_dim,
-            spd_out_dim=spd_out_dim,
-            time_sequence_length=time_sequence_length + 1,
-            frequency_sequence_length=frequency_sequence_length,
-            tau=tau,
-            depth=depth,
-            ffn_hidden_spd_dim=ffn_hidden_spd_dim,
-            metric=metric,
-            attention_dropout=attention_dropout,
-            debug_attention_dropout=debug_attention_dropout,
-            debug_attention_shape=debug_attention_shape,
-            debug_tensor_stats=debug_tensor_stats,
-            learnable_metric_mode=learnable_metric_mode,
-            learnable_metric_rank=learnable_metric_rank,
-            eps=eps,
-            use_position_bias=use_position_bias,
-            layer_norm_affine=layer_norm_affine,
-            dropout=dropout,
-        )
-        self.classifier = self.build_linear_classifier(
-            feature_dim=self.feature_dim,
-            num_classes=num_classes,
-            dropout=dropout,
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-
-        x = self._prepend_task_token(x)
-
-        x = self.encoder(x)
-
-        task_log = self._extract_task_log_feature(x)
-
-        features = self.upper_triangular_vectorize(task_log)
-        logits = self.classifier(features)
-        return logits
-
-    def _prepend_task_token(self, x: torch.Tensor) -> torch.Tensor:
-        """
-
-        :param x:
-        :return: (batch, time + 1, channels, channels) or (batch, time + 1, frequency_bands, channels, channels)
-        """
-        if x.ndim not in {4, 5}:
-            raise ValueError(
-                "Expected input shape (batch, time, channels, channels) or "
-                "(batch, time, frequency_bands, channels, channels), "
-                f"got {tuple(x.shape)}."
-            )
-
-        task_log = 0.5 * (self.task_log_token + self.task_log_token.transpose(-1, -2)) # sym
-        task_log = task_log.to(device=x.device, dtype=x.dtype)
-
-        # matrix_exp remains differentiable when the log token has repeated
-        # eigenvalues, unlike an eigendecomposition-based implementation.
-        task_token = torch.matrix_exp(task_log)  # Identity  matrix I
-        eye = torch.eye(self.spd_in_dim, device=x.device, dtype=x.dtype)
-        task_token = 0.5 * (task_token + task_token.transpose(-1, -2)) + self.eps * eye # sym
-
-        if x.ndim == 4:
-            batch_size = x.shape[0]
-            task_token = task_token.expand(batch_size, 1, -1, -1)
-        else:
-            batch_size, _, n_bands = x.shape[:3]
-            task_token = task_token.expand(batch_size, 1, n_bands, -1, -1)
-
-        return torch.cat([task_token, x], dim=1)
-
-    def _extract_task_log_feature(self, x: torch.Tensor) -> torch.Tensor:
-        # (batch, time, channels, channels)
-        if x.ndim == 4:
-            return spd_log(x[:, 0])
-        # (batch, time, frequency_bands, channels, channels)
-        task_tokens = x[:, 0]
-        return spd_log(task_tokens).mean(dim=1)
 
 
 class SPDTransformerClassifier(nn.Module):
@@ -740,8 +480,9 @@ class SPDTransformerClassifier(nn.Module):
     def __init__(
             self,
             spd_in_dim: int,
-            spd_out_dim: int,
+            attention_dim: int,
             num_classes: int,
+            stage_transition: True,
             time_sequence_length,
             frequency_sequence_length,
             tau=1.0,
@@ -777,8 +518,9 @@ class SPDTransformerClassifier(nn.Module):
         if classifier_type == "pooling":
             self.model = SPDPoolingClassifier(
                 spd_in_dim=spd_in_dim,
-                spd_out_dim=spd_out_dim,
+                attention_dim=attention_dim,
                 num_classes=num_classes,
+                stage_transition=stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
                 tau=tau,
@@ -801,7 +543,7 @@ class SPDTransformerClassifier(nn.Module):
             print("initializing SPDTaskTagClassifier")
             self.model = SPDTaskTagClassifier(
                 spd_in_dim=spd_in_dim,
-                spd_out_dim=spd_out_dim,
+                attention_dim=attention_dim,
                 num_classes=num_classes,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,

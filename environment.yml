@@ -34,3 +34,4 @@ dependencies:
       - moabb>=1.0
       - pyriemann>=0.6
       - autoreject
+      - geoopt

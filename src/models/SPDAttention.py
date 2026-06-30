@@ -165,8 +165,9 @@ class SingleHeadAttention(nn.Module):
     def __init__(
         self,
         spd_in_dim,
-        spd_out_dim,
+        attention_dim,
         metric='log-euclidean',
+        stage_transition=True,
         attention_dropout: float = 0.0,
         debug_attention_dropout: bool = False,
         tangent_hidden_dim: int | None = None, # only valid when metric type is learnable-tangent-metric
@@ -180,8 +181,9 @@ class SingleHeadAttention(nn.Module):
     ):
         super().__init__()
         self.spd_in_dim = spd_in_dim
-        self.spd_out_dim = spd_out_dim
+        self.attention_dim = attention_dim
         self.metric = MetricType(metric)
+        self.stage_transition = stage_transition
         self.learnable_metric_mode = learnable_metric_mode
         self.eps = eps
         self.attention_dropout = nn.Dropout(attention_dropout)
@@ -190,9 +192,15 @@ class SingleHeadAttention(nn.Module):
         self.affine_log_eps = eps
         self.use_position = use_position
 
-        self.query = BiMap(in_dim=spd_in_dim, out_dim=spd_out_dim, eps=self.eps)
-        self.key = BiMap(in_dim=spd_in_dim, out_dim=spd_out_dim, eps=self.eps)
-        self.value = BiMap(in_dim=spd_in_dim, out_dim=self.spd_out_dim, eps= self.eps)
+        if self.stage_transition:
+            self.query = BiMap(in_dim=spd_in_dim, out_dim=spd_in_dim, eps=self.eps)
+            self.key = BiMap(in_dim=spd_in_dim, out_dim=spd_in_dim, eps=self.eps)
+            self.value = BiMap(in_dim=spd_in_dim, out_dim=self.spd_in_dim, eps=self.eps)
+        else:
+            self.query = BiMap(in_dim=spd_in_dim, out_dim=attention_dim, eps=self.eps)
+            self.key = BiMap(in_dim=spd_in_dim, out_dim=attention_dim, eps=self.eps)
+            self.value = BiMap(in_dim=spd_in_dim, out_dim=self.spd_in_dim, eps=self.eps)
+
         if self.metric == MetricType.LearnableAffineLogFunction:
             # softplus(inverse_softplus(1)) = 1, so the initial transform is
             # g(lambda) = log(lambda + eps).
@@ -203,18 +211,7 @@ class SingleHeadAttention(nn.Module):
         else:
             self.register_parameter("affine_log_scale_raw", None)
 
-        tangent_feature_dim = spd_out_dim * (spd_out_dim + 1) // 2
-        tangent_hidden_dim = tangent_hidden_dim or tangent_feature_dim
-        tangent_out_dim = tangent_out_dim or tangent_feature_dim
-        # if self.metric == MetricType.MLPLogFunction:
-        #     self.mlp_log_function = nn.Sequential(
-        #         nn.LayerNorm(tangent_feature_dim),
-        #         nn.Linear(tangent_feature_dim, tangent_hidden_dim),
-        #         nn.GELU(),
-        #         nn.Linear(tangent_hidden_dim, tangent_out_dim),
-        #     )
-        # else:
-        #     self.mlp_log_function = None
+        tangent_feature_dim = attention_dim * (attention_dim + 1) // 2
 
         self.tangent_feature_dim = tangent_feature_dim
         if self.metric == MetricType.LearnableMetric:
@@ -228,8 +225,8 @@ class SingleHeadAttention(nn.Module):
                 self.right_metric_cholesky = None
             elif learnable_metric_mode == "kronecker":  # learnable anisotropic log-map attention
                 self.metric_low_rank = None
-                self.left_metric_cholesky = nn.Parameter(torch.eye(spd_out_dim))
-                self.right_metric_cholesky = nn.Parameter(torch.eye(spd_out_dim))
+                self.left_metric_cholesky = nn.Parameter(torch.eye(attention_dim))
+                self.right_metric_cholesky = nn.Parameter(torch.eye(attention_dim))
         else:
             self.metric_low_rank = None
             self.left_metric_cholesky = None
@@ -243,6 +240,7 @@ class SingleHeadAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Tensor:
 
+        aux = {}
         q = self.query(x)
 
         k = self.key(x)
@@ -251,6 +249,11 @@ class SingleHeadAttention(nn.Module):
 
 
         log_v = spd_log(v)
+
+        aux['P_q'] = q
+        aux['P_k'] = k
+        aux['P_v'] = v
+
 
         dis = self.learnableRiemannianDistance(q, k)
 
@@ -268,7 +271,7 @@ class SingleHeadAttention(nn.Module):
         weighted_log_v = torch.einsum('...ij,...jmn->...imn', attention, log_v)
 
 
-        return weighted_log_v
+        return weighted_log_v, aux
 
     def _print_attention_dropout_debug(
         self,
