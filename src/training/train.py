@@ -311,10 +311,7 @@ def split_params(model: nn.Module):
 
         # Bias and normalization layers: no weight decay
         if (
-            name.endswith(".bias")
-            or "norm" in name.lower()
-            or "layernorm" in name.lower()
-            or "bn" in name.lower()
+            "norm" in name.lower() or "metric_low_rank" in name.lower()
         ):
             no_decay_params.append(param)
         else:
@@ -355,10 +352,10 @@ def predict_loader(
 
             logits, aux = model(x_batch)
             cond_loss = 0.0
-            for name, P_bimap in aux:
+            for name, P_bimap in aux.items():
                 cond_loss = cond_loss + condition_regularization(P_bimap)
 
-            cond_loss = cond_loss / len(aux["P_bimap"])
+            cond_loss = cond_loss / len(aux)
 
             loss = criterion(logits, y_batch) + 1e-3 * cond_loss
 
@@ -466,10 +463,10 @@ def train_one_epoch(
         cls_loss = criterion(logits, y_batch)
 
         cond_loss = 0.0
-        for name, P_bimap in aux:
+        for name, P_bimap in aux.items():
             cond_loss = cond_loss + condition_regularization(P_bimap)
 
-        cond_loss = cond_loss / len(aux["P_bimap"])
+        cond_loss = cond_loss / len(aux)
 
         loss = cls_loss + 1e-3 * cond_loss
         if not torch.isfinite(cls_loss):

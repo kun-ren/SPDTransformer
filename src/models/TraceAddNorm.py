@@ -22,7 +22,7 @@ class TraceAddNorm(nn.Module):
             affine: bool = True,
     ):
         super().__init__()
-
+        self.eps = eps
         self.spd_in_dim = spd_in_dim
         self.residual_weight = nn.Parameter(
             torch.logit(torch.tensor(0.1))

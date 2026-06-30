@@ -10,134 +10,8 @@ from src.models.SPDAttention import (
     _safe_eigh,
     spd_log,
 )
+from src.models.SPDFeedForward import SPDFeedForward
 from src.models.TraceAddNorm import TraceAddNorm
-
-
-class SPDActivation(nn.Module):
-    """SPD-safe activation applied in the eigenvalue domain."""
-
-    def __init__(
-        self,
-        activation: Literal["relu", "gelu"] = "gelu",
-        eps: float = 1e-4,
-    ) -> None:
-        super().__init__()
-        if activation not in {"relu", "gelu"}:
-            raise ValueError(f"activation must be 'relu' or 'gelu', got {activation!r}")
-        self.activation = activation
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = 0.5 * (x + x.transpose(-1, -2))
-        eigvals, eigvecs = _safe_eigh(x, eps=self.eps)
-
-        if self.activation == "relu":
-            eigvals = eigvals.clamp_min(self.eps)
-        else:
-            eigvals = F.gelu(eigvals).clamp_min(self.eps)
-
-        y = (eigvecs * eigvals.unsqueeze(-2)) @ eigvecs.transpose(-1, -2)
-        return 0.5 * (y + y.transpose(-1, -2))
-
-class SPDFeedForward(nn.Module):
-    """
-    Log-space feed-forward block for SPD Transformer.
-
-    Input:
-        x_log: (..., spd_dim, spd_dim)
-               already computed matrix logarithm of SPD matrix.
-               It is symmetric but not necessarily positive definite.
-
-    Pipeline:
-        x_log
-        -> upper-triangular vectorization
-        -> ordinary Linear FFN
-        -> reconstruct symmetric log matrix
-        -> matrix exponential
-        -> SPD output
-
-    Output:
-        out: (..., spd_dim, spd_dim), SPD matrix
-    """
-
-    def __init__(
-            self,
-            spd_dim: int,
-            hidden_spd_dim: int | None = None,
-            dropout: float = 0.0,
-            eps: float = 1e-4,
-            debug_tensor_stats: bool = False,
-    ):
-        super().__init__()
-
-        self.spd_dim = spd_dim
-        self.eps = eps
-        self.debug_tensor_stats = debug_tensor_stats
-
-        # Number of unique entries in a symmetric matrix
-        self.feature_dim = spd_dim * (spd_dim + 1) // 2
-
-        # Here hidden_spd_dim is treated as hidden feature dimension.
-        # If None, use standard Transformer-style expansion.
-        hidden_feature_dim = hidden_spd_dim or 2 * self.feature_dim
-
-        row, col = torch.triu_indices(spd_dim, spd_dim)
-        self.register_buffer("tri_row", row, persistent=False)
-        self.register_buffer("tri_col", col, persistent=False)
-
-        self.ffn = nn.Sequential(
-            nn.LayerNorm(self.feature_dim),
-            nn.Linear(self.feature_dim, hidden_feature_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_feature_dim, self.feature_dim),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x_log: torch.Tensor) -> torch.Tensor:
-        """
-        x_log: (..., spd_dim, spd_dim), already in log/tangent space.
-        return: (..., spd_dim, spd_dim), log space matrix.
-        """
-
-        if x_log.shape[-2:] != (self.spd_dim, self.spd_dim):
-            raise ValueError(
-                f"Expected x_log shape (..., {self.spd_dim}, {self.spd_dim}), "
-                f"got {tuple(x_log.shape)}."
-            )
-
-        # Make sure the tangent matrix is symmetric
-        x_log = 0.5 * (x_log + x_log.transpose(-1, -2))
-
-        # (..., C, C) -> (..., C * (C + 1) // 2)
-        x_vec = self._upper_triangular_vectorize(x_log)
-
-
-        # ordinary Euclidean FFN
-        out_vec = self.ffn(x_vec)
-
-
-        # (..., D) -> (..., C, C), symmetric log matrix
-        out_log = self._upper_triangular_unvectorize(out_vec)
-
-        return out_log
-
-    def _upper_triangular_vectorize(self, x: torch.Tensor) -> torch.Tensor:
-        return x[..., self.tri_row, self.tri_col]
-
-    def _upper_triangular_unvectorize(self, x_vec: torch.Tensor) -> torch.Tensor:
-        out = torch.zeros(
-            *x_vec.shape[:-1],
-            self.spd_dim,
-            self.spd_dim,
-            device=x_vec.device,
-            dtype=x_vec.dtype,
-        )
-
-        out[..., self.tri_row, self.tri_col] = x_vec
-        out[..., self.tri_col, self.tri_row] = x_vec
-
-        return 0.5 * (out + out.transpose(-1, -2))
 
 
 class SPDEncoder(nn.Module):
@@ -163,6 +37,7 @@ class SPDEncoder(nn.Module):
             dropout: float = 0.0,
     ):
         super().__init__()
+        print(f"input_dim: {spd_in_dim}, attention_dim: {attention_dim}")
         self.metric = metric
         self.spd_in_dim = spd_in_dim
         self.attention_dim = attention_dim
@@ -203,7 +78,7 @@ class SPDEncoder(nn.Module):
         )
         self.time_ffn = SPDFeedForward(
             spd_out_dim,
-            ffn_hidden_spd_dim,
+            spd_out_dim,
             dropout=dropout,
             eps=eps
         )
@@ -239,7 +114,7 @@ class SPDEncoder(nn.Module):
         )
         self.frequency_ffn = SPDFeedForward(
             spd_out_dim,
-            ffn_hidden_spd_dim,
+            spd_out_dim,
             dropout=dropout,
             eps=eps
         )
@@ -379,11 +254,9 @@ class SPDTransformer(nn.Module):
 
         self.dims = result
 
-        print(self.dims)
-
         self.layers = nn.ModuleList([SPDEncoder(
-                spd_in_dim=self.dims[index-1],
-                attention_dim=dim,
+                spd_in_dim=dim if stage_transition else self.dims[0],
+                attention_dim=self.dims[index+1],
                 stage_transition=self.stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
@@ -400,14 +273,14 @@ class SPDTransformer(nn.Module):
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
-            ) for index, dim in enumerate(self.dims[1:])])
+            ) for index, dim in enumerate(self.dims[:-1])])
 
     def forward(self, x: torch.Tensor):
         all_aux = {}
         for layer_index, layer in enumerate(self.layers):
             x, aux = layer(x)
-            for name, param in aux:
-                all_aux[name + "_" + layer_index] = param
+            for name, param in aux.items():
+                all_aux[name + "_" + str(layer_index)] = param
 
         return x, all_aux
 

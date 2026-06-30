@@ -21,8 +21,6 @@ class GeooptBiMap(nn.Module):
 
     def __init__(self, in_dim: int, out_dim: int, eps: float = 1e-9):
         super().__init__()
-
-        print(f"in_dim: {in_dim}, out_dim: {out_dim}")
         if out_dim > in_dim:
             raise ValueError("For Stiefel BiMap, out_dim must be <= in_dim.")
         self.in_dim = in_dim
@@ -35,7 +33,7 @@ class GeooptBiMap(nn.Module):
 
         self.weight = geoopt.ManifoldParameter(
             W,
-            manifold=self.stiefel,
+            manifold=self.manifold,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

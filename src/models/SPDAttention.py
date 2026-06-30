@@ -342,11 +342,7 @@ class SingleHeadAttention(nn.Module):
                     diff = q_vec.unsqueeze(-2) - k_vec.unsqueeze(-3)
 
                 projected_diff = diff @ self.metric_low_rank
-                squared_distance = (
-                    projected_diff.square().sum(dim=-1)
-                    + self.eps * diff.square().sum(dim=-1)
-                )
-                return torch.sqrt(squared_distance.clamp_min(0.0))
+                return torch.linalg.vector_norm(projected_diff, ord=2, dim=-1)
 
             elif self.learnable_metric_mode == "kronecker":
 
@@ -368,7 +364,7 @@ class SingleHeadAttention(nn.Module):
             left_metric_diff = torch.einsum("ab,...bc->...ac", g1, diff)
             metric_diff = torch.einsum("...ab,bc->...ac", left_metric_diff, g2)
             squared_distance = (diff * metric_diff).sum(dim=(-2, -1))
-            return torch.sqrt(squared_distance.clamp_min(0.0))
+            return torch.sqrt(squared_distance.clamp_min(self.eps))
 
         if self.metric == MetricType.LearnableAffineLogFunction:
             log_q = self._spd_affine_log(q)
