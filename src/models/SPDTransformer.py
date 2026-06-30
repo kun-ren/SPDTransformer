@@ -10,8 +10,6 @@ from src.models.SPDAttention import (
     _safe_eigh,
     spd_log,
 )
-from src.models.SPDPoolingClassifier import SPDPoolingClassifier, SPDPoolingMode
-from src.models.SPDTaskTagClassifier import SPDTaskTagClassifier
 from src.models.TraceAddNorm import TraceAddNorm
 
 
