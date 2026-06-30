@@ -379,6 +379,8 @@ class SPDTransformer(nn.Module):
 
         self.dims = result
 
+        print(self.dims)
+
         self.layers = nn.ModuleList([SPDEncoder(
                 spd_in_dim=self.dims[index-1],
                 attention_dim=dim,
@@ -398,7 +400,7 @@ class SPDTransformer(nn.Module):
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
-            ) for index, dim in enumerate(self.dims)])
+            ) for index, dim in enumerate(self.dims[1:])])
 
     def forward(self, x: torch.Tensor):
         all_aux = {}
