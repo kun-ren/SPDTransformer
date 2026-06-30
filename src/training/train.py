@@ -22,11 +22,13 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
 )
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
 from script.load_moabb_dataset import parse_int_list
 from src.datasets.PhysioNetMI_preprocess import preprocess_spd
-from src.models.SPDTransformer import SPDTransformerClassifier
+from src.models.MotorImageryDataset import MotorImageryDataset
+from src.models.SPDTransformerClassifier import SPDTransformerClassifier
+
 from src.training.shared_split import load_or_create_split_indices
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
