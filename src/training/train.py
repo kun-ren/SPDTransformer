@@ -450,6 +450,7 @@ def train_one_epoch(
         optimizer_stiefel:  geoopt.optim.RiemannianAdam,
         device: torch.device,
         gradient_clip_norm: float | None = None,
+        debug_anomaly: bool = False,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
@@ -469,16 +470,23 @@ def train_one_epoch(
         cond_loss = cond_loss / len(aux)
 
         loss = cls_loss + 1e-3 * cond_loss
-        if not torch.isfinite(cls_loss):
+        if not torch.isfinite(loss):
             raise RuntimeError(
-                "Non-finite training loss detected. "
+                "Non-finite training loss detected: "
+                f"cls_loss={cls_loss.item():.6e} "
+                f"cond_loss={cond_loss.item():.6e} "
+                f"loss={loss.item():.6e}. "
                 "Check input SPD matrices, learning rate, and model numerical stability."
             )
 
         optimizer_euclid.zero_grad()
         optimizer_stiefel.zero_grad()
 
-        loss.backward()
+        if debug_anomaly:
+            with torch.autograd.detect_anomaly():
+                loss.backward()
+        else:
+            loss.backward()
         assert_model_finite(model, "backward")
 
         if gradient_clip_norm is not None and gradient_clip_norm > 0:
@@ -512,9 +520,40 @@ def train_one_epoch(
 def assert_model_finite(model: nn.Module, context: str) -> None:
     for name, parameter in model.named_parameters():
         if not torch.isfinite(parameter).all():
-            raise RuntimeError(f"Non-finite parameter detected after {context}: {name}")
+            raise RuntimeError(
+                "Non-finite parameter detected after "
+                f"{context}: {name} | {_tensor_finite_summary(parameter)}"
+            )
         if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
-            raise RuntimeError(f"Non-finite gradient detected after {context}: {name}")
+            raise RuntimeError(
+                "Non-finite gradient detected after "
+                f"{context}: {name} | {_tensor_finite_summary(parameter.grad)}"
+            )
+
+
+def _tensor_finite_summary(tensor: torch.Tensor) -> str:
+    with torch.no_grad():
+        finite = torch.isfinite(tensor)
+        finite_count = int(finite.sum().item())
+        total_count = tensor.numel()
+        nan_count = int(torch.isnan(tensor).sum().item())
+        posinf_count = int(torch.isposinf(tensor).sum().item())
+        neginf_count = int(torch.isneginf(tensor).sum().item())
+
+        if finite_count == 0:
+            finite_range = "finite_min=NA finite_max=NA"
+        else:
+            finite_values = tensor.detach()[finite]
+            finite_range = (
+                f"finite_min={finite_values.min().item():.6e} "
+                f"finite_max={finite_values.max().item():.6e}"
+            )
+
+        return (
+            f"finite={finite_count}/{total_count} "
+            f"nan={nan_count} +inf={posinf_count} -inf={neginf_count} "
+            f"{finite_range}"
+        )
 
 
 def append_history(path: Path, row: dict[str, Any]) -> None:
@@ -638,6 +677,10 @@ def train_experiment(
     gradient_clip_norm = training_cfg.get("gradient_clip_norm", 1.0)
     if gradient_clip_norm is not None:
         gradient_clip_norm = float(gradient_clip_norm)
+    debug_anomaly = parse_bool(
+        training_cfg.get("debug_anomaly", False),
+        default=False,
+    )
 
     print(f"\n[Run {run_index}] {run_dir.name}")
     print(f"  model={model_cfg}")
@@ -661,6 +704,7 @@ def train_experiment(
             optimizer_stiefel,
             device,
             gradient_clip_norm=gradient_clip_norm,
+            debug_anomaly=debug_anomaly,
         )
         val_metrics = evaluate(model, val_loader, criterion, device)
 

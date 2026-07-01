@@ -34,7 +34,7 @@ class TraceAddNorm(nn.Module):
         #Constrain the residual scale to (0, 1).
         eta = torch.sigmoid(self.residual_weight)
 
-        S_res = residual_log + eta * sublayer_output_log
+        S_res = (1.0 - eta) * residual_log + eta * sublayer_output_log
 
 
         # Protect against small floating-point asymmetry.
