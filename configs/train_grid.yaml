@@ -32,7 +32,7 @@ data:
 model:
   #   16, 64 is also high
   head_nums: [1, 4]
-  attention_dim: [16, 8]
+  attention_dim: ["21, 16, 16"] # actually in dim
   stage_transition: [True]
   ffn_hidden_spd_dim: [84]
   tau: [1.3]

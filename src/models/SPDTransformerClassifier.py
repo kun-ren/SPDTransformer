@@ -23,7 +23,7 @@ class SPDTransformerClassifier(nn.Module):
             self,
             num_heads: int,
             spd_in_dim: int,
-            attention_dim: int,
+            attention_dim: [int],
             num_classes: int,
             stage_transition: True,
             time_sequence_length,

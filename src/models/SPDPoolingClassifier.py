@@ -25,7 +25,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             self,
             num_heads: int,
             spd_in_dim: int,
-            attention_dim: int,
+            attention_dim: [int],
             num_classes: int,
             stage_transition: bool,
             time_sequence_length: int,

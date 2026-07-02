@@ -259,10 +259,18 @@ def build_model(
         time_sequence_length,
         frequency_sequence_length,
 ) -> SPDTransformerClassifier:
+    attention_dim = model_cfg.get("attention_dim", "21, 21")
+
+    attention_dim = attention_dim.split(',')
+    depth = int(model_cfg.get("depth", 1))
+
+    # make sure attention_dim num is matching depth
+    if len(attention_dim) < depth:
+        attention_dim.extend([attention_dim[-1] for _ in range(depth - len(attention_dim))])
     return SPDTransformerClassifier(
         num_heads=int(model_cfg.get("head_nums", 1)),
         spd_in_dim=spd_in_dim,
-        attention_dim=int(model_cfg.get("attention_dim", spd_in_dim)),
+        attention_dim=attention_dim,
         stage_transition=bool(model_cfg.get("stage_transition", True)),
         time_sequence_length=time_sequence_length,
         frequency_sequence_length=frequency_sequence_length,
@@ -270,7 +278,7 @@ def build_model(
         num_classes=num_classes,
         ffn_hidden_spd_dim=model_cfg.get("ffn_hidden_spd_dim"),
         metric=str(model_cfg.get("metric", "log-euclidean")),
-        depth=int(model_cfg.get("depth", 1)),
+        depth=depth,
         classifier_type=str(model_cfg.get("classifier_type", "pooling")),
         pooling=str(model_cfg.get("pooling", "attention")),
         dropout=float(model_cfg.get("dropout", 0.0)),
@@ -284,6 +292,7 @@ def build_model(
         use_position_bias=bool(model_cfg.get("use_position_bias", True)),
         layer_norm_affine=bool(model_cfg.get("layer_norm_affine", True)),
     )
+
 
 def condition_regularization(P, eps=1e-5):
     """
@@ -312,7 +321,7 @@ def split_params(model: nn.Module):
 
         # Bias and normalization layers: no weight decay
         if (
-            "norm" in name.lower() or "metric_low_rank" in name.lower()
+                "norm" in name.lower() or "metric_low_rank" in name.lower()
         ):
             no_decay_params.append(param)
         else:
@@ -367,8 +376,8 @@ def predict_loader(
                 cond_loss = cond_loss / len(aux)
 
             loss = (
-                criterion(logits, y_batch)
-                + condition_regularization_weight * cond_loss
+                    criterion(logits, y_batch)
+                    + condition_regularization_weight * cond_loss
             )
 
             total_loss += loss.item() * y_batch.size(0)
@@ -459,7 +468,7 @@ def train_one_epoch(
         loader: DataLoader,
         criterion: nn.Module,
         optimizer_euclid: torch.optim.Optimizer,
-        optimizer_stiefel:  geoopt.optim.RiemannianAdam,
+        optimizer_stiefel: geoopt.optim.RiemannianAdam,
         device: torch.device,
         gradient_clip_norm: float | None = None,
         debug_anomaly: bool = False,
@@ -632,7 +641,6 @@ def train_experiment(
                 f"val-test={sorted(val_test_overlap)}."
             )
 
-
     train_loader, val_loader, test_loader = make_loaders(
         x=x,
         y=y,
@@ -656,9 +664,9 @@ def train_experiment(
 
     criterion = nn.CrossEntropyLoss()
     weight_decay = float(training_cfg.get("weight_decay", 1e-4))
-    #apply_weight_decay_to_special_parameters = bool(
+    # apply_weight_decay_to_special_parameters = bool(
     #    training_cfg.get("apply_weight_decay_to_special_parameters", False)
-    #)
+    # )
 
     stiefel_params, decay_params, no_decay_params = split_params(model)
 
@@ -774,9 +782,9 @@ def train_experiment(
         )
 
         if (
-            early_stopping_patience is not None
-            and early_stopping_patience > 0
-            and epoch - best_epoch >= early_stopping_patience
+                early_stopping_patience is not None
+                and early_stopping_patience > 0
+                and epoch - best_epoch >= early_stopping_patience
         ):
             print(
                 f"  early stopping at epoch {epoch:03d}/{epochs} | "

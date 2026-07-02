@@ -2,17 +2,15 @@ from typing import Literal, Any
 
 import torch
 from torch import nn
-import torch.nn.functional as F
 from src.models.GeooptBiMap import GeooptBiMap
+from src.models.MultiHeadEncoder import SPDMultiHeadEncoder
 
 from src.models.SPDAttention import (
     SingleHeadAttention,
-    _safe_eigh,
     spd_log,
 )
 from src.models.SPDFeedForward import SPDFeedForward
 from src.models.TraceAddNorm import TraceAddNorm
-from src.models.MultiHeadEncoder import MultiHeadEncoder
 
 class SPDEncoder(nn.Module):
     def __init__(
@@ -226,7 +224,7 @@ class SPDTransformer(nn.Module):
             self,
             num_heads: int,
             spd_in_dim: int,
-            attention_dim: int,
+            attention_dim: [int],
             time_sequence_length,
             stage_transition: True,
             frequency_sequence_length,
@@ -251,25 +249,18 @@ class SPDTransformer(nn.Module):
 
         self.spd_in_dim = spd_in_dim
         self.attention_dim = attention_dim
+        self.attention_dim.insert(0, spd_in_dim)
         self.depth = depth
         self.debug_tensor_stats = debug_tensor_stats
         self.stage_transition = stage_transition
-
-        base_step, remainder = divmod(attention_dim - spd_in_dim, depth)
-
-        result = [spd_in_dim, spd_in_dim + base_step + remainder]
-        for _ in range(depth - 1):
-            result.append(result[-1] + base_step)
-
-        self.dims = result
 
         if num_heads < 1:
             raise ValueError(f"num_heads must be >= 1, got {num_heads}.")
         
         if num_heads == 1:
             self.layers = nn.ModuleList([SPDEncoder(
-                spd_in_dim=dim if stage_transition else self.dims[0],
-                attention_dim=self.dims[index+1],
+                spd_in_dim=attention_dim[index] if self.stage_transition else spd_in_dim,
+                attention_dim=attention_dim[index+1],
                 stage_transition=self.stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
@@ -286,12 +277,12 @@ class SPDTransformer(nn.Module):
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
-            ) for index, dim in enumerate(self.dims[:-1])])
+            ) for index, dim in enumerate(self.attention_dim[:-1])])
         elif num_heads > 1:
-            self.layers = nn.ModuleList([MultiHeadEncoder(
+            self.layers = nn.ModuleList([SPDMultiHeadEncoder(
                 num_heads=num_heads,
-                spd_in_dim=dim if stage_transition else self.dims[0],
-                attention_dim=self.dims[index+1],
+                spd_in_dim=attention_dim[index] if self.stage_transition else spd_in_dim,
+                attention_dim=attention_dim[index + 1],
                 stage_transition=self.stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
@@ -308,7 +299,7 @@ class SPDTransformer(nn.Module):
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
-            ) for index, dim in enumerate(self.dims[:-1])])
+            ) for index, dim in enumerate(self.attention_dim[:-1])])
         self.layers = nn.ModuleList([SPDEncoder(
                 spd_in_dim=dim if stage_transition else self.dims[0],
                 attention_dim=self.dims[index+1],
