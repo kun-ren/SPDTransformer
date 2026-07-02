@@ -31,6 +31,7 @@ data:
 
 model:
   #   16, 64 is also high
+  head_nums: [1, 4]
   attention_dim: [16, 8]
   stage_transition: [True]
   ffn_hidden_spd_dim: [84]
@@ -62,6 +63,7 @@ training:
   gradient_clip_norm: [1.0]  # best 0.8
   early_stopping_patience: [ 12 ]
   early_stopping_min_delta: [ 0.0005 ]
+  condition_regularization_weight: [0.0]
   test_size: [0.15]
   val_size: [0.15]
   # true = ordinary mixed-subject epoch split.

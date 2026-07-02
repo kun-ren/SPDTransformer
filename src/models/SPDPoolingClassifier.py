@@ -23,6 +23,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
 
     def __init__(
             self,
+            num_heads: int,
             spd_in_dim: int,
             attention_dim: int,
             num_classes: int,
@@ -65,6 +66,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
         )
 
         self.encoder = SPDTransformer(
+            num_heads=num_heads,
             spd_in_dim=spd_in_dim,
             attention_dim=attention_dim,
             depth=depth,

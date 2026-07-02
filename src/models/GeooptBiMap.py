@@ -36,6 +36,7 @@ class GeooptBiMap(nn.Module):
             )
         self.in_dim = in_dim
         self.out_dim = out_dim
+        self.eps = eps
 
         self.manifold = geoopt.Stiefel()
 
@@ -59,5 +60,13 @@ class GeooptBiMap(nn.Module):
         """
         W = self.weight
         X_out = W.transpose(-1, -2) @ x @ W
+
+        eye = torch.eye(
+            self.out_dim,
+            device=X_out.device,
+            dtype=X_out.dtype,
+        )
+        X_out = X_out + self.eps * eye
         X_out = 0.5 * (X_out + X_out.transpose(-1, -2))
+        
         return X_out

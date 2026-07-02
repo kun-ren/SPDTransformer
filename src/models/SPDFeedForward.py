@@ -1,156 +1,69 @@
 from __future__ import annotations
+
 from typing import Literal
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import geoopt
-from src.models.SPDAttention import spd_log
 
 
 def _sym(x: torch.Tensor) -> torch.Tensor:
     return 0.5 * (x + x.transpose(-1, -2))
 
 
-def _safe_eigh(
-        x: torch.Tensor,
-        eps: float = 1e-4,
-):
-    """
-    Stable eigen-decomposition for symmetric SPD-like matrices.
-    """
-    x = _sym(x)
-
-    eigvals, eigvecs = torch.linalg.eigh(x)
-    eigvals = torch.clamp(eigvals, min=eps)
-
-    return eigvals, eigvecs
+def _upper_triangular_vectorize(x: torch.Tensor) -> torch.Tensor:
+    spd_dim = x.shape[-1]
+    row, col = torch.triu_indices(spd_dim, spd_dim, device=x.device)
+    return x[..., row, col]
 
 
-class SPDActivation(nn.Module):
-    """
-    SPD-safe activation applied in the eigenvalue domain.
-
-    Input:
-        x: (..., C, C), SPD matrix
-
-    Output:
-        y: (..., C, C), SPD matrix
-    """
-
-    def __init__(
-            self,
-            activation: Literal["relu", "gelu", "softplus"] = "gelu",
-            eps: float = 1e-4,
-    ) -> None:
-        super().__init__()
-
-        if activation not in {"relu", "gelu", "softplus"}:
-            raise ValueError(
-                f"activation must be 'relu', 'gelu', or 'softplus', got {activation!r}"
-            )
-
-        self.activation = activation
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = _sym(x)
-
-        eigvals, eigvecs = _safe_eigh(x, eps=self.eps)
-
-        if self.activation == "relu":
-            eigvals = eigvals.clamp_min(self.eps)
-
-        elif self.activation == "gelu":
-            eigvals = F.gelu(eigvals).clamp_min(self.eps)
-
-        elif self.activation == "softplus":
-            eigvals = F.softplus(eigvals).clamp_min(self.eps)
-
-        y = eigvecs @ torch.diag_embed(eigvals) @ eigvecs.transpose(-1, -2)
-        y = _sym(y)
-
-        return y
-
-
-class GeooptSquareBiMap(nn.Module):
-    """
-    Same-dimension BiMap:
-
-        Y = W^T X W
-
-    where:
-        W in St(C, C)
-
-    If W is initialized as identity, then initially:
-
-        Y = X
-    """
-
-    def __init__(
-            self,
-            spd_dim: int,
-            init: Literal["identity", "random"] = "identity",
-    ) -> None:
-        super().__init__()
-
-        self.spd_dim = spd_dim
-        self.stiefel = geoopt.Stiefel()
-
-        if init == "identity":
-            W = torch.eye(spd_dim)
-
-        elif init == "random":
-            W = torch.randn(spd_dim, spd_dim)
-            W = self.stiefel.projx(W)
-
-        else:
-            raise ValueError(f"Unknown init: {init!r}")
-
-        self.W = geoopt.ManifoldParameter(
-            W,
-            manifold=self.stiefel,
+def _upper_triangular_unvectorize(
+        vector: torch.Tensor,
+        spd_dim: int,
+) -> torch.Tensor:
+    expected_dim = spd_dim * (spd_dim + 1) // 2
+    if vector.shape[-1] != expected_dim:
+        raise ValueError(
+            f"Expected vector feature dimension {expected_dim}, "
+            f"got {vector.shape[-1]}."
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (..., C, C), SPD matrix
-        """
-        if x.shape[-2:] != (self.spd_dim, self.spd_dim):
-            raise ValueError(
-                f"Expected x shape (..., {self.spd_dim}, {self.spd_dim}), "
-                f"got {tuple(x.shape)}."
-            )
+    row, col = torch.triu_indices(spd_dim, spd_dim, device=vector.device)
+    matrix = vector.new_zeros(*vector.shape[:-1], spd_dim, spd_dim)
+    matrix[..., row, col] = vector
+    matrix[..., col, row] = vector
+    return _sym(matrix)
 
-        x = _sym(x)
 
-        W = self.W
-        y = W.transpose(-1, -2) @ x @ W
-        y = _sym(y)
-
-        return y
+def _apply_activation(
+        x: torch.Tensor,
+        activation: Literal["relu", "gelu", "softplus"],
+) -> torch.Tensor:
+    if activation == "relu":
+        return F.relu(x)
+    if activation == "gelu":
+        return F.gelu(x)
+    if activation == "softplus":
+        return F.softplus(x)
+    raise ValueError(
+        f"activation must be 'relu', 'gelu', or 'softplus', got {activation!r}."
+    )
 
 
 class SPDFeedForward(nn.Module):
     """
-    SPD-valued feed-forward block for SPD Transformer.
+    Log-domain vector feed-forward block for SPD Transformer.
 
-    This version respects the SPD manifold by avoiding ordinary Euclidean
-    vector FFN operations on vectorized matrices.
+    The encoder already keeps the block input in the tangent/log domain, so this
+    module implements the stable part of the requested pipeline:
 
-    Pipeline:
-        X
-        -> BiMap: W1^T X W1
-        -> SPDActivation in eigenvalue domain
-        -> Dropout-like SPD noise is not used directly
-        -> BiMap: W2^T X W2
-        -> SPDActivation in eigenvalue domain
-        -> SPD output
+        log(SPD) -> upper triangular vector
+            -> Linear -> GELU -> Dropout -> Linear
+            -> symmetric matrix -> residual in log domain
 
-    Input:
-        x: (..., spd_dim, spd_dim), SPD matrix
-
-    Output:
-        out: (..., spd_dim, spd_dim), SPD matrix
+    The returned matrix is symmetric log-domain output. Mapping it with
+    torch.matrix_exp returns an SPD matrix, and the surrounding TraceAddNorm
+    already performs that exponential map.
     """
 
     def __init__(
@@ -164,73 +77,57 @@ class SPDFeedForward(nn.Module):
     ) -> None:
         super().__init__()
 
-        if hidden_spd_dim is not None and hidden_spd_dim != spd_dim:
+        if activation not in {"relu", "gelu", "softplus"}:
             raise ValueError(
-                "Strict SPDFeedForward keeps the SPD matrix dimension unchanged. "
-                "Use hidden_spd_dim=None or hidden_spd_dim=spd_dim. "
-                "A pure BiMap cannot safely do C -> hidden -> C when hidden != C."
+                f"activation must be 'relu', 'gelu', or 'softplus', got {activation!r}"
             )
 
         self.spd_dim = spd_dim
-        self.eps = eps
-        self.dropout = dropout
-        self.debug_tensor_stats = debug_tensor_stats
-
-        self.bimap1 = GeooptSquareBiMap(
-            spd_dim=spd_dim,
-            init="identity",
-        )
-
-        self.act1 = SPDActivation(
-            activation=activation,
-            eps=eps,
-        )
-
-        self.bimap2 = GeooptSquareBiMap(
-            spd_dim=spd_dim,
-            init="identity",
-        )
-
-        self.act2 = SPDActivation(
-            activation=activation,
-            eps=eps,
-        )
-
-        # Learnable residual scale inside FFN.
-        # Initialized close to zero, so the FFN starts near identity if used
-        # inside Log-Euclidean residual block.
-        self.raw_gate = nn.Parameter(torch.tensor(-5.0))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (..., spd_dim, spd_dim), SPD matrix
-
-        return:
-            out: (..., spd_dim, spd_dim), SPD matrix
-        """
-        if x.shape[-2:] != (self.spd_dim, self.spd_dim):
+        self.feature_dim = spd_dim * (spd_dim + 1) // 2
+        self.hidden_feature_dim = int(hidden_spd_dim or self.feature_dim * 2)
+        if self.hidden_feature_dim < 1:
             raise ValueError(
-                f"Expected x shape (..., {self.spd_dim}, {self.spd_dim}), "
-                f"got {tuple(x.shape)}."
+                f"hidden_spd_dim must be positive, got {hidden_spd_dim!r}."
             )
 
-        x = _sym(x)
+        self.activation = activation
+        self.dropout = nn.Dropout(dropout)
+        self.eps = eps
+        self.debug_tensor_stats = debug_tensor_stats
 
-        x = torch.matrix_exp(x)
+        self.linear_in = nn.Linear(self.feature_dim, self.hidden_feature_dim)
+        self.linear_out = nn.Linear(self.hidden_feature_dim, self.feature_dim)
 
-        y = self.bimap1(x)
-        y = self.act1(y)
+        # Start close to identity: the residual branch exists, but initially
+        # contributes almost nothing until the final projection learns.
+        nn.init.zeros_(self.linear_out.weight)
+        nn.init.zeros_(self.linear_out.bias)
+        self.raw_gate = nn.Parameter(torch.logit(torch.tensor(0.1)))
 
-        y = self.bimap2(y)
-        y = self.act2(y)
+    def forward(self, x_log: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x_log: (..., spd_dim, spd_dim), symmetric log-domain matrix.
 
-        # Optional SPD-safe residual interpolation in Log-Euclidean form.
-        # This keeps the output SPD and starts close to identity.
+        Returns:
+            (..., spd_dim, spd_dim), symmetric log-domain residual output.
+        """
+        if x_log.shape[-2:] != (self.spd_dim, self.spd_dim):
+            raise ValueError(
+                f"Expected x_log shape (..., {self.spd_dim}, {self.spd_dim}), "
+                f"got {tuple(x_log.shape)}."
+            )
+
+        #x_log = _sym(x_log)
+        vector = _upper_triangular_vectorize(x_log)
+
+        hidden = self.linear_in(vector)
+        hidden = _apply_activation(hidden, self.activation)
+        hidden = self.dropout(hidden)
+        delta_vector = self.linear_out(hidden)
+
+        delta_log = _upper_triangular_unvectorize(delta_vector, self.spd_dim)
         gate = torch.sigmoid(self.raw_gate)
+        out_log = x_log + gate * delta_log
 
-        x_log = spd_log(x, eps=self.eps)
-        y_log = spd_log(y, eps=self.eps)
-
-        out_log = (1.0 - gate) * x_log + gate * y_log
-
-        return out_log
+        return _sym(out_log)

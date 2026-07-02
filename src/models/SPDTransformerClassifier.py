@@ -21,6 +21,7 @@ class SPDTransformerClassifier(nn.Module):
 
     def __init__(
             self,
+            num_heads: int,
             spd_in_dim: int,
             attention_dim: int,
             num_classes: int,
@@ -59,6 +60,7 @@ class SPDTransformerClassifier(nn.Module):
         self.classifier_type = classifier_type
         if classifier_type == "pooling":
             self.model = SPDPoolingClassifier(
+                num_heads=num_heads,
                 spd_in_dim=spd_in_dim,
                 attention_dim=attention_dim,
                 num_classes=num_classes,

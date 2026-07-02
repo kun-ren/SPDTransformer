@@ -12,7 +12,7 @@ from src.models.SPDAttention import (
 )
 from src.models.SPDFeedForward import SPDFeedForward
 from src.models.TraceAddNorm import TraceAddNorm
-
+from src.models.MultiHeadEncoder import MultiHeadEncoder
 
 class SPDEncoder(nn.Module):
     def __init__(
@@ -47,7 +47,11 @@ class SPDEncoder(nn.Module):
 
         self.stage_projection = None
         if self.stage_transition:
-            self.stage_projection = GeooptBiMap(spd_in_dim, attention_dim)
+            self.stage_projection = GeooptBiMap(
+                spd_in_dim,
+                attention_dim,
+                eps=eps,
+            )
 
         if self.stage_projection is not None:
             spd_out_dim = attention_dim
@@ -71,7 +75,7 @@ class SPDEncoder(nn.Module):
 
         self.time_add_norm1 = TraceAddNorm(
             spd_out_dim,
-            sequence_length=time_sequence_length,
+            sequence_length=frequency_sequence_length,
             tau=tau,
             eps=eps,
             affine=layer_norm_affine,
@@ -79,13 +83,13 @@ class SPDEncoder(nn.Module):
         )
         self.time_ffn = SPDFeedForward(
             spd_out_dim,
-            spd_out_dim,
+            hidden_spd_dim=ffn_hidden_spd_dim,
             dropout=dropout,
             eps=eps
         )
         self.time_add_norm2 = TraceAddNorm(
             spd_out_dim,
-            sequence_length=time_sequence_length,
+            sequence_length=frequency_sequence_length,
             tau=tau,
             eps=eps,
             affine=layer_norm_affine,
@@ -117,7 +121,7 @@ class SPDEncoder(nn.Module):
         )
         self.frequency_ffn = SPDFeedForward(
             spd_out_dim,
-            spd_out_dim,
+            hidden_spd_dim=ffn_hidden_spd_dim,
             dropout=dropout,
             eps=eps
         )
@@ -220,6 +224,7 @@ class SPDTransformer(nn.Module):
 
     def __init__(
             self,
+            num_heads: int,
             spd_in_dim: int,
             attention_dim: int,
             time_sequence_length,
@@ -258,6 +263,52 @@ class SPDTransformer(nn.Module):
 
         self.dims = result
 
+        if num_heads < 1:
+            raise ValueError(f"num_heads must be >= 1, got {num_heads}.")
+        
+        if num_heads == 1:
+            self.layers = nn.ModuleList([SPDEncoder(
+                spd_in_dim=dim if stage_transition else self.dims[0],
+                attention_dim=self.dims[index+1],
+                stage_transition=self.stage_transition,
+                time_sequence_length=time_sequence_length,
+                frequency_sequence_length=frequency_sequence_length,
+                tau=tau,
+                ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                metric=metric,
+                attention_dropout=attention_dropout,
+                debug_attention_dropout=debug_attention_dropout,
+                debug_attention_shape=debug_attention_shape,
+                debug_tensor_stats=debug_tensor_stats,
+                learnable_metric_mode=learnable_metric_mode,
+                learnable_metric_rank=learnable_metric_rank,
+                eps=eps,
+                use_position_bias=use_position_bias,
+                layer_norm_affine=layer_norm_affine,
+                dropout=dropout,
+            ) for index, dim in enumerate(self.dims[:-1])])
+        elif num_heads > 1:
+            self.layers = nn.ModuleList([MultiHeadEncoder(
+                num_heads=num_heads,
+                spd_in_dim=dim if stage_transition else self.dims[0],
+                attention_dim=self.dims[index+1],
+                stage_transition=self.stage_transition,
+                time_sequence_length=time_sequence_length,
+                frequency_sequence_length=frequency_sequence_length,
+                tau=tau,
+                ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                metric=metric,
+                attention_dropout=attention_dropout,
+                debug_attention_dropout=debug_attention_dropout,
+                debug_attention_shape=debug_attention_shape,
+                debug_tensor_stats=debug_tensor_stats,
+                learnable_metric_mode=learnable_metric_mode,
+                learnable_metric_rank=learnable_metric_rank,
+                eps=eps,
+                use_position_bias=use_position_bias,
+                layer_norm_affine=layer_norm_affine,
+                dropout=dropout,
+            ) for index, dim in enumerate(self.dims[:-1])])
         self.layers = nn.ModuleList([SPDEncoder(
                 spd_in_dim=dim if stage_transition else self.dims[0],
                 attention_dim=self.dims[index+1],

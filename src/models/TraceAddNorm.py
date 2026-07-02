@@ -72,9 +72,9 @@ class TraceAddNorm(nn.Module):
 
         output = torch.matrix_exp(S_res)
 
-        output = 0.5 * (
-                output + output.transpose(-1, -2)
-        )
+        # output = 0.5 * (
+        #         output + output.transpose(-1, -2)
+        # )
 
         C = output.shape[-1]
         I = torch.eye(C, device=output.device, dtype=output.dtype)

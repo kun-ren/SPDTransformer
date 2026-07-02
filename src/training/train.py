@@ -260,6 +260,7 @@ def build_model(
         frequency_sequence_length,
 ) -> SPDTransformerClassifier:
     return SPDTransformerClassifier(
+        num_heads=int(model_cfg.get("head_nums", 1)),
         spd_in_dim=spd_in_dim,
         attention_dim=int(model_cfg.get("attention_dim", spd_in_dim)),
         stage_transition=bool(model_cfg.get("stage_transition", True)),
@@ -325,8 +326,15 @@ def evaluate(
         loader: DataLoader,
         criterion: nn.Module,
         device: torch.device,
+        condition_regularization_weight: float = 1e-3,
 ) -> dict[str, float]:
-    predictions = predict_loader(model, loader, criterion, device)
+    predictions = predict_loader(
+        model,
+        loader,
+        criterion,
+        device,
+        condition_regularization_weight=condition_regularization_weight,
+    )
     return {
         "loss": predictions["loss"],
         "accuracy": predictions["accuracy"],
@@ -339,6 +347,7 @@ def predict_loader(
         loader: DataLoader,
         criterion: nn.Module,
         device: torch.device,
+        condition_regularization_weight: float = 1e-3,
 ) -> dict[str, Any]:
     model.eval()
     total_loss = 0.0
@@ -351,13 +360,16 @@ def predict_loader(
             y_batch = y_batch.to(device)
 
             logits, aux = model(x_batch)
-            cond_loss = 0.0
-            for name, P_bimap in aux.items():
-                cond_loss = cond_loss + condition_regularization(P_bimap)
+            cond_loss = logits.new_tensor(0.0)
+            if condition_regularization_weight > 0:
+                for name, P_bimap in aux.items():
+                    cond_loss = cond_loss + condition_regularization(P_bimap)
+                cond_loss = cond_loss / len(aux)
 
-            cond_loss = cond_loss / len(aux)
-
-            loss = criterion(logits, y_batch) + 1e-3 * cond_loss
+            loss = (
+                criterion(logits, y_batch)
+                + condition_regularization_weight * cond_loss
+            )
 
             total_loss += loss.item() * y_batch.size(0)
             y_true.extend(y_batch.cpu().numpy().tolist())
@@ -451,6 +463,7 @@ def train_one_epoch(
         device: torch.device,
         gradient_clip_norm: float | None = None,
         debug_anomaly: bool = False,
+        condition_regularization_weight: float = 1e-3,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
@@ -463,13 +476,13 @@ def train_one_epoch(
         logits, aux = model(x_batch)
         cls_loss = criterion(logits, y_batch)
 
-        cond_loss = 0.0
-        for name, P_bimap in aux.items():
-            cond_loss = cond_loss + condition_regularization(P_bimap)
+        cond_loss = logits.new_tensor(0.0)
+        if condition_regularization_weight > 0:
+            for name, P_bimap in aux.items():
+                cond_loss = cond_loss + condition_regularization(P_bimap)
+            cond_loss = cond_loss / len(aux)
 
-        cond_loss = cond_loss / len(aux)
-
-        loss = cls_loss + 1e-3 * cond_loss
+        loss = cls_loss + condition_regularization_weight * cond_loss
         if not torch.isfinite(loss):
             raise RuntimeError(
                 "Non-finite training loss detected: "
@@ -492,7 +505,8 @@ def train_one_epoch(
         if gradient_clip_norm is not None and gradient_clip_norm > 0:
             params_to_clip = [
                 p
-                for group in optimizer_euclid.param_groups
+                for optimizer in (optimizer_euclid, optimizer_stiefel)
+                for group in optimizer.param_groups
                 for p in group["params"]
                 if p.grad is not None
             ]
@@ -674,6 +688,9 @@ def train_experiment(
     history_path = run_dir / "history.csv"
     checkpoint_path = run_dir / "best_model.pt"
     epochs = int(training_cfg.get("epochs", 50))
+    condition_regularization_weight = float(
+        training_cfg.get("condition_regularization_weight", 1e-3)
+    )
     early_stopping_patience = training_cfg.get("early_stopping_patience")
     if early_stopping_patience is not None:
         early_stopping_patience = int(early_stopping_patience)
@@ -711,8 +728,15 @@ def train_experiment(
             device,
             gradient_clip_norm=gradient_clip_norm,
             debug_anomaly=debug_anomaly,
+            condition_regularization_weight=condition_regularization_weight,
         )
-        val_metrics = evaluate(model, val_loader, criterion, device)
+        val_metrics = evaluate(
+            model,
+            val_loader,
+            criterion,
+            device,
+            condition_regularization_weight=condition_regularization_weight,
+        )
 
         row = {
             "epoch": epoch,
@@ -771,9 +795,27 @@ def train_experiment(
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     split_predictions = {
-        "train": predict_loader(model, train_loader, criterion, device),
-        "val": predict_loader(model, val_loader, criterion, device),
-        "test": predict_loader(model, test_loader, criterion, device),
+        "train": predict_loader(
+            model,
+            train_loader,
+            criterion,
+            device,
+            condition_regularization_weight=condition_regularization_weight,
+        ),
+        "val": predict_loader(
+            model,
+            val_loader,
+            criterion,
+            device,
+            condition_regularization_weight=condition_regularization_weight,
+        ),
+        "test": predict_loader(
+            model,
+            test_loader,
+            criterion,
+            device,
+            condition_regularization_weight=condition_regularization_weight,
+        ),
     }
     save_per_class_metrics(
         run_dir / "per_class_metrics.csv",
@@ -834,7 +876,7 @@ def preprocess_dataset(
         channels=data_cfg.get("channels"),
         estimator=str(data_cfg.get("estimator", "lwf")),
         sfreq=float(data_cfg.get("sfreq", 160)),
-        eps=float(data_cfg.get("eps", 1e-6)),
+        eps=float(data_cfg.get("eps", 1e-8)),
         segment_duration=float(data_cfg.get("segment_duration", 1.0)),
         stride_duration=data_cfg.get("stride_duration", 0.5),
         imaged=parse_bool(data_cfg.get("imaged", True), default=True),
