@@ -26,7 +26,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             spd_in_dim: int,
             attention_dim: int,
             num_classes: int,
-            stage_transition: True,
+            stage_transition: bool,
             time_sequence_length: int,
             frequency_sequence_length: int,
             tau=1.0,
@@ -56,7 +56,8 @@ class SPDPoolingClassifier(SPDClassifierBase):
         self.num_classes = num_classes
         self.pooling = pooling
         self.debug_tensor_stats = debug_tensor_stats
-        self.feature_dim = spd_in_dim * (spd_in_dim + 1) // 2
+        self.encoder_spd_dim = attention_dim if stage_transition else spd_in_dim
+        self.feature_dim = self.encoder_spd_dim * (self.encoder_spd_dim + 1) // 2
         self.classifier_feature_dim = (
             self.feature_dim * frequency_sequence_length
             if pooling == "band_mean"

@@ -674,6 +674,12 @@ def train_experiment(
     history_path = run_dir / "history.csv"
     checkpoint_path = run_dir / "best_model.pt"
     epochs = int(training_cfg.get("epochs", 50))
+    early_stopping_patience = training_cfg.get("early_stopping_patience")
+    if early_stopping_patience is not None:
+        early_stopping_patience = int(early_stopping_patience)
+    early_stopping_min_delta = float(
+        training_cfg.get("early_stopping_min_delta", 0.0)
+    )
     gradient_clip_norm = training_cfg.get("gradient_clip_norm", 1.0)
     if gradient_clip_norm is not None:
         gradient_clip_norm = float(gradient_clip_norm)
@@ -719,7 +725,7 @@ def train_experiment(
         }
         append_history(history_path, row)
 
-        if val_metrics["macro_f1"] > best_val_macro_f1:
+        if val_metrics["macro_f1"] > best_val_macro_f1 + early_stopping_min_delta:
             best_val_macro_f1 = val_metrics["macro_f1"]
             best_epoch = epoch
             torch.save(
@@ -742,6 +748,18 @@ def train_experiment(
             f"acc={val_metrics['accuracy']:.4f} "
             f"mf1={val_metrics['macro_f1']:.4f}"
         )
+
+        if (
+            early_stopping_patience is not None
+            and early_stopping_patience > 0
+            and epoch - best_epoch >= early_stopping_patience
+        ):
+            print(
+                f"  early stopping at epoch {epoch:03d}/{epochs} | "
+                f"best_epoch={best_epoch} "
+                f"best_val_mf1={best_val_macro_f1:.4f}"
+            )
+            break
 
     checkpoint = torch.load(
         checkpoint_path,
