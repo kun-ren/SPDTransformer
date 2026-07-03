@@ -267,6 +267,7 @@ def build_model(
     # make sure attention_dim num is matching depth
     if len(attention_dim) < depth:
         attention_dim.extend([attention_dim[-1] for _ in range(depth - len(attention_dim))])
+    attention_dim = [int(s) for s in attention_dim]
     return SPDTransformerClassifier(
         num_heads=int(model_cfg.get("head_nums", 1)),
         spd_in_dim=spd_in_dim,
