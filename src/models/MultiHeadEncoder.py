@@ -242,7 +242,7 @@ class SPDMultiHeadEncoder(nn.Module):
 
         return y_log, all_aux
 
-    def forward(self, x):
+    def forward(self, x, return_log: bool = False):
         if x.ndim not in {4, 5}:
             raise ValueError(
                 "Expected input shape (batch, time, channels, channels) or "
@@ -306,6 +306,9 @@ class SPDMultiHeadEncoder(nn.Module):
             x_log = self.frequency_add_norm2(x_log, self.frequency_ffn(x_log))
 
         x_log = _symmetrize(x_log)
+        if return_log:
+            return x_log, all_aux
+
         x_spd = torch.matrix_exp(x_log)
 
         return _symmetrize(x_spd), all_aux

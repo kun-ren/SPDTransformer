@@ -2,8 +2,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from src.models.SPDAttention import spd_log
-
 
 class TraceAddNorm(nn.Module):
     """
@@ -11,7 +9,10 @@ class TraceAddNorm(nn.Module):
 
     The residual merge is a two-point Log-Euclidean barycenter:
         merged = exp((1 - alpha) log(residual) + alpha log(sublayer_output))
-    followed by trace normalization.
+    followed by trace normalization. The trace normalization is computed
+    directly in the log domain:
+
+        log(exp(S) / tr(exp(S))) = S - log(tr(exp(S))) I
 
     When affine=True, a learnable per-position scale is applied in the log
     domain after trace normalization:
@@ -65,30 +66,20 @@ class TraceAddNorm(nn.Module):
 
 
 
-        # Protect against small floating-point asymmetry.
         S_res = 0.5 * (
                 S_res + S_res.transpose(-1, -2)
         )
 
-        output = torch.matrix_exp(S_res)
-
-        # output = 0.5 * (
-        #         output + output.transpose(-1, -2)
-        # )
-
-        C = output.shape[-1]
-        I = torch.eye(C, device=output.device, dtype=output.dtype)
-
-        output = output + self.eps * I
-
-        trace = torch.diagonal(output, dim1=-2, dim2=-1).sum(dim=-1)
-        trace = trace.clamp_min(self.eps)
-
-        output = output / trace[..., None, None]
-
-        output_log = spd_log(output)
+        C = S_res.shape[-1]
+        I = torch.eye(C, device=S_res.device, dtype=S_res.dtype)
+        log_trace = self._log_trace_exp(S_res)
+        output_log = S_res - log_trace[..., None, None] * I
         output_log = self._apply_log_domain_affine(output_log)
         return 0.5 * (output_log + output_log.transpose(-1, -2))
+
+    def _log_trace_exp(self, symmetric_log: torch.Tensor) -> torch.Tensor:
+        eigenvalues = torch.linalg.eigvalsh(symmetric_log)
+        return torch.logsumexp(eigenvalues, dim=-1)
 
     def _apply_log_domain_affine(self, output_log: torch.Tensor) -> torch.Tensor:
         if not self.affine:

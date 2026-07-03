@@ -175,7 +175,7 @@ class SPDEncoder(nn.Module):
 
         return y_log, aux
 
-    def forward(self, x):
+    def forward(self, x, return_log: bool = False):
         if x.ndim not in {4, 5}:
             raise ValueError(
                 "Expected input shape (batch, time, channels, channels) or "
@@ -195,12 +195,15 @@ class SPDEncoder(nn.Module):
             )
             x = 0.5 * (x + x.transpose(-1, -2)) + self.eps * eye
 
+        residual_log = spd_log(x)
         time_output_log, aux = self._apply_attention_along_axis(
             self.time_attention,
             x,
             axis=1,
         )
-        x_log = self.time_add_norm1(spd_log(x), time_output_log)
+        for name, param in aux.items():
+            all_aux[f"time_{name}"] = param
+        x_log = self.time_add_norm1(residual_log, time_output_log)
 
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
 
@@ -215,15 +218,19 @@ class SPDEncoder(nn.Module):
                 x_spd,
                 axis=2,
             )
+            for name, param in aux.items():
+                all_aux[f"frequency_{name}"] = param
 
             x_log = self.frequency_add_norm1(x_log, frequency_output_log)
 
             x_log = self.frequency_add_norm2(x_log, self.frequency_ffn(x_log))
 
         x_log = 0.5 * (x_log + x_log.transpose(-1, -2))
+        if return_log:
+            return x_log, all_aux
+
         x_spd = torch.matrix_exp(x_log)
 
-        all_aux.update(aux)
         return 0.5 * (x_spd + x_spd.transpose(-1, -2)), all_aux
 
 
@@ -313,10 +320,11 @@ class SPDTransformer(nn.Module):
                 stage_projection_init=stage_projection_init,
             ) for index, dim in enumerate(self.attention_dim[:-1])])
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, return_log: bool = False):
         all_aux = {}
         for layer_index, layer in enumerate(self.layers):
-            x, aux = layer(x)
+            layer_return_log = return_log and layer_index == len(self.layers) - 1
+            x, aux = layer(x, return_log=layer_return_log)
             for name, param in aux.items():
                 all_aux[name + "_" + str(layer_index)] = param
 

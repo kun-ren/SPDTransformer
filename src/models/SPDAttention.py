@@ -89,11 +89,63 @@ def _safe_eigh(
         ) from last_error or error
 
 
+class _SPDLogEig(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, eps: float) -> torch.Tensor:
+        eigenvalues, eigenvectors = _safe_eigh(x, eps=eps)
+        safe_eigenvalues = eigenvalues.clamp_min(eps)
+        log_eigenvalues = safe_eigenvalues.log()
+        y = (
+            eigenvectors
+            * log_eigenvalues.unsqueeze(-2)
+        ) @ eigenvectors.transpose(-1, -2)
+
+        ctx.save_for_backward(safe_eigenvalues, log_eigenvalues, eigenvectors)
+        ctx.eps = eps
+        return _symmetrize(y)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
+        safe_eigenvalues, log_eigenvalues, eigenvectors = ctx.saved_tensors
+        eps = ctx.eps
+
+        grad_output = _symmetrize(grad_output)
+        grad_eigenbasis = (
+            eigenvectors.transpose(-1, -2)
+            @ grad_output
+            @ eigenvectors
+        )
+
+        lambda_i = safe_eigenvalues.unsqueeze(-1)
+        lambda_j = safe_eigenvalues.unsqueeze(-2)
+        log_i = log_eigenvalues.unsqueeze(-1)
+        log_j = log_eigenvalues.unsqueeze(-2)
+
+        lambda_diff = lambda_i - lambda_j
+        log_diff = log_i - log_j
+        scale = torch.maximum(lambda_i.abs(), lambda_j.abs()).clamp_min(eps)
+        rtol = math.sqrt(torch.finfo(safe_eigenvalues.dtype).eps)
+        close = lambda_diff.abs() <= rtol * scale
+
+        safe_diff = torch.where(
+            close,
+            torch.ones_like(lambda_diff),
+            lambda_diff,
+        )
+        divided_difference = log_diff / safe_diff
+        limit = 2.0 / (lambda_i + lambda_j).clamp_min(eps)
+        loewner = torch.where(close, limit, divided_difference)
+
+        grad_x = (
+            eigenvectors
+            @ (loewner * grad_eigenbasis)
+            @ eigenvectors.transpose(-1, -2)
+        )
+        return _symmetrize(grad_x), None
+
+
 def spd_log(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
-    eigenvalues, eigenvectors = _safe_eigh(x, eps=eps)
-    log_eigenvalues = eigenvalues.clamp_min(eps).log()
-    y = (eigenvectors * log_eigenvalues.unsqueeze(-2)) @ eigenvectors.transpose(-1, -2)
-    return _symmetrize(y)
+    return _SPDLogEig.apply(x, eps)
 
 
 def stable_attention_softmax(

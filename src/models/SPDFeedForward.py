@@ -61,9 +61,8 @@ class SPDFeedForward(nn.Module):
             -> Linear -> GELU -> Dropout -> Linear
             -> symmetric matrix -> residual in log domain
 
-    The returned matrix is symmetric log-domain output. Mapping it with
-    torch.matrix_exp returns an SPD matrix, and the surrounding TraceAddNorm
-    already performs that exponential map.
+    The returned matrix is symmetric log-domain output. TraceAddNorm consumes
+    this log-domain output directly and keeps the block in the tangent domain.
     """
 
     def __init__(

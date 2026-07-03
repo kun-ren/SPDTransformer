@@ -3,7 +3,6 @@ from typing import Tuple, Any, Literal
 import torch
 from torch import nn
 
-from src.models.SPDAttention import spd_log
 from src.models.SPDClassifierBase import SPDClassifierBase
 from src.models.SPDTransformer import SPDTransformer
 
@@ -106,32 +105,31 @@ class SPDPoolingClassifier(SPDClassifierBase):
 
     def forward(self, x: torch.Tensor) -> tuple[Any, Any]:
 
-        x, aux = self.encoder(x)
+        x_log, aux = self.encoder(x, return_log=True)
 
 
         if self.pooling == "mean":
-            pooled_log = self._mean_pool(x)
+            pooled_log = self._mean_pool(x_log)
             features = self.upper_triangular_vectorize(pooled_log)
         elif self.pooling == "band_mean":
-            features = self._band_mean_pool_features(x)
+            features = self._band_mean_pool_features(x_log)
         else:
-            pooled_log = self._attention_pool(x)
+            pooled_log = self._attention_pool(x_log)
             features = self.upper_triangular_vectorize(pooled_log)
 
         logits = self.classifier(features)
 
         return logits, aux
 
-    def _mean_pool(self, x: torch.Tensor) -> torch.Tensor:
+    def _mean_pool(self, x_log: torch.Tensor) -> torch.Tensor:
         """
-        Compute the mean value across all tokens that belong to one trial
+        Compute the log-domain mean over all tokens that belong to one trial.
         :return torch.Tensor: (batch, channels, channels)
         """
-        log_x = spd_log(x)
-        token_dims = tuple(range(1, log_x.ndim - 2))
-        return log_x.mean(dim=token_dims)
+        token_dims = tuple(range(1, x_log.ndim - 2))
+        return x_log.mean(dim=token_dims)
 
-    def _band_mean_pool_features(self, x: torch.Tensor) -> torch.Tensor:
+    def _band_mean_pool_features(self, x_log: torch.Tensor) -> torch.Tensor:
         """
         Average over time but keep frequency-band features separate.
 
@@ -139,34 +137,32 @@ class SPDPoolingClassifier(SPDClassifierBase):
         band and concatenates them. For 4D input, it falls back to temporal
         mean pooling.
         """
-        log_x = spd_log(x)
-        if log_x.ndim == 4:
-            pooled_log = log_x.mean(dim=1)
+        if x_log.ndim == 4:
+            pooled_log = x_log.mean(dim=1)
             return self.upper_triangular_vectorize(pooled_log)
 
-        if log_x.ndim != 5:
+        if x_log.ndim != 5:
             raise ValueError(
                 "Expected encoder output shape "
                 "(batch, time, channels, channels) or "
                 "(batch, time, frequency, channels, channels), "
-                f"got {tuple(log_x.shape)}."
+                f"got {tuple(x_log.shape)}."
             )
 
-        band_log = log_x.mean(dim=1)
+        band_log = x_log.mean(dim=1)
         band_features = self.upper_triangular_vectorize(band_log)
         return band_features.reshape(band_features.shape[0], -1)
 
-    def _attention_pool(self, x: torch.Tensor) -> torch.Tensor:
+    def _attention_pool(self, x_log: torch.Tensor) -> torch.Tensor:
         """
 
         :param x:
         :return: pooled spd matrix, (batch, channels, channels)
         """
-        batch_size = x.shape[0]
-        spd_dim = x.shape[-1]
-        log_x = spd_log(x)
+        batch_size = x_log.shape[0]
+        spd_dim = x_log.shape[-1]
         # log_tokens = (batch, tim x frequency_bands, channels, channels)
-        log_tokens = log_x.reshape(batch_size, -1, spd_dim, spd_dim)
+        log_tokens = x_log.reshape(batch_size, -1, spd_dim, spd_dim)
         token_features = self.upper_triangular_vectorize(log_tokens)
 
 
