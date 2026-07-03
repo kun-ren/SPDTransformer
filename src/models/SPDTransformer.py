@@ -42,9 +42,10 @@ class SPDEncoder(nn.Module):
         self.debug_attention_shape = debug_attention_shape
         self.debug_tensor_stats = debug_tensor_stats
         self.stage_transition = stage_transition
+        self.eps = eps
 
         self.stage_projection = None
-        if self.stage_transition:
+        if self.stage_transition and attention_dim != spd_in_dim:
             self.stage_projection = GeooptBiMap(
                 spd_in_dim,
                 attention_dim,
@@ -181,9 +182,16 @@ class SPDEncoder(nn.Module):
             )
         all_aux = {}
         # first above all
-        if self.stage_transition:
+        if self.stage_projection is not None:
             x = self.stage_projection(x)
             all_aux["P_x"] = x
+        else:
+            eye = torch.eye(
+                x.shape[-1],
+                device=x.device,
+                dtype=x.dtype,
+            )
+            x = 0.5 * (x + x.transpose(-1, -2)) + self.eps * eye
 
         time_output_log, aux = self._apply_attention_along_axis(
             self.time_attention,
@@ -248,8 +256,7 @@ class SPDTransformer(nn.Module):
             raise ValueError(f"depth must be >= 1, got {depth}.")
 
         self.spd_in_dim = spd_in_dim
-        self.attention_dim = attention_dim
-        self.attention_dim.insert(0, spd_in_dim)
+        self.attention_dim = [spd_in_dim, *[int(dim) for dim in attention_dim]]
         self.depth = depth
         self.debug_tensor_stats = debug_tensor_stats
         self.stage_transition = stage_transition
@@ -259,8 +266,8 @@ class SPDTransformer(nn.Module):
         
         if num_heads == 1:
             self.layers = nn.ModuleList([SPDEncoder(
-                spd_in_dim=attention_dim[index] if self.stage_transition else spd_in_dim,
-                attention_dim=attention_dim[index+1],
+                spd_in_dim=self.attention_dim[index] if self.stage_transition else spd_in_dim,
+                attention_dim=self.attention_dim[index+1],
                 stage_transition=self.stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
@@ -281,8 +288,8 @@ class SPDTransformer(nn.Module):
         elif num_heads > 1:
             self.layers = nn.ModuleList([SPDMultiHeadEncoder(
                 num_heads=num_heads,
-                spd_in_dim=attention_dim[index] if self.stage_transition else spd_in_dim,
-                attention_dim=attention_dim[index + 1],
+                spd_in_dim=self.attention_dim[index] if self.stage_transition else spd_in_dim,
+                attention_dim=self.attention_dim[index + 1],
                 stage_transition=self.stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
@@ -300,26 +307,6 @@ class SPDTransformer(nn.Module):
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
             ) for index, dim in enumerate(self.attention_dim[:-1])])
-        self.layers = nn.ModuleList([SPDEncoder(
-                spd_in_dim=dim if stage_transition else self.dims[0],
-                attention_dim=self.dims[index+1],
-                stage_transition=self.stage_transition,
-                time_sequence_length=time_sequence_length,
-                frequency_sequence_length=frequency_sequence_length,
-                tau=tau,
-                ffn_hidden_spd_dim=ffn_hidden_spd_dim,
-                metric=metric,
-                attention_dropout=attention_dropout,
-                debug_attention_dropout=debug_attention_dropout,
-                debug_attention_shape=debug_attention_shape,
-                debug_tensor_stats=debug_tensor_stats,
-                learnable_metric_mode=learnable_metric_mode,
-                learnable_metric_rank=learnable_metric_rank,
-                eps=eps,
-                use_position_bias=use_position_bias,
-                layer_norm_affine=layer_norm_affine,
-                dropout=dropout,
-            ) for index, dim in enumerate(self.dims[:-1])])
 
     def forward(self, x: torch.Tensor):
         all_aux = {}

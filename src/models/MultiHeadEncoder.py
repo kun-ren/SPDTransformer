@@ -48,9 +48,10 @@ class SPDMultiHeadEncoder(nn.Module):
         self.debug_attention_shape = debug_attention_shape
         self.debug_tensor_stats = debug_tensor_stats
         self.stage_transition = stage_transition
+        self.eps = eps
 
         self.stage_projection = None
-        if self.stage_transition:
+        if self.stage_transition and attention_dim != spd_in_dim:
             self.stage_projection = GeooptBiMap(
                 spd_in_dim,
                 attention_dim,
@@ -223,9 +224,16 @@ class SPDMultiHeadEncoder(nn.Module):
                 f"got {tuple(x.shape)}."
             )
         all_aux = {}
-        if self.stage_transition:
+        if self.stage_projection is not None:
             x = self.stage_projection(x)
             all_aux["P_x"] = x
+        else:
+            eye = torch.eye(
+                x.shape[-1],
+                device=x.device,
+                dtype=x.dtype,
+            )
+            x = _symmetrize(x) + self.eps * eye
 
         time_output_log, aux = self._apply_attention_along_axis(
             self.time_attention,

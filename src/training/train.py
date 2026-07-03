@@ -259,15 +259,11 @@ def build_model(
         time_sequence_length,
         frequency_sequence_length,
 ) -> SPDTransformerClassifier:
-    attention_dim = model_cfg.get("attention_dim", "21, 21")
-
-    attention_dim = attention_dim.split(',')
     depth = int(model_cfg.get("depth", 1))
-
-    # make sure attention_dim num is matching depth
-    if len(attention_dim) < depth:
-        attention_dim.extend([attention_dim[-1] for _ in range(depth - len(attention_dim))])
-    attention_dim = [int(s) for s in attention_dim]
+    attention_dim = parse_attention_dims(
+        model_cfg.get("attention_dim", spd_in_dim),
+        depth=depth,
+    )
     return SPDTransformerClassifier(
         num_heads=int(model_cfg.get("head_nums", 1)),
         spd_in_dim=spd_in_dim,
@@ -293,6 +289,28 @@ def build_model(
         use_position_bias=bool(model_cfg.get("use_position_bias", True)),
         layer_norm_affine=bool(model_cfg.get("layer_norm_affine", True)),
     )
+
+
+def parse_attention_dims(value: Any, depth: int) -> list[int]:
+    if depth < 1:
+        raise ValueError(f"depth must be >= 1, got {depth}.")
+
+    if isinstance(value, str):
+        dims = [int(part.strip()) for part in value.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple)):
+        dims = [int(item) for item in value]
+    else:
+        dims = [int(value)]
+
+    if not dims:
+        raise ValueError("model.attention_dim must contain at least one dimension.")
+
+    if len(dims) < depth:
+        dims.extend([dims[-1]] * (depth - len(dims)))
+    elif len(dims) > depth:
+        dims = dims[:depth]
+
+    return dims
 
 
 def condition_regularization(P, eps=1e-5):
