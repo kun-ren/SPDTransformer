@@ -57,8 +57,8 @@ class SPDPoolingClassifier(SPDClassifierBase):
         self.num_classes = num_classes
         self.pooling = pooling
         self.debug_tensor_stats = debug_tensor_stats
-        self.encoder_spd_dim = attention_dim if stage_transition else spd_in_dim
-        self.feature_dim = self.encoder_spd_dim * (self.encoder_spd_dim + 1) // 2
+        self.transformer_out_dim = attention_dim[-1] if stage_transition else spd_in_dim
+        self.feature_dim = self.transformer_out_dim * (self.transformer_out_dim + 1) // 2
         self.classifier_feature_dim = (
             self.feature_dim * frequency_sequence_length
             if pooling == "band_mean"
