@@ -33,6 +33,7 @@ class SPDEncoder(nn.Module):
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
             dropout: float = 0.0,
+            stage_projection_init: Literal["identity", "random"] = "identity",
     ):
         super().__init__()
         print(f"input_dim: {spd_in_dim}, attention_dim: {attention_dim}")
@@ -50,6 +51,7 @@ class SPDEncoder(nn.Module):
                 spd_in_dim,
                 attention_dim,
                 eps=eps,
+                init=stage_projection_init,
             )
 
         if self.stage_projection is not None:
@@ -250,6 +252,7 @@ class SPDTransformer(nn.Module):
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
             dropout: float = 0.0,
+            stage_projection_init: Literal["identity", "random"] = "identity",
     ):
         super().__init__()
         if depth < 1:
@@ -284,6 +287,7 @@ class SPDTransformer(nn.Module):
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
+                stage_projection_init=stage_projection_init,
             ) for index, dim in enumerate(self.attention_dim[:-1])])
         elif num_heads > 1:
             self.layers = nn.ModuleList([SPDMultiHeadEncoder(
@@ -306,6 +310,7 @@ class SPDTransformer(nn.Module):
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
+                stage_projection_init=stage_projection_init,
             ) for index, dim in enumerate(self.attention_dim[:-1])])
 
     def forward(self, x: torch.Tensor):

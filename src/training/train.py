@@ -288,6 +288,7 @@ def build_model(
         eps=float(model_cfg.get("eps", 1e-6)),
         use_position_bias=bool(model_cfg.get("use_position_bias", True)),
         layer_norm_affine=bool(model_cfg.get("layer_norm_affine", True)),
+        stage_projection_init=str(model_cfg.get("stage_projection_init", "identity")),
     )
 
 

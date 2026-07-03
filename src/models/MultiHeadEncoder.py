@@ -35,6 +35,7 @@ class SPDMultiHeadEncoder(nn.Module):
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
             dropout: float = 0.0,
+            stage_projection_init: Literal["identity", "random"] = "identity",
     ):
         super().__init__()
         if num_heads < 1:
@@ -51,14 +52,28 @@ class SPDMultiHeadEncoder(nn.Module):
         self.eps = eps
 
         self.stage_projection = None
+        self.head_stage_projections = None
         if self.stage_transition and attention_dim != spd_in_dim:
-            self.stage_projection = GeooptBiMap(
-                spd_in_dim,
-                attention_dim,
-                eps=eps,
-            )
+            if stage_projection_init == "identity":
+                self.head_stage_projections = nn.ModuleList([
+                    GeooptBiMap(
+                        spd_in_dim,
+                        attention_dim,
+                        eps=eps,
+                        init="identity",
+                        identity_indices=torch.randperm(spd_in_dim)[:attention_dim],
+                    )
+                    for _ in range(num_heads)
+                ])
+            else:
+                self.stage_projection = GeooptBiMap(
+                    spd_in_dim,
+                    attention_dim,
+                    eps=eps,
+                    init=stage_projection_init,
+                )
 
-        if self.stage_projection is not None:
+        if self.stage_projection is not None or self.head_stage_projections is not None:
             spd_out_dim = attention_dim
         else:
             spd_out_dim = spd_in_dim
@@ -173,16 +188,27 @@ class SPDMultiHeadEncoder(nn.Module):
             cls,
             attention_heads: nn.ModuleList,
             head_logits: torch.Tensor,
-            x: torch.Tensor,
+            x: torch.Tensor | list[torch.Tensor],
             axis: int,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        if x.ndim < 4:
+        if isinstance(x, torch.Tensor):
+            head_inputs = [x] * len(attention_heads)
+        else:
+            head_inputs = list(x)
+            if len(head_inputs) != len(attention_heads):
+                raise ValueError(
+                    f"Expected {len(attention_heads)} head inputs, "
+                    f"got {len(head_inputs)}."
+                )
+
+        x0 = head_inputs[0]
+        if x0.ndim < 4:
             raise ValueError(
                 "Expected SPD input with shape (..., sequence, channels, channels), "
-                f"got {tuple(x.shape)}."
+                f"got {tuple(x0.shape)}."
             )
 
-        leading_ndim = x.ndim - 2
+        leading_ndim = x0.ndim - 2
         if axis < 0:
             axis += leading_ndim
         if not 0 <= axis < leading_ndim:
@@ -192,16 +218,16 @@ class SPDMultiHeadEncoder(nn.Module):
             )
 
         seq_pos = leading_ndim - 1
-        perm = list(range(x.ndim))
+        perm = list(range(x0.ndim))
         if axis != seq_pos:
             moved_axis = perm.pop(axis)
             perm.insert(seq_pos, moved_axis)
-            x = x.permute(perm)
+            head_inputs = [x_head.permute(perm) for x_head in head_inputs]
 
         all_aux: dict[str, torch.Tensor] = {}
         head_logs = []
         for head_index, attention_head in enumerate(attention_heads):
-            y_log, aux = attention_head(x)
+            y_log, aux = attention_head(head_inputs[head_index])
             head_logs.append(y_log)
             for key, value in aux.items():
                 all_aux[f"axis_{axis}_head_{head_index}_{key}"] = value
@@ -224,9 +250,24 @@ class SPDMultiHeadEncoder(nn.Module):
                 f"got {tuple(x.shape)}."
             )
         all_aux = {}
-        if self.stage_projection is not None:
+        if self.head_stage_projections is not None:
+            projected_inputs = [
+                stage_projection(x)
+                for stage_projection in self.head_stage_projections
+            ]
+            for head_index, projected_input in enumerate(projected_inputs):
+                all_aux[f"P_x_head_{head_index}"] = projected_input
+
+            residual_log = self._combine_head_logs(
+                [spd_log(projected_input) for projected_input in projected_inputs],
+                self.time_head_logits,
+            )
+            attention_input = projected_inputs
+        elif self.stage_projection is not None:
             x = self.stage_projection(x)
             all_aux["P_x"] = x
+            residual_log = spd_log(x)
+            attention_input = x
         else:
             eye = torch.eye(
                 x.shape[-1],
@@ -234,15 +275,17 @@ class SPDMultiHeadEncoder(nn.Module):
                 dtype=x.dtype,
             )
             x = _symmetrize(x) + self.eps * eye
+            residual_log = spd_log(x)
+            attention_input = x
 
         time_output_log, aux = self._apply_attention_along_axis(
             self.time_attention,
             self.time_head_logits,
-            x,
+            attention_input,
             axis=1,
         )
         all_aux.update(aux)
-        x_log = self.time_add_norm1(spd_log(x), time_output_log)
+        x_log = self.time_add_norm1(residual_log, time_output_log)
 
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
 

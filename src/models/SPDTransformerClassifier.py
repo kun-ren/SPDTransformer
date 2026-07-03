@@ -44,6 +44,7 @@ class SPDTransformerClassifier(nn.Module):
             eps: float = 1e-8,
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
+            stage_projection_init: Literal["identity", "random"] = "identity",
     ):
         super().__init__()
         self.debug_tensor_stats = debug_tensor_stats
@@ -82,6 +83,7 @@ class SPDTransformerClassifier(nn.Module):
                 eps=eps,
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
+                stage_projection_init=stage_projection_init,
             )
         else:
             print("initializing SPDTaskTagClassifier")
