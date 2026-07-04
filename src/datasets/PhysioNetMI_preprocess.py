@@ -1,4 +1,6 @@
+import random
 import re
+from pathlib import Path
 
 import mne
 
@@ -535,6 +537,245 @@ def map_event_to_label(run_id, event_name):
     return None
 
 
+EEGNET_AUTHOR_EXCLUDED_SUBJECTS = (88, 92, 100, 104)
+
+EEGNET_AUTHOR_CHANNEL_INDICES = {
+    64: np.arange(64),
+    38: np.array(
+        [
+            0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 21, 22,
+            23, 24, 26, 28, 29, 31, 33, 35, 37, 40, 41, 42,
+            43, 46, 48, 50, 52, 54, 55, 57, 59, 60, 61, 62, 63,
+        ]
+    ),
+    27: np.array(
+        [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+            14, 15, 16, 17, 18, 19, 20, 38, 39, 40, 41, 44, 45,
+        ]
+    ),
+    19: np.array(
+        [8, 10, 12, 21, 23, 29, 31, 33, 35, 37, 40, 41, 46, 48, 50, 52, 54, 60, 62]
+    ),
+    8: np.array([8, 10, 12, 25, 27, 48, 52, 57]),
+}
+
+
+def eegnet_author_class_names(n_classes):
+    if int(n_classes) == 2:
+        return ["left_hand", "right_hand"]
+    if int(n_classes) == 3:
+        return ["left_hand", "right_hand", "rest"]
+    if int(n_classes) == 4:
+        return ["left_hand", "right_hand", "rest", "feet"]
+    raise ValueError(f"EEGNet author preprocessing supports 2, 3, or 4 classes, got {n_classes}.")
+
+
+def eegnet_author_runs(n_classes):
+    n_classes = int(n_classes)
+    if n_classes == 2:
+        return [4, 8, 12]
+    if n_classes == 3:
+        return [1, 4, 8, 12]
+    if n_classes == 4:
+        return [1, 4, 6, 8, 10, 12, 14]
+    raise ValueError(f"EEGNet author preprocessing supports 2, 3, or 4 classes, got {n_classes}.")
+
+
+def _normalize_subject_ids(subjects):
+    if subjects is None:
+        return None
+    normalized = []
+    for subject in subjects:
+        text = str(subject).strip().upper()
+        if not text:
+            continue
+        if text.startswith("S"):
+            text = text[1:]
+        normalized.append(int(text))
+    return sorted(set(normalized))
+
+
+def _eegnet_author_label(run_id, event_name):
+    first_set = {4, 8, 12}
+    second_set = {6, 10, 14}
+    if run_id in first_set:
+        if event_name == "T1":
+            return 0
+        if event_name == "T2":
+            return 1
+    if run_id in second_set and event_name == "T2":
+        return 3
+    return None
+
+
+def _eegnet_author_reduce(x, n_ds=1, n_ch=64, T=3.0, fs=160.0):
+    n_ds = int(n_ds)
+    n_ch = int(n_ch)
+    if n_ds < 1:
+        raise ValueError(f"n_ds must be >= 1, got {n_ds}.")
+    if n_ch not in EEGNET_AUTHOR_CHANNEL_INDICES:
+        raise ValueError(
+            "n_ch must be one of "
+            f"{sorted(EEGNET_AUTHOR_CHANNEL_INDICES)}, got {n_ch}."
+        )
+
+    channels = EEGNET_AUTHOR_CHANNEL_INDICES[n_ch]
+    n_samples_original = int(T * fs)
+    n_samples = int(np.ceil(T * fs / n_ds))
+    x = x[:, channels, :n_samples_original]
+    if n_ds == 1:
+        return x
+
+    import scipy.signal as scipy_signal
+
+    reduced = np.zeros((x.shape[0], n_ch, n_samples), dtype=x.dtype)
+    for trial in range(x.shape[0]):
+        for channel in range(n_ch):
+            reduced[trial, channel] = scipy_signal.decimate(
+                x[trial, channel],
+                n_ds,
+            )
+    return reduced
+
+
+def _eegnet_author_normalize_trials(x):
+    x = np.asarray(x, dtype=np.float32).copy()
+    mean = x.mean(axis=-1, keepdims=True)
+    std = x.std(axis=-1, keepdims=True)
+    std = np.where(std > 0, std, 1.0)
+    return (x - mean) / std
+
+
+def preprocess_eegnet_author(
+    root_dir,
+    subjects=None,
+    n_classes=2,
+    excluded_subjects=EEGNET_AUTHOR_EXCLUDED_SUBJECTS,
+    T=3.0,
+    n_ds=1,
+    n_ch=64,
+    normalization=0,
+    sfreq=160.0,
+    scale_to_uv=True,
+    random_state=7,
+    return_subjects=True,
+):
+    """
+    Load PhysioNet EEGBCI trials using the EEGNet author's global-model setup.
+
+    This intentionally avoids the SPD preprocessing path: no re-reference, no
+    filtering, no notch filter, no ICA/autoreject, and no covariance estimation.
+    Trials are cut directly from EDF annotations, then optionally channel-
+    reduced/downsampled like eeg_reduction.py in the author repository.
+    """
+    n_classes = int(n_classes)
+    class_names = eegnet_author_class_names(n_classes)
+    target_runs = eegnet_author_runs(n_classes)
+    excluded_subjects = set(_normalize_subject_ids(excluded_subjects) or [])
+    subject_filter = _normalize_subject_ids(subjects)
+    if subject_filter is None:
+        subject_filter = list(range(1, 110))
+    subject_filter = [
+        subject for subject in subject_filter if subject not in excluded_subjects
+    ]
+
+    root = Path(root_dir)
+    n_samples = int(round(float(T) * float(sfreq)))
+    rng = random.Random(random_state)
+    x_all = []
+    y_all = []
+    subject_labels = []
+
+    for subject in subject_filter:
+        subject_name = f"S{subject:03d}"
+        subject_dir = root / subject_name
+        if not subject_dir.exists():
+            continue
+
+        for run_id in target_runs:
+            edf_file = subject_dir / f"{subject_name}R{run_id:02d}.edf"
+            if not edf_file.exists():
+                continue
+
+            raw = mne.io.read_raw_edf(
+                edf_file,
+                preload=True,
+                verbose=False,
+            )
+            run_sfreq = float(raw.info["sfreq"])
+            if not np.isclose(run_sfreq, float(sfreq), atol=1e-5):
+                raise ValueError(
+                    f"Sampling rate mismatch for {edf_file}: "
+                    f"expected {sfreq}, got {run_sfreq}."
+                )
+            data = raw.get_data()
+            if scale_to_uv:
+                data = data * 1e6
+
+            if run_id == 1:
+                for index in range(20):
+                    start = index * n_samples
+                    end = start + n_samples
+                    if end <= data.shape[1]:
+                        x_all.append(data[:, start:end])
+                        y_all.append(2)
+                        subject_labels.append(subject_name)
+                max_start = max(0, int(data.shape[1] - n_samples))
+                if max_start > 0:
+                    start = rng.randint(0, max_start)
+                    end = start + n_samples
+                    x_all.append(data[:, start:end])
+                    y_all.append(2)
+                    subject_labels.append(subject_name)
+                continue
+
+            counters = {0: 0, 1: 0, 3: 0}
+            for onset, event_name in zip(
+                raw.annotations.onset,
+                raw.annotations.description,
+            ):
+                label = _eegnet_author_label(run_id, event_name)
+                if label is None:
+                    continue
+                if counters[label] >= 7:
+                    continue
+
+                start = int(onset * run_sfreq)
+                end = start + n_samples
+                if start < 0 or end > data.shape[1]:
+                    continue
+                x_all.append(data[:, start:end])
+                y_all.append(label)
+                subject_labels.append(subject_name)
+                counters[label] += 1
+
+    if not x_all:
+        raise RuntimeError(
+            "No EEGNet author-style trials were loaded. Check root_dir, "
+            "subjects, n_classes, and EDF file availability."
+        )
+
+    x = np.asarray(x_all, dtype=np.float32)
+    y = np.asarray(y_all, dtype=np.int64)
+    x = _eegnet_author_reduce(
+        x,
+        n_ds=n_ds,
+        n_ch=n_ch,
+        T=T,
+        fs=sfreq,
+    ).astype(np.float32, copy=False)
+    if int(normalization) == 1:
+        x = _eegnet_author_normalize_trials(x)
+
+    if not np.isfinite(x).all():
+        raise ValueError("EEGNet author-style data contains NaN or Inf values.")
+
+    if return_subjects:
+        return x, y, class_names, np.asarray(subject_labels, dtype=np.str_)
+    return x, y, class_names
+
+
 def extract_transition_epochs(
     edf_file,
     tmin=-3.0,
@@ -685,8 +926,6 @@ def extract_transition_epochs(
         )
 
     return list(X), list(y)
-
-from pathlib import Path
 
 
 def load_subject(

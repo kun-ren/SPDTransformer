@@ -608,6 +608,89 @@ def append_history(path: Path, row: dict[str, Any]) -> None:
         writer.writerow(row)
 
 
+def optimizer_lr_values(optimizer: torch.optim.Optimizer) -> list[float]:
+    return [float(group["lr"]) for group in optimizer.param_groups]
+
+
+def format_lr_values(values: list[float]) -> str:
+    return ",".join(f"{value:.3e}" for value in values)
+
+
+def resolve_scheduler_metric(metric_name: str, val_metrics: dict[str, float]) -> float:
+    metric_map = {
+        "val_loss": val_metrics["loss"],
+        "val_accuracy": val_metrics["accuracy"],
+        "val_macro_f1": val_metrics["macro_f1"],
+    }
+    if metric_name not in metric_map:
+        raise ValueError(
+            "lr_scheduler_metric must be one of "
+            "'val_loss', 'val_accuracy', or 'val_macro_f1', "
+            f"got {metric_name!r}."
+        )
+    return float(metric_map[metric_name])
+
+
+def build_lr_schedulers(
+        training_cfg: dict[str, Any],
+        optimizer_euclid: torch.optim.Optimizer,
+        optimizer_stiefel: torch.optim.Optimizer,
+) -> tuple[str | None, str | None, Any, Any]:
+    scheduler_name = str(training_cfg.get("lr_scheduler", "none")).lower()
+    if scheduler_name in {"", "none", "null", "false", "off"}:
+        return None, None, None, None
+
+    if scheduler_name not in {
+        "plateau",
+        "reduce_on_plateau",
+        "reduce_lr_on_plateau",
+    }:
+        raise ValueError(
+            "Only lr_scheduler='plateau' is supported, "
+            f"got {scheduler_name!r}."
+        )
+
+    metric_name = str(training_cfg.get("lr_scheduler_metric", "val_macro_f1"))
+    mode = training_cfg.get("lr_scheduler_mode")
+    if mode is None:
+        mode = "min" if metric_name == "val_loss" else "max"
+    mode = str(mode).lower()
+    if mode not in {"min", "max"}:
+        raise ValueError("lr_scheduler_mode must be 'min' or 'max'.")
+
+    factor = float(training_cfg.get("lr_scheduler_factor", 0.5))
+    if not 0.0 < factor < 1.0:
+        raise ValueError("lr_scheduler_factor must be between 0 and 1.")
+
+    scheduler_kwargs = {
+        "mode": mode,
+        "factor": factor,
+        "patience": int(training_cfg.get("lr_scheduler_patience", 4)),
+        "threshold": float(training_cfg.get("lr_scheduler_threshold", 1e-4)),
+        "threshold_mode": str(
+            training_cfg.get("lr_scheduler_threshold_mode", "rel")
+        ),
+        "cooldown": int(training_cfg.get("lr_scheduler_cooldown", 0)),
+        "eps": float(training_cfg.get("lr_scheduler_eps", 1e-8)),
+    }
+    euclid_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer_euclid,
+        min_lr=float(training_cfg.get("lr_scheduler_min_lr", 1e-6)),
+        **scheduler_kwargs,
+    )
+    stiefel_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer_stiefel,
+        min_lr=float(
+            training_cfg.get(
+                "stiefel_lr_scheduler_min_lr",
+                training_cfg.get("lr_scheduler_min_lr", 1e-6),
+            )
+        ),
+        **scheduler_kwargs,
+    )
+    return scheduler_name, metric_name, euclid_scheduler, stiefel_scheduler
+
+
 def train_experiment(
         run_index: int,
         experiment_cfg: dict[str, Any],
@@ -710,6 +793,16 @@ def train_experiment(
         weight_decay=0.0,
         stabilize=10,
     )
+    (
+        lr_scheduler_name,
+        lr_scheduler_metric,
+        lr_scheduler_euclid,
+        lr_scheduler_stiefel,
+    ) = build_lr_schedulers(
+        training_cfg,
+        optimizer_euclid,
+        optimizer_stiefel,
+    )
 
     best_val_macro_f1 = -1.0
     best_epoch = 0
@@ -736,6 +829,13 @@ def train_experiment(
     print(f"\n[Run {run_index}] {run_dir.name}")
     print(f"  model={model_cfg}")
     print(f"  training={training_cfg}")
+    if lr_scheduler_name is not None:
+        print(
+            "  lr_scheduler="
+            f"{lr_scheduler_name} metric={lr_scheduler_metric} "
+            f"euclid_lr={format_lr_values(optimizer_lr_values(optimizer_euclid))} "
+            f"stiefel_lr={format_lr_values(optimizer_lr_values(optimizer_stiefel))}"
+        )
     print(
         "  split="
         f"{'epoch-level' if allow_subject_overlap else 'subject-level'} "
@@ -766,6 +866,30 @@ def train_experiment(
             condition_regularization_weight=condition_regularization_weight,
         )
 
+        if lr_scheduler_name is not None:
+            old_euclid_lrs = optimizer_lr_values(optimizer_euclid)
+            old_stiefel_lrs = optimizer_lr_values(optimizer_stiefel)
+            scheduler_value = resolve_scheduler_metric(
+                lr_scheduler_metric,
+                val_metrics,
+            )
+            lr_scheduler_euclid.step(scheduler_value)
+            lr_scheduler_stiefel.step(scheduler_value)
+            new_euclid_lrs = optimizer_lr_values(optimizer_euclid)
+            new_stiefel_lrs = optimizer_lr_values(optimizer_stiefel)
+            if (
+                    new_euclid_lrs != old_euclid_lrs
+                    or new_stiefel_lrs != old_stiefel_lrs
+            ):
+                print(
+                    "  lr scheduler step | "
+                    f"{lr_scheduler_metric}={scheduler_value:.6f} "
+                    f"euclid_lr {format_lr_values(old_euclid_lrs)}"
+                    f" -> {format_lr_values(new_euclid_lrs)} "
+                    f"stiefel_lr {format_lr_values(old_stiefel_lrs)}"
+                    f" -> {format_lr_values(new_stiefel_lrs)}"
+                )
+
         row = {
             "epoch": epoch,
             "train_loss": train_metrics["loss"],
@@ -774,6 +898,8 @@ def train_experiment(
             "val_loss": val_metrics["loss"],
             "val_accuracy": val_metrics["accuracy"],
             "val_macro_f1": val_metrics["macro_f1"],
+            "euclid_lr": optimizer_lr_values(optimizer_euclid)[0],
+            "stiefel_lr": optimizer_lr_values(optimizer_stiefel)[0],
         }
         append_history(history_path, row)
 
@@ -1094,6 +1220,11 @@ def main() -> int:
             )
 
         x, y, subject_labels, class_names = data_cache[data_key]
+
+        print(f"y: {y[:10]}")
+        print(f"subjects labels: {subject_labels}")
+        print(f"class names: {class_names}")
+        print(f"y types: {set(y)}")
         metrics = train_experiment(
             run_index=run_index,
             experiment_cfg=experiment_cfg,

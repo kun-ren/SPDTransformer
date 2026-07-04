@@ -4,6 +4,7 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import tempfile
 from copy import deepcopy
 from pathlib import Path
@@ -15,11 +16,16 @@ import yaml
 MNE_HOME = Path(tempfile.gettempdir()) / "spdtransformer_mne"
 MNE_HOME.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("_MNE_FAKE_HOME_DIR", str(MNE_HOME))
+os.environ.setdefault("MNE_DONTWRITE_HOME", "true")
+
+import mne
 
 from src.datasets.PhysioNetMI_preprocess import (
     build_dataset,
     encode_labels,
     normalize_baseline_correction_mode,
+    pick_raw_channels,
+    preprocess_eegnet_author,
     preprocess_spd,
     segment_epochs,
 )
@@ -302,6 +308,35 @@ def load_segmented_epochs_like_train(
         np.asarray(subject_labels, dtype=np.str_),
         list(class_names),
         filter_bank,
+    )
+
+
+def load_eegnet_author_data(
+    data_cfg: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    x, y, class_names, subject_labels = preprocess_eegnet_author(
+        root_dir=str(
+            data_cfg.get("root_dir", "data/MNE-eegbci-data/files/eegmmidb/1.0.0")
+        ),
+        subjects=parse_subjects(data_cfg.get("subjects")),
+        n_classes=int(data_cfg.get("eegnet_num_classes", 2)),
+        excluded_subjects=parse_subjects(
+            data_cfg.get("eegnet_excluded_subjects", "88,92,100,104")
+        ),
+        T=float(data_cfg.get("eegnet_T", data_cfg.get("epoch_tmax", 3.0))),
+        n_ds=int(data_cfg.get("eegnet_downsample", 1)),
+        n_ch=int(data_cfg.get("eegnet_n_channels", 64)),
+        normalization=int(data_cfg.get("eegnet_normalization", 0)),
+        sfreq=float(data_cfg.get("sfreq", 160)),
+        scale_to_uv=parse_bool(data_cfg.get("eegnet_scale_to_uv", True), default=True),
+        random_state=int(data_cfg.get("eegnet_random_state", 7)),
+        return_subjects=True,
+    )
+    return (
+        x.astype(np.float32, copy=False),
+        y.astype(np.int64, copy=False),
+        np.asarray(subject_labels, dtype=np.str_),
+        list(class_names),
     )
 
 

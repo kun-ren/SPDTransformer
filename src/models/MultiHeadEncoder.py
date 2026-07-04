@@ -289,7 +289,7 @@ class SPDMultiHeadEncoder(nn.Module):
 
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
 
-        if x.ndim == 5:
+        if x.ndim == 5 and x.shape[-3] > 1:
             x_spd = torch.matrix_exp(
                 0.5 * (x_log + x_log.transpose(-1, -2))
             )
