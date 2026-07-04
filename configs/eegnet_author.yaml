@@ -5,12 +5,13 @@ data:
   filter_bank:
     - [8, 30]
   eegnet_num_classes: [2]
-  eegnet_T: [3.0]
+  eegnet_T: [4.0]
   eegnet_downsample: [1]
   eegnet_n_channels: [64]
   eegnet_normalization: [0]
   eegnet_scale_to_uv: [true]
   eegnet_random_state: [7]
+  eegnet_max_trials_per_class: [null]
   eegnet_excluded_subjects: "88,92,100,104"
   estimator: ["lwf"]
   sfreq: [160]
@@ -30,8 +31,8 @@ data:
   baseline_correction: [null]
   baseline_window: "-3,0"
   epoch_tmin: [0.0]
-  epoch_tmax: [3.0]
-  segment_duration: [3.0]
+  epoch_tmax: [4.0]
+  segment_duration: [4.0]
   stride_duration: [null]
   imaged: True
   executed: False
@@ -46,16 +47,13 @@ training:
   learning_rate_schedule: ["0:0.01,20:0.001,50:0.0001"]
   weight_decay: [0.0]
   gradient_clip_norm: [0.0]
-  cv_folds: [5]
-  cv_shuffle: [false]
   dropout: [0.2]
   dropout_type: ["Dropout"]
   eegnet_num_filters: [8]
   eegnet_reg_rate: [0.25]
   input_scale: [1.0]
-  test_size: [0.15]
-  val_size: [0.15]
-  allow_subject_overlap: [false]
+  test_size: [0.2]
+  allow_subject_overlap: [true]
   split_file: [null]
   num_workers: [0]
 

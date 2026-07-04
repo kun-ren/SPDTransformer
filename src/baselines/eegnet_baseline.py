@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from sklearn.model_selection import KFold
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
@@ -348,6 +348,67 @@ def build_model_from_config(
     )
 
 
+def make_train_test_split(
+    y: np.ndarray,
+    subject_labels: np.ndarray,
+    training_cfg: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    seed = int(training_cfg.get("seed", 42))
+    test_size = float(training_cfg.get("test_size", 0.2))
+    allow_subject_overlap = parse_bool(
+        training_cfg.get("allow_subject_overlap", False),
+        default=False,
+    )
+    indices = np.arange(len(y), dtype=np.int64)
+
+    if allow_subject_overlap:
+        train_idx, test_idx = train_test_split(
+            indices,
+            test_size=test_size,
+            stratify=y,
+            random_state=seed,
+        )
+        split_strategy = "trial"
+    else:
+        splitter = GroupShuffleSplit(
+            n_splits=1,
+            test_size=test_size,
+            random_state=seed,
+        )
+        train_idx, test_idx = next(
+            splitter.split(indices, y, groups=subject_labels)
+        )
+        train_idx = indices[train_idx]
+        test_idx = indices[test_idx]
+        split_strategy = "subject"
+
+    train_subjects = set(subject_labels[train_idx].tolist())
+    test_subjects = set(subject_labels[test_idx].tolist())
+    subject_overlap = sorted(train_subjects & test_subjects)
+    if not allow_subject_overlap and subject_overlap:
+        raise RuntimeError(
+            "Subject-level EEGNet split failed: train/test subject overlap "
+            f"detected: {subject_overlap}."
+        )
+
+    metadata = {
+        "split_strategy": split_strategy,
+        "allow_subject_overlap": allow_subject_overlap,
+        "test_size": test_size,
+        "seed": seed,
+        "n_train": int(len(train_idx)),
+        "n_test": int(len(test_idx)),
+        "n_train_subjects": int(len(train_subjects)),
+        "n_test_subjects": int(len(test_subjects)),
+        "subject_overlap": subject_overlap,
+        "train_idx": train_idx.astype(int).tolist(),
+        "test_idx": test_idx.astype(int).tolist(),
+        "train_subjects": sorted(train_subjects),
+        "test_subjects": sorted(test_subjects),
+    }
+    return train_idx.astype(np.int64), test_idx.astype(np.int64), metadata
+
+
 def run_experiment(
     run_index: int,
     experiment_cfg: dict[str, Any],
@@ -374,166 +435,157 @@ def run_experiment(
     if gradient_clip_norm is not None:
         gradient_clip_norm = float(gradient_clip_norm)
 
-    cv_folds = int(
-        training_cfg.get(
-            "cv_folds",
-            training_cfg.get("subject_cv_folds", 5),
-        )
-    )
-    if cv_folds < 2:
-        raise ValueError("Author-style EEGNet baseline expects at least 2 CV folds.")
-    cv_shuffle = parse_bool(training_cfg.get("cv_shuffle", False), default=False)
-    kfold = KFold(
-        n_splits=cv_folds,
-        shuffle=cv_shuffle,
-        random_state=seed if cv_shuffle else None,
-    )
-
     schedule = parse_learning_rate_schedule(
         training_cfg.get("learning_rate_schedule"),
         default_lr=float(training_cfg.get("learning_rate", 1e-2)),
     )
+    train_idx, test_idx, split_metadata = make_train_test_split(
+        y,
+        subject_labels,
+        training_cfg,
+    )
     run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(experiment_cfg)}"
     run_dir.mkdir(parents=True, exist_ok=False)
     save_json(run_dir / "config.json", experiment_cfg)
+    save_json(run_dir / "split.json", split_metadata)
 
-    fold_summaries = []
     print(f"\n[EEGNet run {run_index}] {run_dir.name}")
     print(f"  data shape={x.shape} class_names={class_names}")
-    print(f"  subjects={len(np.unique(subject_labels))} folds={cv_folds}")
+    print(
+        "  split="
+        f"{split_metadata['split_strategy']} "
+        f"train/test={split_metadata['n_train']}/{split_metadata['n_test']} "
+        f"subjects={split_metadata['n_train_subjects']}/"
+        f"{split_metadata['n_test_subjects']} "
+        f"allow_subject_overlap={split_metadata['allow_subject_overlap']}"
+    )
     print(f"  lr_schedule={schedule}")
 
-    for fold_index, (train_idx, val_idx) in enumerate(kfold.split(x, y), start=1):
-        fold_seed = seed * fold_index
-        fold_rng = np.random.default_rng(fold_seed)
-        train_idx = np.asarray(train_idx, dtype=np.int64).copy()
-        fold_rng.shuffle(train_idx)
-        val_idx = np.asarray(val_idx, dtype=np.int64)
+    train_loader = make_loader(
+        x,
+        y,
+        train_idx,
+        batch_size,
+        num_workers,
+        shuffle=True,
+        dtype=dtype,
+        input_scale=input_scale,
+    )
+    train_eval_loader = make_loader(
+        x,
+        y,
+        train_idx,
+        batch_size,
+        num_workers,
+        shuffle=False,
+        dtype=dtype,
+        input_scale=input_scale,
+    )
+    test_loader = make_loader(
+        x,
+        y,
+        test_idx,
+        batch_size,
+        num_workers,
+        shuffle=False,
+        dtype=dtype,
+        input_scale=input_scale,
+    )
+    model = build_model_from_config(
+        x,
+        num_classes=len(class_names),
+        data_cfg=data_cfg,
+        training_cfg=training_cfg,
+        apply_max_norm=not args.disable_max_norm,
+    ).to(device=device, dtype=dtype)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=float(training_cfg.get("learning_rate", 1e-2)),
+        weight_decay=float(training_cfg.get("weight_decay", 0.0)),
+    )
 
-        train_loader = make_loader(
-            x,
-            y,
-            train_idx,
-            batch_size,
-            num_workers,
-            shuffle=True,
-            dtype=dtype,
-            input_scale=input_scale,
+    history_rows = []
+    for epoch in range(1, epochs + 1):
+        lr = scheduled_lr(schedule, epoch - 1)
+        set_optimizer_lr(optimizer, lr)
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            gradient_clip_norm,
         )
-        val_loader = make_loader(
-            x,
-            y,
-            val_idx,
-            batch_size,
-            num_workers,
-            shuffle=False,
-            dtype=dtype,
-            input_scale=input_scale,
-        )
-        model = build_model_from_config(
-            x,
-            num_classes=len(class_names),
-            data_cfg=data_cfg,
-            training_cfg=training_cfg,
-            apply_max_norm=not args.disable_max_norm,
-        ).to(device=device, dtype=dtype)
-        criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=float(training_cfg.get("learning_rate", 1e-2)),
-            weight_decay=float(training_cfg.get("weight_decay", 0.0)),
-        )
-
-        history_rows = []
-        best_val_accuracy = -1.0
-        best_epoch = 0
-        for epoch in range(1, epochs + 1):
-            lr = scheduled_lr(schedule, epoch - 1)
-            set_optimizer_lr(optimizer, lr)
-            train_loss = train_one_epoch(
-                model,
-                train_loader,
-                criterion,
-                optimizer,
-                device,
-                gradient_clip_norm,
-            )
-            train_metrics = evaluate(model, train_loader, criterion, device)
-            val_metrics = evaluate(model, val_loader, criterion, device)
-            if val_metrics["accuracy"] > best_val_accuracy:
-                best_val_accuracy = val_metrics["accuracy"]
-                best_epoch = epoch
-                torch.save(
-                    {
-                        "model_state_dict": model.state_dict(),
-                        "class_names": class_names,
-                        "config": experiment_cfg,
-                        "fold": fold_index,
-                        "best_epoch": best_epoch,
-                        "best_val_accuracy": best_val_accuracy,
-                    },
-                    run_dir / f"best_fold_{fold_index}.pt",
-                )
-
-            row = {
-                "epoch": epoch,
-                "lr": lr,
-                "train_loss": train_loss,
-                "train_accuracy": train_metrics["accuracy"],
-                "train_macro_f1": train_metrics["macro_f1"],
-                "val_loss": val_metrics["loss"],
-                "val_accuracy": val_metrics["accuracy"],
-                "val_macro_f1": val_metrics["macro_f1"],
-            }
-            history_rows.append(row)
-            print(
-                f"[EEGNet run {run_index} fold {fold_index}/{cv_folds}] "
-                f"epoch {epoch:03d}/{epochs} "
-                f"lr={lr:.1e} loss={train_loss:.4f} "
-                f"train_acc={train_metrics['accuracy']:.4f} "
-                f"val_acc={val_metrics['accuracy']:.4f}"
-            )
-
-        write_csv(run_dir / f"history_fold_{fold_index}.csv", history_rows)
-        torch.save(model.state_dict(), run_dir / f"final_fold_{fold_index}.pt")
-        final_row = history_rows[-1]
-        fold_summary = {
-            "fold": fold_index,
-            "n_train": int(len(train_idx)),
-            "n_val": int(len(val_idx)),
-            "best_epoch": int(best_epoch),
-            "best_val_accuracy": float(best_val_accuracy),
-            "final_train_accuracy": float(final_row["train_accuracy"]),
-            "final_val_accuracy": float(final_row["val_accuracy"]),
-            "final_val_macro_f1": float(final_row["val_macro_f1"]),
+        train_metrics = evaluate(model, train_eval_loader, criterion, device)
+        row = {
+            "epoch": epoch,
+            "lr": lr,
+            "train_loss": train_loss,
+            "train_accuracy": train_metrics["accuracy"],
+            "train_macro_f1": train_metrics["macro_f1"],
         }
-        fold_summaries.append(fold_summary)
+        history_rows.append(row)
+        print(
+            f"[EEGNet run {run_index}] epoch {epoch:03d}/{epochs} "
+            f"lr={lr:.1e} loss={train_loss:.4f} "
+            f"train_acc={train_metrics['accuracy']:.4f}"
+        )
 
-    write_csv(run_dir / "fold_metrics.csv", fold_summaries)
+    write_csv(run_dir / "history.csv", history_rows)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "class_names": class_names,
+            "config": experiment_cfg,
+            "split": split_metadata,
+            "epochs": epochs,
+        },
+        run_dir / "final_model.pt",
+    )
+
+    final_train_metrics = evaluate(model, train_eval_loader, criterion, device)
+    test_metrics = evaluate(model, test_loader, criterion, device)
+    result_rows = [
+        {
+            "split": "train",
+            "n_samples": int(len(train_idx)),
+            "loss": final_train_metrics["loss"],
+            "accuracy": final_train_metrics["accuracy"],
+            "macro_f1": final_train_metrics["macro_f1"],
+        },
+        {
+            "split": "test",
+            "n_samples": int(len(test_idx)),
+            "loss": test_metrics["loss"],
+            "accuracy": test_metrics["accuracy"],
+            "macro_f1": test_metrics["macro_f1"],
+        },
+    ]
+    write_csv(run_dir / "results.csv", result_rows)
     summary = {
         "baseline": "eegnet_author",
         "author_repository": "https://github.com/MHersche/eegnet-based-embedded-bci",
         "x_shape": list(x.shape),
         "class_names": class_names,
         "subjects": int(len(np.unique(subject_labels))),
-        "folds": fold_summaries,
-        "mean_final_val_accuracy": float(
-            np.mean([row["final_val_accuracy"] for row in fold_summaries])
-        ),
-        "mean_best_val_accuracy": float(
-            np.mean([row["best_val_accuracy"] for row in fold_summaries])
-        ),
+        "split": split_metadata,
+        "train": result_rows[0],
+        "test": result_rows[1],
     }
     save_json(run_dir / "summary.json", summary)
     print(
-        f"[EEGNet run {run_index}] mean final val acc="
-        f"{summary['mean_final_val_accuracy']:.4f} | saved {run_dir}"
+        f"[EEGNet run {run_index}] test acc="
+        f"{test_metrics['accuracy']:.4f} test mf1={test_metrics['macro_f1']:.4f} "
+        f"| saved {run_dir}"
     )
     return {
         "run_index": run_index,
         "run_dir": str(run_dir),
-        "mean_final_val_accuracy": summary["mean_final_val_accuracy"],
-        "mean_best_val_accuracy": summary["mean_best_val_accuracy"],
+        "test_accuracy": test_metrics["accuracy"],
+        "test_macro_f1": test_metrics["macro_f1"],
+        "allow_subject_overlap": split_metadata["allow_subject_overlap"],
+        "split_strategy": split_metadata["split_strategy"],
     }
 
 

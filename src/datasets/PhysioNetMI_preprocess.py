@@ -659,6 +659,7 @@ def preprocess_eegnet_author(
     sfreq=160.0,
     scale_to_uv=True,
     random_state=7,
+    max_trials_per_class=7,
     return_subjects=True,
 ):
     """
@@ -670,6 +671,10 @@ def preprocess_eegnet_author(
     reduced/downsampled like eeg_reduction.py in the author repository.
     """
     n_classes = int(n_classes)
+    if max_trials_per_class is not None:
+        max_trials_per_class = int(max_trials_per_class)
+        if max_trials_per_class <= 0:
+            max_trials_per_class = None
     class_names = eegnet_author_class_names(n_classes)
     target_runs = eegnet_author_runs(n_classes)
     excluded_subjects = set(_normalize_subject_ids(excluded_subjects) or [])
@@ -738,7 +743,10 @@ def preprocess_eegnet_author(
                 label = _eegnet_author_label(run_id, event_name)
                 if label is None:
                     continue
-                if counters[label] >= 7:
+                if (
+                    max_trials_per_class is not None
+                    and counters[label] >= max_trials_per_class
+                ):
                     continue
 
                 start = int(onset * run_sfreq)

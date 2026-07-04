@@ -330,6 +330,7 @@ def load_eegnet_author_data(
         sfreq=float(data_cfg.get("sfreq", 160)),
         scale_to_uv=parse_bool(data_cfg.get("eegnet_scale_to_uv", True), default=True),
         random_state=int(data_cfg.get("eegnet_random_state", 7)),
+        max_trials_per_class=data_cfg.get("eegnet_max_trials_per_class", 7),
         return_subjects=True,
     )
     return (
