@@ -1,0 +1,63 @@
+data:
+  root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
+  # Kept for config compatibility. Author-style EEGNet uses raw EEG trials,
+  # not SPD covariance windows.
+  filter_bank:
+    - [8, 30]
+  eegnet_num_classes: [2]
+  eegnet_T: [3.0]
+  eegnet_downsample: [1]
+  eegnet_n_channels: [64]
+  eegnet_normalization: [0]
+  eegnet_scale_to_uv: [true]
+  eegnet_random_state: [7]
+  eegnet_excluded_subjects: "88,92,100,104"
+  estimator: ["lwf"]
+  sfreq: [160]
+  eps: [1.0e-6]
+  covariance_signal_scale: [1.0e6]
+  subjects: 1-109
+  channels: [null]
+  reject_threshold_uv: [null]
+  use_ica: [false]
+  ica_n_components: [13]
+  ica_random_state: [42]
+  ica_eog_channels: ["FP1,FP2"]
+  use_autoreject: [false]
+  autoreject_random_state: [42]
+  autoreject_n_jobs: [2]
+  autoreject_cv: [10]
+  baseline_correction: [null]
+  baseline_window: "-3,0"
+  epoch_tmin: [0.0]
+  epoch_tmax: [3.0]
+  segment_duration: [3.0]
+  stride_duration: [null]
+  imaged: True
+  executed: False
+  task_types: unilateral_fist
+
+training:
+  seed: [42]
+  precision: ["float32"]
+  epochs: [100]
+  batch_size: [16]
+  learning_rate: [0.01]
+  learning_rate_schedule: ["0:0.01,20:0.001,50:0.0001"]
+  weight_decay: [0.0]
+  gradient_clip_norm: [0.0]
+  cv_folds: [5]
+  cv_shuffle: [false]
+  dropout: [0.2]
+  dropout_type: ["Dropout"]
+  eegnet_num_filters: [8]
+  eegnet_reg_rate: [0.25]
+  input_scale: [1.0]
+  test_size: [0.15]
+  val_size: [0.15]
+  allow_subject_overlap: [false]
+  split_file: [null]
+  num_workers: [0]
+
+output:
+  dir: experiments/results/eegnet_baseline
