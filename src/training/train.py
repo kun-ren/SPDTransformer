@@ -25,7 +25,10 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from script.load_moabb_dataset import parse_int_list
-from src.datasets.PhysioNetMI_preprocess import preprocess_spd
+from src.datasets.PhysioNetMI_preprocess import (
+    normalize_float_dtype,
+    preprocess_spd,
+)
 from src.models.MotorImageryDataset import MotorImageryDataset
 from src.models.SPDTransformerClassifier import SPDTransformerClassifier
 
@@ -52,6 +55,15 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Override device, e.g. cuda, cuda:0, or cpu.",
+    )
+    parser.add_argument(
+        "--precision",
+        type=str,
+        default=None,
+        help=(
+            "Override training precision for all expanded runs. "
+            "Accepted values: float32/fp32/single or float64/fp64/double."
+        ),
     )
     return parser.parse_args()
 
@@ -183,16 +195,30 @@ def resolve_split_file(split_file: Any) -> Path | None:
     return PROJECT_ROOT / path
 
 
-def resolve_precision(precision: Any) -> torch.dtype:
-    precision = str(precision or "float64").lower()
+def normalize_precision_name(precision: Any) -> str:
+    precision = str(precision or "float64").strip().lower()
     if precision in {"float64", "double", "fp64"}:
-        return torch.float64
+        return "float64"
     if precision in {"float32", "float", "single", "fp32"}:
-        return torch.float32
+        return "float32"
     raise ValueError(
         "training.precision must be one of: float64, double, fp64, "
         "float32, float, single, fp32."
     )
+
+
+def resolve_precision(precision: Any) -> torch.dtype:
+    precision_name = normalize_precision_name(precision)
+    if precision_name == "float64":
+        return torch.float64
+    return torch.float32
+
+
+def first_floating_parameter_dtype(model: nn.Module) -> torch.dtype | None:
+    for parameter in model.parameters():
+        if parameter.is_floating_point():
+            return parameter.dtype
+    return None
 
 
 def parse_task_types(task_types: Any) -> tuple[str, ...]:
@@ -711,8 +737,12 @@ def train_experiment(
 ) -> dict[str, Any]:
     training_cfg = experiment_cfg["training"]
     model_cfg = experiment_cfg["model"]
+    precision_name = normalize_precision_name(
+        training_cfg.get("precision", "float64")
+    )
+    training_cfg["precision"] = precision_name
     seed = int(training_cfg.get("seed", 42))
-    dtype = resolve_precision(training_cfg.get("precision", "float64"))
+    dtype = resolve_precision(precision_name)
     set_seed(seed)
 
     run_dir = make_run_dir(base_output_dir, run_index, experiment_cfg)
@@ -837,6 +867,14 @@ def train_experiment(
     print(f"\n[Run {run_index}] {run_dir.name}")
     print(f"  model={model_cfg}")
     print(f"  training={training_cfg}")
+    print(
+        "  dtype="
+        f"precision={precision_name} "
+        f"torch_dtype={str(dtype).replace('torch.', '')} "
+        f"cached_x_dtype={x.dtype} "
+        f"loader_x_dtype={train_loader.dataset.x.dtype} "
+        f"model_param_dtype={first_floating_parameter_dtype(model)}"
+    )
     if lr_scheduler_name is not None:
         print(
             "  lr_scheduler="
@@ -1000,7 +1038,9 @@ def train_experiment(
         "test_accuracy": test_metrics["accuracy"],
         "test_macro_f1": test_metrics["macro_f1"],
         "class_names": class_names,
-        "precision": str(dtype).replace("torch.", ""),
+        "precision": precision_name,
+        "torch_dtype": str(dtype).replace("torch.", ""),
+        "cached_x_dtype": str(x.dtype),
         "n_train": int(len(train_idx)),
         "n_val": int(len(val_idx)),
         "n_test": int(len(test_idx)),
@@ -1064,6 +1104,7 @@ def preprocess_dataset(
         covariance_signal_scale=float(
             data_cfg.get("covariance_signal_scale", 1e6)
         ),
+        output_dtype=data_cfg.get("covariance_output_dtype", "float32"),
     )
     if not np.isfinite(x).all():
         bad_count = int((~np.isfinite(x)).sum())
@@ -1071,7 +1112,12 @@ def preprocess_dataset(
             f"Preprocessed SPD dataset contains {bad_count} NaN or Inf values."
         )
     return (
-        x.astype(np.float32),
+        x.astype(
+            normalize_float_dtype(
+                data_cfg.get("covariance_output_dtype", "float32")
+            ),
+            copy=False,
+        ),
         y.astype(np.int64),
         np.asarray(subject_labels, dtype=np.str_),
         list(class_names),
@@ -1100,7 +1146,7 @@ def load_cached_dataset(
                 )
                 return None
 
-            x = np.asarray(payload["x"], dtype=np.float32)
+            x = np.asarray(payload["x"])
             y = np.asarray(payload["y"], dtype=np.int64)
             subject_labels = np.asarray(payload["subject_labels"], dtype=np.str_)
             class_names = [str(name) for name in payload["class_names"].tolist()]
@@ -1143,7 +1189,7 @@ def save_cached_dataset(
     with tmp_path.open("wb") as handle:
         np.savez(
             handle,
-            x=x.astype(np.float32, copy=False),
+            x=x,
             y=y.astype(np.int64, copy=False),
             subject_labels=np.asarray(subject_labels, dtype=np.str_),
             class_names=np.asarray(class_names, dtype=np.str_),
@@ -1194,6 +1240,11 @@ def main() -> int:
     args = parse_args()
     config = load_yaml(args.config)
     experiments = expand_experiments(config)
+    if args.precision is not None:
+        precision_name = normalize_precision_name(args.precision)
+        for experiment_cfg in experiments:
+            experiment_cfg.setdefault("training", {})["precision"] = precision_name
+        print(f"Precision override: {precision_name}")
     if not experiments:
         raise ValueError("No experiment configurations were generated.")
 

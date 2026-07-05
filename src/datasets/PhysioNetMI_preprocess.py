@@ -35,6 +35,18 @@ def normalize_bool(value, default=False):
     raise ValueError(f"Cannot parse boolean value: {value!r}")
 
 
+def normalize_float_dtype(dtype, default="float32"):
+    normalized = str(dtype or default).strip().lower()
+    if normalized in {"float32", "single", "fp32", "float"}:
+        return np.float32
+    if normalized in {"float64", "double", "fp64"}:
+        return np.float64
+    raise ValueError(
+        "dtype must be one of: float32, single, fp32, float, "
+        "float64, double, fp64."
+    )
+
+
 def bandpass_filter(X, sfreq=160.0, low_freq=8.0, high_freq=30.0, **kwargs):
     """
     X shape: (n_trials, n_channels, n_times).
@@ -1158,6 +1170,7 @@ def preprocess_spd(
     autoreject_cv=10,
     return_subjects=False,
     covariance_signal_scale=1e6,
+    output_dtype="float32",
 ):
     from pyriemann.estimation import Covariances
 
@@ -1165,6 +1178,7 @@ def preprocess_spd(
     executed = normalize_bool(executed, default=False)
     use_ica = normalize_bool(use_ica, default=False)
     use_autoreject = normalize_bool(use_autoreject, default=False)
+    output_dtype = normalize_float_dtype(output_dtype, default="float32")
 
     frequencies = []
     labels = None
@@ -1277,7 +1291,7 @@ def preprocess_spd(
             cov_x = trace_normalize(cov_x, eps=eps)
             cov_x = regularize_spd(cov_x, eps=eps)
 
-        frequencies.append(cov_x.astype(np.float32))
+        frequencies.append(cov_x.astype(output_dtype, copy=False))
 
     if labels is None:
         raise RuntimeError("No data was loaded. Check root_dir, subjects, and task settings.")
