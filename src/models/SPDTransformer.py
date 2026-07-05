@@ -142,6 +142,7 @@ class SPDEncoder(nn.Module):
             attention: SingleHeadAttention,
             x: torch.Tensor,
             axis: int,
+            return_aux: bool = True,
     ) -> tuple[Any, Any]:
         if x.ndim < 4:
             raise ValueError(
@@ -165,7 +166,7 @@ class SPDEncoder(nn.Module):
             perm.insert(seq_pos, moved_axis)
             x = x.permute(perm)
 
-        y_log, aux = attention(x)
+        y_log, aux = attention(x, return_aux=return_aux)
 
         if axis != seq_pos:
             inverse_perm = [0] * len(perm)
@@ -175,7 +176,12 @@ class SPDEncoder(nn.Module):
 
         return y_log, aux
 
-    def forward(self, x, return_log: bool = False):
+    def forward(
+            self,
+            x,
+            return_log: bool = False,
+            return_aux: bool = True,
+    ):
         if x.ndim not in {4, 5}:
             raise ValueError(
                 "Expected input shape (batch, time, channels, channels) or "
@@ -186,7 +192,8 @@ class SPDEncoder(nn.Module):
         # first above all
         if self.stage_projection is not None:
             x = self.stage_projection(x)
-            all_aux["P_x"] = x
+            if return_aux:
+                all_aux["P_x"] = x
         else:
             eye = torch.eye(
                 x.shape[-1],
@@ -200,9 +207,11 @@ class SPDEncoder(nn.Module):
             self.time_attention,
             x,
             axis=1,
+            return_aux=return_aux,
         )
-        for name, param in aux.items():
-            all_aux[f"time_{name}"] = param
+        if return_aux:
+            for name, param in aux.items():
+                all_aux[f"time_{name}"] = param
         x_log = self.time_add_norm1(residual_log, time_output_log)
 
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
@@ -217,9 +226,11 @@ class SPDEncoder(nn.Module):
                 self.frequency_attention,
                 x_spd,
                 axis=2,
+                return_aux=return_aux,
             )
-            for name, param in aux.items():
-                all_aux[f"frequency_{name}"] = param
+            if return_aux:
+                for name, param in aux.items():
+                    all_aux[f"frequency_{name}"] = param
 
             x_log = self.frequency_add_norm1(x_log, frequency_output_log)
 
@@ -320,13 +331,23 @@ class SPDTransformer(nn.Module):
                 stage_projection_init=stage_projection_init,
             ) for index, dim in enumerate(self.attention_dim[:-1])])
 
-    def forward(self, x: torch.Tensor, return_log: bool = False):
+    def forward(
+            self,
+            x: torch.Tensor,
+            return_log: bool = False,
+            return_aux: bool = True,
+    ):
         all_aux = {}
         for layer_index, layer in enumerate(self.layers):
             layer_return_log = return_log and layer_index == len(self.layers) - 1
-            x, aux = layer(x, return_log=layer_return_log)
-            for name, param in aux.items():
-                all_aux[name + "_" + str(layer_index)] = param
+            x, aux = layer(
+                x,
+                return_log=layer_return_log,
+                return_aux=return_aux,
+            )
+            if return_aux:
+                for name, param in aux.items():
+                    all_aux[name + "_" + str(layer_index)] = param
 
         return x, all_aux
 

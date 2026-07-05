@@ -190,6 +190,7 @@ class SPDMultiHeadEncoder(nn.Module):
             head_logits: torch.Tensor,
             x: torch.Tensor | list[torch.Tensor],
             axis: int,
+            return_aux: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if isinstance(x, torch.Tensor):
             head_inputs = [x] * len(attention_heads)
@@ -227,10 +228,14 @@ class SPDMultiHeadEncoder(nn.Module):
         all_aux: dict[str, torch.Tensor] = {}
         head_logs = []
         for head_index, attention_head in enumerate(attention_heads):
-            y_log, aux = attention_head(head_inputs[head_index])
+            y_log, aux = attention_head(
+                head_inputs[head_index],
+                return_aux=return_aux,
+            )
             head_logs.append(y_log)
-            for key, value in aux.items():
-                all_aux[f"axis_{axis}_head_{head_index}_{key}"] = value
+            if return_aux:
+                for key, value in aux.items():
+                    all_aux[f"axis_{axis}_head_{head_index}_{key}"] = value
 
         y_log = cls._combine_head_logs(head_logs, head_logits)
 
@@ -242,7 +247,12 @@ class SPDMultiHeadEncoder(nn.Module):
 
         return y_log, all_aux
 
-    def forward(self, x, return_log: bool = False):
+    def forward(
+            self,
+            x,
+            return_log: bool = False,
+            return_aux: bool = True,
+    ):
         if x.ndim not in {4, 5}:
             raise ValueError(
                 "Expected input shape (batch, time, channels, channels) or "
@@ -255,8 +265,9 @@ class SPDMultiHeadEncoder(nn.Module):
                 stage_projection(x)
                 for stage_projection in self.head_stage_projections
             ]
-            for head_index, projected_input in enumerate(projected_inputs):
-                all_aux[f"P_x_head_{head_index}"] = projected_input
+            if return_aux:
+                for head_index, projected_input in enumerate(projected_inputs):
+                    all_aux[f"P_x_head_{head_index}"] = projected_input
 
             residual_log = self._combine_head_logs(
                 [spd_log(projected_input) for projected_input in projected_inputs],
@@ -265,7 +276,8 @@ class SPDMultiHeadEncoder(nn.Module):
             attention_input = projected_inputs
         elif self.stage_projection is not None:
             x = self.stage_projection(x)
-            all_aux["P_x"] = x
+            if return_aux:
+                all_aux["P_x"] = x
             residual_log = spd_log(x)
             attention_input = x
         else:
@@ -283,8 +295,10 @@ class SPDMultiHeadEncoder(nn.Module):
             self.time_head_logits,
             attention_input,
             axis=1,
+            return_aux=return_aux,
         )
-        all_aux.update(aux)
+        if return_aux:
+            all_aux.update(aux)
         x_log = self.time_add_norm1(residual_log, time_output_log)
 
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
@@ -298,8 +312,10 @@ class SPDMultiHeadEncoder(nn.Module):
                 self.frequency_head_logits,
                 x_spd,
                 axis=2,
+                return_aux=return_aux,
             )
-            all_aux.update(aux)
+            if return_aux:
+                all_aux.update(aux)
 
             x_log = self.frequency_add_norm1(x_log, frequency_output_log)
 

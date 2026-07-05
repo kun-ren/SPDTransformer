@@ -310,7 +310,11 @@ class SingleHeadAttention(nn.Module):
             else None
         )
 
-    def forward(self, x: torch.Tensor) -> Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_aux: bool = True,
+    ) -> tuple[Tensor, dict[str, torch.Tensor]]:
 
         aux = {}
         q = self.query(x)
@@ -322,9 +326,10 @@ class SingleHeadAttention(nn.Module):
 
         log_v = spd_log(v)
 
-        aux['P_q'] = q
-        aux['P_k'] = k
-        aux['P_v'] = v
+        if return_aux:
+            aux['P_q'] = q
+            aux['P_k'] = k
+            aux['P_v'] = v
 
 
         dis = self.learnableRiemannianDistance(q, k)
@@ -407,18 +412,29 @@ class SingleHeadAttention(nn.Module):
             if self.learnable_metric_mode == "low-rank":
                 q_vec = self._upper_triangular_vectorize(log_q)
                 k_vec = self._upper_triangular_vectorize(log_k)
+                q_projected = q_vec @ self.metric_low_rank
+                k_projected = k_vec @ self.metric_low_rank
 
                 if q_vec.ndim == 1 and k_vec.ndim == 1:
-                    diff = q_vec - k_vec
+                    projected_squared_distance = (
+                        q_projected - k_projected
+                    ).square().sum(dim=-1)
+                    ambient_squared_distance = (q_vec - k_vec).square().sum(dim=-1)
                 else:
-                    diff = q_vec.unsqueeze(-2) - k_vec.unsqueeze(-3)
+                    projected_squared_distance = self._pairwise_squared_euclidean(
+                        q_projected,
+                        k_projected,
+                    )
+                    ambient_squared_distance = self._pairwise_squared_euclidean(
+                        q_vec,
+                        k_vec,
+                    )
 
-                projected_diff = diff @ self.metric_low_rank
                 squared_distance = (
-                    projected_diff.square().sum(dim=-1)
-                    + self.eps * diff.square().sum(dim=-1)
+                    projected_squared_distance
+                    + self.eps * ambient_squared_distance
                 )
-                return torch.sqrt(squared_distance + self.eps)
+                return torch.sqrt(squared_distance.clamp_min(0.0) + self.eps)
 
             elif self.learnable_metric_mode == "kronecker":
 
@@ -460,6 +476,16 @@ class SingleHeadAttention(nn.Module):
         spd_dim = x.shape[-1]
         row, col = torch.triu_indices(spd_dim, spd_dim, device=x.device)
         return x[..., row, col]
+
+    @staticmethod
+    def _pairwise_squared_euclidean(
+        q: torch.Tensor,
+        k: torch.Tensor,
+    ) -> torch.Tensor:
+        q_norm = q.square().sum(dim=-1, keepdim=True)
+        k_norm = k.square().sum(dim=-1).unsqueeze(-2)
+        cross = torch.matmul(q, k.transpose(-1, -2))
+        return (q_norm + k_norm - 2.0 * cross).clamp_min(0.0)
 
     def _learnable_mlp_log_function(self, x: torch.Tensor) -> torch.Tensor:
         log_x = spd_log(x)

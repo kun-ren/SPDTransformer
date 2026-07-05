@@ -388,9 +388,13 @@ def predict_loader(
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
 
-            logits, aux = model(x_batch)
+            use_condition_regularization = condition_regularization_weight > 0
+            logits, aux = model(
+                x_batch,
+                return_aux=use_condition_regularization,
+            )
             cond_loss = logits.new_tensor(0.0)
-            if condition_regularization_weight > 0:
+            if use_condition_regularization:
                 for name, P_bimap in aux.items():
                     cond_loss = cond_loss + condition_regularization(P_bimap)
                 cond_loss = cond_loss / len(aux)
@@ -502,11 +506,15 @@ def train_one_epoch(
     for x_batch, y_batch in loader:
         x_batch = x_batch.to(device)
         y_batch = y_batch.to(device)
-        logits, aux = model(x_batch)
+        use_condition_regularization = condition_regularization_weight > 0
+        logits, aux = model(
+            x_batch,
+            return_aux=use_condition_regularization,
+        )
         cls_loss = criterion(logits, y_batch)
 
         cond_loss = logits.new_tensor(0.0)
-        if condition_regularization_weight > 0:
+        if use_condition_regularization:
             for name, P_bimap in aux.items():
                 cond_loss = cond_loss + condition_regularization(P_bimap)
             cond_loss = cond_loss / len(aux)

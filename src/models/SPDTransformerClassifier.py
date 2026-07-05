@@ -110,7 +110,14 @@ class SPDTransformerClassifier(nn.Module):
             )
             print("SPDTaskTagClassifier built")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+            self,
+            x: torch.Tensor,
+            return_aux: bool = True,
+    ) -> tuple[torch.Tensor, dict]:
+
+        if self.classifier_type == "pooling":
+            return self.model(x, return_aux=return_aux)
 
         logits = self.model(x)
-        return logits
+        return logits, {}

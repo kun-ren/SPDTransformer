@@ -1243,7 +1243,22 @@ def preprocess_spd(
         cov_x = cov_x.reshape(n_epochs, n_segments, n_channels, n_channels)
 
         # 4. Normalize SPD scale
+        print(f"Covariance matrix min: {np.min(np.abs(cov_x))}")
+        print(f"Covariance matrix max: {np.max(cov_x)}")
+
+        eigvals = np.linalg.eigvalsh(0.5 * (cov_x + np.swapaxes(cov_x, -1, -2)))
+        print("eig min:", eigvals.min())
+        print("eig p1:", np.percentile(eigvals, 1))
+        print("eig median:", np.median(eigvals))
+        print("eig max:", eigvals.max())
+        print("cond p99:", np.percentile(eigvals[..., -1] / np.maximum(eigvals[..., 0], eps), 99))
+
         cov_x = trace_normalize(cov_x, eps=eps)
+
+        print(f"norm matrix min: {np.min(np.abs(cov_x))}")
+        print(f"norm matrix max: {np.max(cov_x)}")
+
+
 
         # 5. Make sure matrices are strictly SPD
         cov_x = regularize_spd(cov_x, eps=eps)

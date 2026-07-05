@@ -9,7 +9,8 @@ data:
   eps: [1.0e-6]
   covariance_signal_scale: [1.0e6]
   subjects: 1-87,89-109
-  channels: "FC5, FC3, FC1, FCz, FC2, FC4, FC6, C5, C3, C1, Cz, C2, C4, C6, CP5, CP3, CP1, CPz, CP2, CP4, CP6"
+  #channels: "FC5, FC3, FC1, FCz, FC2, FC4, FC6, C5, C3, C1, Cz, C2, C4, C6, CP5, CP3, CP1, CPz, CP2, CP4, CP6"
+  channels:
   reject_threshold_uv: [500]  # set e.g. 500 to enable peak-to-peak epoch rejection
   use_ica: [false]
   ica_n_components: [13]
@@ -32,13 +33,13 @@ data:
 model:
   #   16, 64 is also high
   head_nums: [4] # 4 is better than 1
-  attention_dim: ["21, 21, 21, 21"] # actually in dim
+  attention_dim: ["64, 32, 32, 16"] # actually in dim
   stage_transition: [True]
   stage_projection_init: ["random"] # "random" is much better than indentity
   ffn_hidden_spd_dim: [null]
   tau: [1.3]
   metric: ["learnable-metric"]
-  depth: [4]
+  depth: [3]
   classifier_type: ["pooling"]
   pooling: ["mean"]
   dropout: [0.2]
@@ -49,14 +50,14 @@ model:
   debug_attention_shape: [false]
   debug_tensor_stats: [False]
   learnable_metric_mode: ["low-rank"]
-  learnable_metric_rank: [null]
-  eps: [1.0e-5]
+  learnable_metric_rank: [32]
+  eps: [1.0e-6]
 
 training:
   seed: [42]
   precision: ["float64"]
   epochs: [50]
-  batch_size: [128]
+  batch_size: [32]
   learning_rate: [0.002] #  0.002 is better than 0.0015
   stiefel_learning_rate: [0.0001]
   lr_scheduler: ["plateau"]

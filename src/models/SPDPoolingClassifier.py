@@ -103,9 +103,17 @@ class SPDPoolingClassifier(SPDClassifierBase):
             dropout=dropout,
         )
 
-    def forward(self, x: torch.Tensor) -> tuple[Any, Any]:
+    def forward(
+            self,
+            x: torch.Tensor,
+            return_aux: bool = True,
+    ) -> tuple[Any, Any]:
 
-        x_log, aux = self.encoder(x, return_log=True)
+        x_log, aux = self.encoder(
+            x,
+            return_log=True,
+            return_aux=return_aux,
+        )
 
 
         if self.pooling == "mean":
