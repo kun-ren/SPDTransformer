@@ -291,19 +291,13 @@ class SPDMultiHeadEncoder(nn.Module):
             )
         all_aux = {}
         if self.stage_projection is not None:
-            x = self.stage_projection(x)
+            attention_input = self.stage_projection(x)
             if return_aux:
-                all_aux["P_x"] = x
+                all_aux["P_x"] = attention_input
         else:
-            eye = torch.eye(
-                x.shape[-1],
-                device=x.device,
-                dtype=x.dtype,
-            )
-            x = _symmetrize(x) + self.eps * eye
+            attention_input = x
 
-        attention_input = x
-        residual_log = spd_log(x)
+        residual_log = spd_log(attention_input)
 
         time_output_log, aux = self._apply_attention_along_axis(
             self.time_attention,
@@ -333,7 +327,6 @@ class SPDMultiHeadEncoder(nn.Module):
                 all_aux.update(aux)
 
             x_log = self.frequency_add_norm1(x_log, frequency_output_log)
-
             x_log = self.frequency_add_norm2(x_log, self.frequency_ffn(x_log))
 
         x_log = _symmetrize(x_log)

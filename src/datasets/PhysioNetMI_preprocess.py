@@ -278,6 +278,39 @@ def regularize_spd(covs, eps=1e-10):
     return covs + eps * eye
 
 
+def replace_covariance_diagonal_with_segment_energy(covs, segmented_signal):
+    """
+    Replace covariance diagonal entries with per-channel segment energy.
+
+    covs shape:
+        (n_epochs, n_segments, n_channels, n_channels)
+    segmented_signal shape:
+        (n_epochs, n_segments, n_channels, n_samples)
+
+    The energy is mean(x ** 2) computed from the same scaled signal that is
+    passed to the covariance estimator, keeping diagonal and off-diagonal
+    entries in the same unit scale.
+    """
+    if covs.shape[:-1] != segmented_signal.shape[:-1]:
+        raise ValueError(
+            "covs and segmented_signal dimensions are incompatible: "
+            f"covs={covs.shape}, segmented_signal={segmented_signal.shape}."
+        )
+
+    n_channels = covs.shape[-1]
+    if segmented_signal.shape[-2] != n_channels:
+        raise ValueError(
+            "segmented_signal channel dimension must match covariance "
+            f"dimension {n_channels}, got {segmented_signal.shape[-2]}."
+        )
+
+    energy = np.mean(np.square(segmented_signal), axis=-1)
+    covs = np.array(covs, copy=True)
+    channel_index = np.arange(n_channels)
+    covs[..., channel_index, channel_index] = energy.astype(covs.dtype, copy=False)
+    return covs
+
+
 def matrix_log_spd(covs, eps=1e-10):
     covs = 0.5 * (covs + np.swapaxes(covs, -1, -2))
     eigvals, eigvecs = np.linalg.eigh(covs)
@@ -1109,6 +1142,7 @@ def preprocess_spd(
     autoreject_cv=10,
     return_subjects=False,
     covariance_signal_scale=1e6,
+    replace_covariance_diagonal_with_raw_energy=False,
     output_dtype="float32",
 ):
     from pyriemann.estimation import Covariances
@@ -1117,6 +1151,10 @@ def preprocess_spd(
     executed = normalize_bool(executed, default=False)
     use_ica = normalize_bool(use_ica, default=False)
     use_autoreject = normalize_bool(use_autoreject, default=False)
+    replace_covariance_diagonal_with_raw_energy = normalize_bool(
+        replace_covariance_diagonal_with_raw_energy,
+        default=False,
+    )
     output_dtype = normalize_float_dtype(output_dtype, default="float32")
 
     frequencies = []
@@ -1195,6 +1233,16 @@ def preprocess_spd(
             )
         )
         cov_x = cov_x.reshape(n_epochs, n_segments, n_channels, n_channels)
+
+        if replace_covariance_diagonal_with_raw_energy:
+            cov_x = replace_covariance_diagonal_with_segment_energy(
+                cov_x,
+                covariance_input,
+            )
+            print(
+                "Replaced covariance diagonal with per-channel segment raw "
+                "energy from the scaled covariance input."
+            )
 
         # 4. Normalize SPD scale
         print(f"Covariance matrix min: {np.min(np.abs(cov_x))}")

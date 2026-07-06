@@ -70,10 +70,18 @@ class TraceAddNorm(nn.Module):
                 S_res + S_res.transpose(-1, -2)
         )
 
-        C = S_res.shape[-1]
-        I = torch.eye(C, device=S_res.device, dtype=S_res.dtype)
-        log_trace = self._log_trace_exp(S_res)
-        output_log = S_res - log_trace[..., None, None] * I
+        n_channels = S_res.shape[-1]
+        diag = torch.diagonal(S_res, dim1=-2, dim2=-1)
+        traces = diag.sum(-1)
+        output_log = torch.diagonal(S_res, dim1=-2, dim2=-1)
+        output_log[:] = output_log * n_channels / traces.unsqueeze(-1)
+
+
+
+        # C = S_res.shape[-1]
+        # I = torch.eye(C, device=S_res.device, dtype=S_res.dtype)
+        # log_trace = self._log_trace_exp(S_res)
+        # output_log = S_res - log_trace[..., None, None] * I
         output_log = self._apply_log_domain_affine(output_log)
         return 0.5 * (output_log + output_log.transpose(-1, -2))
 

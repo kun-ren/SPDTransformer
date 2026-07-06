@@ -223,6 +223,11 @@ def load_spd_like_train(
         covariance_signal_scale=float(
             data_cfg.get("covariance_signal_scale", 1e6)
         ),
+        replace_covariance_diagonal_with_raw_energy=parse_bool(
+            data_cfg.get("replace_covariance_diagonal_with_raw_energy", False),
+            default=False,
+        ),
+        output_dtype=data_cfg.get("covariance_output_dtype", "float32"),
     )
     if not np.isfinite(x_spd).all():
         raise ValueError("preprocess_spd returned NaN or Inf values.")
