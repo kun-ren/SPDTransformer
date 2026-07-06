@@ -299,7 +299,7 @@ def build_model(
         frequency_sequence_length=frequency_sequence_length,
         tau=model_cfg.get("tau", 1.0),
         num_classes=num_classes,
-        ffn_hidden_spd_dim=model_cfg.get("ffn_hidden_spd_dim"),
+        ffn_hidden_spd_dim=model_cfg.get("ffn_hidden_spd_dim", None),
         metric=str(model_cfg.get("metric", "log-euclidean")),
         depth=depth,
         classifier_type=str(model_cfg.get("classifier_type", "pooling")),
@@ -315,6 +315,7 @@ def build_model(
         use_position_bias=bool(model_cfg.get("use_position_bias", True)),
         layer_norm_affine=bool(model_cfg.get("layer_norm_affine", True)),
         stage_projection_init=str(model_cfg.get("stage_projection_init", "identity")),
+        add_norm_type=str(model_cfg.get("add_norm_type", "trace")),
     )
 
 

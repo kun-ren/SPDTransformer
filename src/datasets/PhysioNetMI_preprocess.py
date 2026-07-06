@@ -260,7 +260,6 @@ def autoreject_keep_mask(
 
 
 def trace_normalize(covs, eps=1e-10):
-
     """
     trace=d
     :param covs:
@@ -527,8 +526,8 @@ def map_event_to_label(run_id, event_name):
     """
     T1/T2 -> label
     """
-    LEFT_RIGHT_RUNS = {4, 8, 12}
-    HANDS_FEET_RUNS = {6, 10, 14}
+    LEFT_RIGHT_RUNS = {3, 4, 7, 8, 11, 12}
+    HANDS_FEET_RUNS = {5, 6, 9, 10, 13, 14}
 
     if run_id in LEFT_RIGHT_RUNS:
 
@@ -796,158 +795,6 @@ def preprocess_eegnet_author(
     return x, y, class_names
 
 
-def extract_transition_epochs(
-    edf_file,
-    tmin=-3.0,
-    tmax=3.8,
-    low_freq=None,
-    high_freq=None,
-    channels=None,
-    reject_threshold_uv=None,
-    use_ica=False,
-    ica_n_components=20,
-    ica_random_state=42,
-    ica_eog_channels=None,
-    use_autoreject=False,
-    autoreject_random_state=42,
-    autoreject_n_jobs=1,
-    autoreject_cv=10,
-):
-    """
-    take T1/T2 onset as the anchor
-
-    [-tmin, +tmax]
-
-    label = task type
-    """
-    use_ica = normalize_bool(use_ica, default=False)
-    use_autoreject = normalize_bool(use_autoreject, default=False)
-
-    raw = mne.io.read_raw_edf(
-        edf_file,
-        preload=True,
-        verbose=False
-    )
-    # Re-reference before filtering and epoching
-    raw.set_eeg_reference("average", projection=False)
-    raw = pick_raw_channels(raw, channels=channels)
-    raw = set_standard_eeg_montage(raw)
-    raw.filter(l_freq=0.5, h_freq=None)
-    raw.filter(l_freq=None, h_freq=40)
-    raw.notch_filter(freqs=60)
-    if use_ica:
-        raw = apply_ica_artifact_removal(
-            raw,
-            n_components=ica_n_components,
-            random_state=ica_random_state,
-            eog_channels=ica_eog_channels,
-        )
-    artifact_info = raw.info.copy()
-    artifact_data = raw.get_data()
-
-    if low_freq is not None or high_freq is not None:
-        if low_freq is None or high_freq is None:
-            raise ValueError("low_freq and high_freq must be provided together.")
-        raw = filter_raw_band(raw, low_freq=low_freq, high_freq=high_freq)
-
-    sfreq = raw.info["sfreq"]
-    if not np.isclose(sfreq, 160.0, atol=1e-5):
-        print(f"Sampling Rate doesn't match: {sfreq}, skip {edf_file}")
-        return [], []
-
-
-    annotations = raw.annotations
-
-    run_id = int(
-        re.search(r"R(\d+)", edf_file).group(1)
-    )
-
-    X = []
-    y = []
-    artifact_epochs = []
-
-    data = raw.get_data()
-
-    for onset, desc in zip(
-        annotations.onset,
-        annotations.description,
-    ):
-
-        if desc not in ["T1", "T2"]:
-            continue
-
-        label = map_event_to_label(
-            run_id,
-            desc
-        )
-
-        if label is None:
-            continue
-
-        center = int(onset * sfreq)
-
-        start = int(center + tmin * sfreq)
-        end = int(center + tmax * sfreq)
-
-        if start < 0:
-            continue
-
-        if end > data.shape[1]:
-            continue
-
-        epoch = data[:, start:end]
-        X.append(epoch)
-        artifact_epochs.append(artifact_data[:, start:end])
-        y.append(label)
-
-    if not X:
-        return [], []
-
-    artifact_epochs = np.asarray(artifact_epochs)
-    X = np.asarray(X)
-    y = np.asarray(y)
-
-    if use_autoreject:
-        autoreject_mask = autoreject_keep_mask(
-            artifact_epochs,
-            info=artifact_info,
-            tmin=tmin,
-            random_state=autoreject_random_state,
-            n_jobs=autoreject_n_jobs,
-            cv=autoreject_cv,
-        )
-        autoreject_rejected = int((~autoreject_mask).sum())
-        if autoreject_rejected:
-            print(
-                f"AutoReject rejected {autoreject_rejected} epoch(s) "
-                f"from {edf_file}."
-            )
-        X = X[autoreject_mask]
-        y = y[autoreject_mask]
-        artifact_epochs = artifact_epochs[autoreject_mask]
-        if len(X) == 0:
-            return [], []
-
-    _, y, keep_mask = reject_bad_epochs(
-        artifact_epochs,
-        y,
-        threshold_uv=reject_threshold_uv,
-    )
-    X = X[keep_mask]
-    rejected = int((~keep_mask).sum())
-    if rejected:
-        ptp_uv = epoch_peak_to_peak_uv(artifact_epochs)
-        print(
-            f"Peak-to-peak rejected {rejected} bad epoch(s) from {edf_file} "
-            f"(threshold={float(reject_threshold_uv):.1f} uV, "
-            f"ptp_uv median={np.median(ptp_uv):.1f}, "
-            f"p90={np.percentile(ptp_uv, 90):.1f}, "
-            f"max={np.max(ptp_uv):.1f})."
-        )
-
-    return list(X), list(y)
-
-
 def load_subject(
     subject_dir,
     tmin=-2.0,
@@ -972,59 +819,151 @@ def load_subject(
     executed = normalize_bool(executed, default=False)
     use_ica = normalize_bool(use_ica, default=False)
     use_autoreject = normalize_bool(use_autoreject, default=False)
+    if (low_freq is None) != (high_freq is None):
+        raise ValueError("low_freq and high_freq must be provided together.")
+
     X_all = []
     y_all = []
+    artifact_epochs_all = []
+    artifact_info = None
+    loaded_run_ids = []
 
-    target_run_id = []
+    target_run_ids = []
     if imaged:
         if "unilateral_fist" in task_types:
-            target_run_id.extend([4, 8, 12])
+            target_run_ids.extend([4, 8, 12])
         if "both" in task_types:
-            target_run_id.extend([6, 10, 14])
+            target_run_ids.extend([6, 10, 14])
     if executed:
         if "unilateral_fist" in task_types:
-            target_run_id.extend([3, 7, 11])
+            target_run_ids.extend([3, 7, 11])
         if "both" in task_types:
-            target_run_id.extend([5, 9, 13])
+            target_run_ids.extend([5, 9, 13])
+    target_run_ids = sorted(set(target_run_ids))
 
+    for edf_file in sorted(Path(subject_dir).glob("*.edf")):
+        match = re.search(r"R(\d+)", edf_file.name)
+        if match is None:
+            continue
+        run_id = int(match.group(1))
 
-    for edf_file in Path(subject_dir).glob("*.edf"):
-
-        run_id = int(
-            re.search(
-                r"R(\d+)",
-                edf_file.name
-            ).group(1)
-        )
-
-        if run_id not in target_run_id:
+        if run_id not in target_run_ids:
             continue
 
-        X, y = extract_transition_epochs(
-            str(edf_file),
-            tmin,
-            tmax,
-            low_freq=low_freq,
-            high_freq=high_freq,
-            channels=channels,
-            reject_threshold_uv=reject_threshold_uv,
-            use_ica=use_ica,
-            ica_n_components=ica_n_components,
-            ica_random_state=ica_random_state,
-            ica_eog_channels=ica_eog_channels,
-            use_autoreject=use_autoreject,
-            autoreject_random_state=autoreject_random_state,
-            autoreject_n_jobs=autoreject_n_jobs,
-            autoreject_cv=autoreject_cv,
+        raw = mne.io.read_raw_edf(
+            edf_file,
+            preload=True,
+            verbose=False,
         )
-        if X and y:
-            X_all.append(X)
-            y_all.append(y)
+
+        raw.set_eeg_reference("average", projection=False)
+        raw = pick_raw_channels(raw, channels=channels)
+        raw = set_standard_eeg_montage(raw)
+        raw.filter(l_freq=0.5, h_freq=None)
+        raw.filter(l_freq=None, h_freq=40)
+        raw.notch_filter(freqs=60)
+
+        if use_ica:
+            raw = apply_ica_artifact_removal(
+                raw,
+                n_components=ica_n_components,
+                random_state=ica_random_state,
+                eog_channels=ica_eog_channels,
+            )
+
+        sfreq = raw.info["sfreq"]
+        if not np.isclose(sfreq, 160.0, atol=1e-5):
+            print(f"Sampling Rate doesn't match: {sfreq}, skip {edf_file}")
+            continue
+
+        if artifact_info is None:
+            artifact_info = raw.info.copy()
+        elif raw.ch_names != artifact_info["ch_names"]:
+            raise ValueError(
+                "Channel order changed across runs for "
+                f"{subject_dir}: {edf_file}."
+            )
+
+        artifact_data = raw.get_data()
+        if low_freq is not None:
+            raw = filter_raw_band(raw, low_freq=low_freq, high_freq=high_freq)
+        data = raw.get_data()
+
+        run_X = []
+        run_y = []
+        run_artifact_epochs = []
+        for onset, desc in zip(raw.annotations.onset, raw.annotations.description):
+            if desc not in ["T1", "T2"]:
+                continue
+
+            label = map_event_to_label(run_id, desc)
+            if label is None:
+                continue
+
+            center = int(onset * sfreq)
+            start = int(center + tmin * sfreq)
+            end = int(center + tmax * sfreq)
+            if start < 0 or end > data.shape[1]:
+                continue
+
+            run_X.append(data[:, start:end])
+            run_artifact_epochs.append(artifact_data[:, start:end])
+            run_y.append(label)
+
+        if run_X:
+            X_all.extend(run_X)
+            y_all.extend(run_y)
+            artifact_epochs_all.extend(run_artifact_epochs)
+            loaded_run_ids.append(run_id)
 
     if not X_all:
         return None, None
 
-    return np.concatenate(X_all), np.concatenate(y_all)
+    X_all = np.asarray(X_all)
+    y_all = np.asarray(y_all)
+    artifact_epochs_all = np.asarray(artifact_epochs_all)
+
+    if use_autoreject:
+        autoreject_mask = autoreject_keep_mask(
+            artifact_epochs_all,
+            info=artifact_info,
+            tmin=tmin,
+            random_state=autoreject_random_state,
+            n_jobs=autoreject_n_jobs,
+            cv=autoreject_cv,
+        )
+        autoreject_rejected = int((~autoreject_mask).sum())
+        if autoreject_rejected:
+            runs = ",".join(f"R{run_id:02d}" for run_id in loaded_run_ids)
+            print(
+                f"AutoReject rejected {autoreject_rejected} epoch(s) "
+                f"from {Path(subject_dir).name} across runs {runs}."
+            )
+        X_all = X_all[autoreject_mask]
+        y_all = y_all[autoreject_mask]
+        artifact_epochs_all = artifact_epochs_all[autoreject_mask]
+        if len(X_all) == 0:
+            return None, None
+
+    _, y_all, keep_mask = reject_bad_epochs(
+        artifact_epochs_all,
+        y_all,
+        threshold_uv=reject_threshold_uv,
+    )
+    rejected = int((~keep_mask).sum())
+    if rejected:
+        ptp_uv = epoch_peak_to_peak_uv(artifact_epochs_all)
+        print(
+            f"Peak-to-peak rejected {rejected} bad epoch(s) from "
+            f"{Path(subject_dir).name} "
+            f"(threshold={float(reject_threshold_uv):.1f} uV, "
+            f"ptp_uv median={np.median(ptp_uv):.1f}, "
+            f"p90={np.percentile(ptp_uv, 90):.1f}, "
+            f"max={np.max(ptp_uv):.1f})."
+        )
+    X_all = X_all[keep_mask]
+
+    return X_all, y_all
 
 def build_dataset(
     root_dir,
@@ -1186,6 +1125,7 @@ def preprocess_spd(
     baseline_correction = normalize_baseline_correction_mode(baseline_correction)
 
 
+
     for filter in filter_bank:
 
         # 1. Filter continuous Raw first, then extract epochs.
@@ -1267,7 +1207,7 @@ def preprocess_spd(
         print("eig max:", eigvals.max())
         print("cond p99:", np.percentile(eigvals[..., -1] / np.maximum(eigvals[..., 0], eps), 99))
 
-        cov_x = trace_normalize(cov_x, eps=eps)
+        # cov_x = trace_normalize(cov_x, eps=eps)
 
         print(f"norm matrix min: {np.min(np.abs(cov_x))}")
         print(f"norm matrix max: {np.max(cov_x)}")

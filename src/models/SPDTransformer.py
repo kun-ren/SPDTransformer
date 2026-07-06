@@ -10,7 +10,46 @@ from src.models.SPDAttention import (
     spd_log,
 )
 from src.models.SPDFeedForward import SPDFeedForward
+from src.models.LogResidualAdd import LogResidualAdd
 from src.models.TraceAddNorm import TraceAddNorm
+
+
+AddNormType = Literal["trace", "trace_add_norm", "log_residual", "log_residual_add", "none"]
+
+
+def _make_add_norm(
+        add_norm_type: str,
+        spd_dim: int,
+        sequence_length: int,
+        tau: float,
+        eps: float,
+        affine: bool,
+        position_axis: int,
+) -> nn.Module:
+    normalized = str(add_norm_type).strip().lower().replace("-", "_")
+    if normalized in {"trace", "trace_add_norm"}:
+        return TraceAddNorm(
+            spd_dim,
+            sequence_length=sequence_length,
+            tau=tau,
+            eps=eps,
+            affine=affine,
+            position_axis=position_axis,
+        )
+    if normalized in {"log_residual", "log_residual_add", "none"}:
+        return LogResidualAdd(
+            spd_dim,
+            sequence_length=sequence_length,
+            tau=tau,
+            eps=eps,
+            affine=affine,
+            position_axis=position_axis,
+        )
+    raise ValueError(
+        "add_norm_type must be 'trace' or 'log_residual', "
+        f"got {add_norm_type!r}."
+    )
+
 
 class SPDEncoder(nn.Module):
     def __init__(
@@ -34,6 +73,7 @@ class SPDEncoder(nn.Module):
             layer_norm_affine: bool = True,
             dropout: float = 0.0,
             stage_projection_init: Literal["identity", "random"] = "identity",
+            add_norm_type: AddNormType = "trace",
     ):
         super().__init__()
         print(f"input_dim: {spd_in_dim}, attention_dim: {attention_dim}")
@@ -74,7 +114,8 @@ class SPDEncoder(nn.Module):
             debug_tensor_stats=debug_tensor_stats,
         )
 
-        self.time_add_norm1 = TraceAddNorm(
+        self.time_add_norm1 = _make_add_norm(
+            add_norm_type,
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
@@ -88,7 +129,8 @@ class SPDEncoder(nn.Module):
             dropout=dropout,
             eps=eps
         )
-        self.time_add_norm2 = TraceAddNorm(
+        self.time_add_norm2 = _make_add_norm(
+            add_norm_type,
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
@@ -111,7 +153,8 @@ class SPDEncoder(nn.Module):
             max_position=frequency_sequence_length,
             debug_tensor_stats=debug_tensor_stats,
         )
-        self.frequency_add_norm1 = TraceAddNorm(
+        self.frequency_add_norm1 = _make_add_norm(
+            add_norm_type,
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
@@ -126,7 +169,8 @@ class SPDEncoder(nn.Module):
             dropout=dropout,
             eps=eps
         )
-        self.frequency_add_norm2 = TraceAddNorm(
+        self.frequency_add_norm2 = _make_add_norm(
+            add_norm_type,
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
@@ -271,6 +315,7 @@ class SPDTransformer(nn.Module):
             layer_norm_affine: bool = True,
             dropout: float = 0.0,
             stage_projection_init: Literal["identity", "random"] = "identity",
+            add_norm_type: AddNormType = "trace",
     ):
         super().__init__()
         if depth < 1:
@@ -306,6 +351,7 @@ class SPDTransformer(nn.Module):
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
                 stage_projection_init=stage_projection_init,
+                add_norm_type=add_norm_type,
             ) for index, dim in enumerate(self.attention_dim[:-1])])
         elif num_heads > 1:
             self.layers = nn.ModuleList([SPDMultiHeadEncoder(
@@ -329,6 +375,7 @@ class SPDTransformer(nn.Module):
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
                 stage_projection_init=stage_projection_init,
+                add_norm_type=add_norm_type,
             ) for index, dim in enumerate(self.attention_dim[:-1])])
 
     def forward(

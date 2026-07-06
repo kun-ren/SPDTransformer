@@ -38,6 +38,7 @@ class SPDTaskTagClassifier(SPDClassifierBase):
             eps: float = 1e-6,
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
+            add_norm_type: str = "trace",
     ):
         super().__init__()
         self.spd_in_dim = spd_in_dim
@@ -67,6 +68,7 @@ class SPDTaskTagClassifier(SPDClassifierBase):
             use_position_bias=use_position_bias,
             layer_norm_affine=layer_norm_affine,
             dropout=dropout,
+            add_norm_type=add_norm_type,
         )
         self.classifier = self.build_linear_classifier(
             feature_dim=self.feature_dim,

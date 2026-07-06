@@ -45,6 +45,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
             stage_projection_init: Literal["identity", "random"] = "identity",
+            add_norm_type: str = "trace",
     ):
         super().__init__()
         if pooling not in {"mean", "band_mean", "attention"}:
@@ -87,6 +88,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             layer_norm_affine=layer_norm_affine,
             dropout=dropout,
             stage_projection_init=stage_projection_init,
+            add_norm_type=add_norm_type,
         )
 
         if pooling == "attention":

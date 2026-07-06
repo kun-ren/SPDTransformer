@@ -45,6 +45,7 @@ class SPDTransformerClassifier(nn.Module):
             use_position_bias: bool = True,
             layer_norm_affine: bool = True,
             stage_projection_init: Literal["identity", "random"] = "identity",
+            add_norm_type: str = "trace",
     ):
         super().__init__()
         self.debug_tensor_stats = debug_tensor_stats
@@ -84,6 +85,7 @@ class SPDTransformerClassifier(nn.Module):
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
                 stage_projection_init=stage_projection_init,
+                add_norm_type=add_norm_type,
             )
         else:
             print("initializing SPDTaskTagClassifier")
@@ -107,6 +109,7 @@ class SPDTransformerClassifier(nn.Module):
                 eps=eps,
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
+                add_norm_type=add_norm_type,
             )
             print("SPDTaskTagClassifier built")
 

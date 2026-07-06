@@ -220,6 +220,9 @@ def load_spd_like_train(
         autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
         autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
         return_subjects=True,
+        covariance_signal_scale=float(
+            data_cfg.get("covariance_signal_scale", 1e6)
+        ),
     )
     if not np.isfinite(x_spd).all():
         raise ValueError("preprocess_spd returned NaN or Inf values.")

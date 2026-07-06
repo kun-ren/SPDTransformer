@@ -6,11 +6,49 @@ from torch import nn
 from src.models.GeooptBiMap import GeooptBiMap
 from src.models.SPDAttention import SingleHeadAttention, spd_log
 from src.models.SPDFeedForward import SPDFeedForward
+from src.models.LogResidualAdd import LogResidualAdd
 from src.models.TraceAddNorm import TraceAddNorm
 
 
 def _symmetrize(x: torch.Tensor) -> torch.Tensor:
     return 0.5 * (x + x.transpose(-1, -2))
+
+
+AddNormType = Literal["trace", "trace_add_norm", "log_residual", "log_residual_add", "none"]
+
+
+def _make_add_norm(
+        add_norm_type: str,
+        spd_dim: int,
+        sequence_length: int,
+        tau: float,
+        eps: float,
+        affine: bool,
+        position_axis: int,
+) -> nn.Module:
+    normalized = str(add_norm_type).strip().lower().replace("-", "_")
+    if normalized in {"trace", "trace_add_norm"}:
+        return TraceAddNorm(
+            spd_dim,
+            sequence_length=sequence_length,
+            tau=tau,
+            eps=eps,
+            affine=affine,
+            position_axis=position_axis,
+        )
+    if normalized in {"log_residual", "log_residual_add", "none"}:
+        return LogResidualAdd(
+            spd_dim,
+            sequence_length=sequence_length,
+            tau=tau,
+            eps=eps,
+            affine=affine,
+            position_axis=position_axis,
+        )
+    raise ValueError(
+        "add_norm_type must be 'trace' or 'log_residual', "
+        f"got {add_norm_type!r}."
+    )
 
 
 class SPDMultiHeadEncoder(nn.Module):
@@ -36,6 +74,7 @@ class SPDMultiHeadEncoder(nn.Module):
             layer_norm_affine: bool = True,
             dropout: float = 0.0,
             stage_projection_init: Literal["identity", "random"] = "identity",
+            add_norm_type: AddNormType = "trace",
     ):
         super().__init__()
         if num_heads < 1:
@@ -52,28 +91,15 @@ class SPDMultiHeadEncoder(nn.Module):
         self.eps = eps
 
         self.stage_projection = None
-        self.head_stage_projections = None
         if self.stage_transition and attention_dim != spd_in_dim:
-            if stage_projection_init == "identity":
-                self.head_stage_projections = nn.ModuleList([
-                    GeooptBiMap(
-                        spd_in_dim,
-                        attention_dim,
-                        eps=eps,
-                        init="identity",
-                        identity_indices=torch.randperm(spd_in_dim)[:attention_dim],
-                    )
-                    for _ in range(num_heads)
-                ])
-            else:
-                self.stage_projection = GeooptBiMap(
-                    spd_in_dim,
-                    attention_dim,
-                    eps=eps,
-                    init=stage_projection_init,
-                )
+            self.stage_projection = GeooptBiMap(
+                spd_in_dim,
+                attention_dim,
+                eps=eps,
+                init=stage_projection_init,
+            )
 
-        if self.stage_projection is not None or self.head_stage_projections is not None:
+        if self.stage_projection is not None:
             spd_out_dim = attention_dim
         else:
             spd_out_dim = spd_in_dim
@@ -97,7 +123,8 @@ class SPDMultiHeadEncoder(nn.Module):
         ])
         self.time_head_logits = nn.Parameter(torch.zeros(num_heads))
 
-        self.time_add_norm1 = TraceAddNorm(
+        self.time_add_norm1 = _make_add_norm(
+            add_norm_type,
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
@@ -111,7 +138,8 @@ class SPDMultiHeadEncoder(nn.Module):
             dropout=dropout,
             eps=eps
         )
-        self.time_add_norm2 = TraceAddNorm(
+        self.time_add_norm2 = _make_add_norm(
+            add_norm_type,
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
@@ -139,7 +167,8 @@ class SPDMultiHeadEncoder(nn.Module):
         ])
         self.frequency_head_logits = nn.Parameter(torch.zeros(num_heads))
 
-        self.frequency_add_norm1 = TraceAddNorm(
+        self.frequency_add_norm1 = _make_add_norm(
+            add_norm_type,
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
@@ -153,7 +182,8 @@ class SPDMultiHeadEncoder(nn.Module):
             dropout=dropout,
             eps=eps
         )
-        self.frequency_add_norm2 = TraceAddNorm(
+        self.frequency_add_norm2 = _make_add_norm(
+            add_norm_type,
             spd_out_dim,
             sequence_length=frequency_sequence_length,
             tau=tau,
@@ -260,26 +290,10 @@ class SPDMultiHeadEncoder(nn.Module):
                 f"got {tuple(x.shape)}."
             )
         all_aux = {}
-        if self.head_stage_projections is not None:
-            projected_inputs = [
-                stage_projection(x)
-                for stage_projection in self.head_stage_projections
-            ]
-            if return_aux:
-                for head_index, projected_input in enumerate(projected_inputs):
-                    all_aux[f"P_x_head_{head_index}"] = projected_input
-
-            residual_log = self._combine_head_logs(
-                [spd_log(projected_input) for projected_input in projected_inputs],
-                self.time_head_logits,
-            )
-            attention_input = projected_inputs
-        elif self.stage_projection is not None:
+        if self.stage_projection is not None:
             x = self.stage_projection(x)
             if return_aux:
                 all_aux["P_x"] = x
-            residual_log = spd_log(x)
-            attention_input = x
         else:
             eye = torch.eye(
                 x.shape[-1],
@@ -287,8 +301,9 @@ class SPDMultiHeadEncoder(nn.Module):
                 dtype=x.dtype,
             )
             x = _symmetrize(x) + self.eps * eye
-            residual_log = spd_log(x)
-            attention_input = x
+
+        attention_input = x
+        residual_log = spd_log(x)
 
         time_output_log, aux = self._apply_attention_along_axis(
             self.time_attention,
