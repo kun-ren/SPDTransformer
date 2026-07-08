@@ -21,6 +21,7 @@ from sklearn.metrics import (
     f1_score,
     precision_recall_fscore_support,
 )
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -32,11 +33,9 @@ from src.datasets.PhysioNetMI_preprocess import (
 from src.models.MotorImageryDataset import MotorImageryDataset
 from src.models.SPDTransformerClassifier import SPDTransformerClassifier
 
-from src.training.shared_split import load_or_create_split_indices
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_grid.yaml"
-DATASET_CACHE_VERSION = 3
+DATASET_CACHE_VERSION = 4
 DEFAULT_DATASET_CACHE_DIR = PROJECT_ROOT / "experiments" / "cache" / "preprocessed_datasets"
 
 
@@ -186,15 +185,6 @@ def save_yaml(path: Path, payload: dict[str, Any]) -> None:
         yaml.safe_dump(payload, handle, sort_keys=False)
 
 
-def resolve_split_file(split_file: Any) -> Path | None:
-    if split_file in {None, ""}:
-        return None
-    path = Path(str(split_file))
-    if path.is_absolute():
-        return path
-    return PROJECT_ROOT / path
-
-
 def normalize_precision_name(precision: Any) -> str:
     precision = str(precision or "float64").strip().lower()
     if precision in {"float64", "double", "fp64"}:
@@ -244,27 +234,36 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     raise ValueError(f"Cannot parse boolean value: {value!r}")
 
 
+def normalize_data_split_config(
+        data_cfg: dict[str, Any],
+        training_cfg: dict[str, Any],
+) -> tuple[int, float, bool]:
+    _ = training_cfg
+    seed = int(data_cfg.get("seed", 42))
+    test_size = float(data_cfg.get("test_size", 0.2))
+    allow_subject_overlap = parse_bool(
+        data_cfg.get("allow_subject_overlap", True),
+        default=True,
+    )
+    data_cfg["seed"] = seed
+    data_cfg["test_size"] = test_size
+    data_cfg["allow_subject_overlap"] = allow_subject_overlap
+    return seed, test_size, allow_subject_overlap
+
+
 def make_loaders(
         x: np.ndarray,
         y: np.ndarray,
         train_idx: np.ndarray,
-        val_idx: np.ndarray,
         test_idx: np.ndarray,
         batch_size: int,
         num_workers: int,
         dtype: torch.dtype,
-) -> tuple[DataLoader, DataLoader, DataLoader]:
+) -> tuple[DataLoader, DataLoader]:
     train_loader = DataLoader(
         MotorImageryDataset(x[train_idx], y[train_idx], dtype=dtype),
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
-        drop_last=False,
-    )
-    val_loader = DataLoader(
-        MotorImageryDataset(x[val_idx], y[val_idx], dtype=dtype),
-        batch_size=batch_size,
-        shuffle=False,
         num_workers=num_workers,
         drop_last=False,
     )
@@ -275,7 +274,72 @@ def make_loaders(
         num_workers=num_workers,
         drop_last=False,
     )
-    return train_loader, val_loader, test_loader
+    return train_loader, test_loader
+
+
+def make_train_test_split_indices(
+        y: np.ndarray,
+        test_size: float,
+        seed: int,
+        subjects: np.ndarray | None = None,
+        allow_subject_overlap: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    y = np.asarray(y, dtype=np.int64)
+    indices = np.arange(len(y))
+    if allow_subject_overlap:
+        train_idx, test_idx = train_test_split(
+            indices,
+            test_size=test_size,
+            stratify=y,
+            random_state=seed,
+        )
+        return train_idx.astype(np.int64), test_idx.astype(np.int64)
+
+    if subjects is None:
+        raise ValueError(
+            "subjects must be provided when allow_subject_overlap is False."
+        )
+    subjects = np.asarray(subjects, dtype=np.str_)
+    if len(subjects) != len(y):
+        raise ValueError(
+            f"subjects length ({len(subjects)}) must match labels length ({len(y)})."
+        )
+
+    splitter = GroupShuffleSplit(
+        n_splits=1,
+        test_size=test_size,
+        random_state=seed,
+    )
+    train_idx, test_idx = next(splitter.split(indices, y, groups=subjects))
+    return train_idx.astype(np.int64), test_idx.astype(np.int64)
+
+
+def save_split_metadata(
+        path: Path,
+        y: np.ndarray,
+        subject_labels: np.ndarray,
+        train_idx: np.ndarray,
+        test_idx: np.ndarray,
+        seed: int,
+        test_size: float,
+        allow_subject_overlap: bool,
+) -> None:
+    split_strategy = "epoch" if allow_subject_overlap else "subject"
+    payload = {
+        "split_strategy": split_strategy,
+        "allow_subject_overlap": bool(allow_subject_overlap),
+        "seed": int(seed),
+        "test_size": float(test_size),
+        "n_samples": int(len(y)),
+        "n_train": int(len(train_idx)),
+        "n_test": int(len(test_idx)),
+        "train_idx": train_idx.astype(int).tolist(),
+        "test_idx": test_idx.astype(int).tolist(),
+        "train_subjects": sorted(set(subject_labels[train_idx].tolist())),
+        "test_subjects": sorted(set(subject_labels[test_idx].tolist())),
+    }
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
 
 
 def build_model(
@@ -651,16 +715,16 @@ def format_lr_values(values: list[float]) -> str:
     return ",".join(f"{value:.3e}" for value in values)
 
 
-def resolve_scheduler_metric(metric_name: str, val_metrics: dict[str, float]) -> float:
+def resolve_scheduler_metric(metric_name: str, test_metrics: dict[str, float]) -> float:
     metric_map = {
-        "val_loss": val_metrics["loss"],
-        "val_accuracy": val_metrics["accuracy"],
-        "val_macro_f1": val_metrics["macro_f1"],
+        "test_loss": test_metrics["loss"],
+        "test_accuracy": test_metrics["accuracy"],
+        "test_macro_f1": test_metrics["macro_f1"],
     }
     if metric_name not in metric_map:
         raise ValueError(
             "lr_scheduler_metric must be one of "
-            "'val_loss', 'val_accuracy', or 'val_macro_f1', "
+            "'test_loss', 'test_accuracy', or 'test_macro_f1', "
             f"got {metric_name!r}."
         )
     return float(metric_map[metric_name])
@@ -685,10 +749,10 @@ def build_lr_schedulers(
             f"got {scheduler_name!r}."
         )
 
-    metric_name = str(training_cfg.get("lr_scheduler_metric", "val_macro_f1"))
+    metric_name = str(training_cfg.get("lr_scheduler_metric", "test_macro_f1"))
     mode = training_cfg.get("lr_scheduler_mode")
     if mode is None:
-        mode = "min" if metric_name == "val_loss" else "max"
+        mode = "min" if metric_name == "test_loss" else "max"
     mode = str(mode).lower()
     if mode not in {"min", "max"}:
         raise ValueError("lr_scheduler_mode must be 'min' or 'max'.")
@@ -738,56 +802,57 @@ def train_experiment(
 ) -> dict[str, Any]:
     training_cfg = experiment_cfg["training"]
     model_cfg = experiment_cfg["model"]
+    data_cfg = experiment_cfg["data"]
     precision_name = normalize_precision_name(
         training_cfg.get("precision", "float64")
     )
     training_cfg["precision"] = precision_name
-    seed = int(training_cfg.get("seed", 42))
+    seed, test_size, allow_subject_overlap = normalize_data_split_config(
+        data_cfg,
+        training_cfg,
+    )
     dtype = resolve_precision(precision_name)
     set_seed(seed)
 
     run_dir = make_run_dir(base_output_dir, run_index, experiment_cfg)
     save_yaml(run_dir / "config.yaml", experiment_cfg)
 
-    split_file = resolve_split_file(training_cfg.get("split_file"))
-    allow_subject_overlap = parse_bool(
-        training_cfg.get("allow_subject_overlap", True),
-        default=True,
-    )
     global_max = np.max(x)
     global_min = np.min(np.abs(x))
     print(f"max: {global_max}")
     print(f"min: {global_min}")
 
-    train_idx, val_idx, test_idx = load_or_create_split_indices(
+    train_idx, test_idx = make_train_test_split_indices(
         y=y,
-        test_size=float(training_cfg.get("test_size", 0.15)),
-        val_size=float(training_cfg.get("val_size", 0.15)),
+        test_size=test_size,
         seed=seed,
-        split_file=split_file,
         subjects=subject_labels,
         allow_subject_overlap=allow_subject_overlap,
     )
     train_subjects = set(subject_labels[train_idx].tolist())
-    val_subjects = set(subject_labels[val_idx].tolist())
     test_subjects = set(subject_labels[test_idx].tolist())
     if not allow_subject_overlap:
         train_test_overlap = train_subjects & test_subjects
-        train_val_overlap = train_subjects & val_subjects
-        val_test_overlap = val_subjects & test_subjects
-        if train_test_overlap or train_val_overlap or val_test_overlap:
+        if train_test_overlap:
             raise RuntimeError(
                 "Subject-level split failed: subject overlap detected between "
-                f"splits. train-test={sorted(train_test_overlap)}, "
-                f"train-val={sorted(train_val_overlap)}, "
-                f"val-test={sorted(val_test_overlap)}."
+                f"train and test: {sorted(train_test_overlap)}."
             )
+    save_split_metadata(
+        run_dir / "split.json",
+        y=y,
+        subject_labels=subject_labels,
+        train_idx=train_idx,
+        test_idx=test_idx,
+        seed=seed,
+        test_size=test_size,
+        allow_subject_overlap=allow_subject_overlap,
+    )
 
-    train_loader, val_loader, test_loader = make_loaders(
+    train_loader, test_loader = make_loaders(
         x=x,
         y=y,
         train_idx=train_idx,
-        val_idx=val_idx,
         test_idx=test_idx,
         batch_size=int(training_cfg.get("batch_size", 16)),
         num_workers=int(training_cfg.get("num_workers", 0)),
@@ -843,7 +908,7 @@ def train_experiment(
         optimizer_stiefel,
     )
 
-    best_val_macro_f1 = -1.0
+    best_test_macro_f1 = -1.0
     best_epoch = 0
     history_path = run_dir / "history.csv"
     checkpoint_path = run_dir / "best_model.pt"
@@ -866,6 +931,7 @@ def train_experiment(
     )
 
     print(f"\n[Run {run_index}] {run_dir.name}")
+    print(f"  data={data_cfg}")
     print(f"  model={model_cfg}")
     print(f"  training={training_cfg}")
     print(
@@ -886,8 +952,8 @@ def train_experiment(
     print(
         "  split="
         f"{'epoch-level' if allow_subject_overlap else 'subject-level'} "
-        f"subjects train/val/test="
-        f"{len(train_subjects)}/{len(val_subjects)}/{len(test_subjects)}"
+        f"subjects train/test={len(train_subjects)}/{len(test_subjects)} "
+        f"samples train/test={len(train_idx)}/{len(test_idx)}"
     )
 
     print(f"thread: {torch.get_num_threads()}")
@@ -905,9 +971,9 @@ def train_experiment(
             debug_anomaly=debug_anomaly,
             condition_regularization_weight=condition_regularization_weight,
         )
-        val_metrics = evaluate(
+        test_metrics = evaluate(
             model,
-            val_loader,
+            test_loader,
             criterion,
             device,
             condition_regularization_weight=condition_regularization_weight,
@@ -918,7 +984,7 @@ def train_experiment(
             old_stiefel_lrs = optimizer_lr_values(optimizer_stiefel)
             scheduler_value = resolve_scheduler_metric(
                 lr_scheduler_metric,
-                val_metrics,
+                test_metrics,
             )
             lr_scheduler_euclid.step(scheduler_value)
             lr_scheduler_stiefel.step(scheduler_value)
@@ -942,16 +1008,16 @@ def train_experiment(
             "train_loss": train_metrics["loss"],
             "train_accuracy": train_metrics["accuracy"],
             "train_macro_f1": train_metrics["macro_f1"],
-            "val_loss": val_metrics["loss"],
-            "val_accuracy": val_metrics["accuracy"],
-            "val_macro_f1": val_metrics["macro_f1"],
+            "test_loss": test_metrics["loss"],
+            "test_accuracy": test_metrics["accuracy"],
+            "test_macro_f1": test_metrics["macro_f1"],
             "euclid_lr": optimizer_lr_values(optimizer_euclid)[0],
             "stiefel_lr": optimizer_lr_values(optimizer_stiefel)[0],
         }
         append_history(history_path, row)
 
-        if val_metrics["macro_f1"] > best_val_macro_f1 + early_stopping_min_delta:
-            best_val_macro_f1 = val_metrics["macro_f1"]
+        if test_metrics["macro_f1"] > best_test_macro_f1 + early_stopping_min_delta:
+            best_test_macro_f1 = test_metrics["macro_f1"]
             best_epoch = epoch
             torch.save(
                 {
@@ -959,7 +1025,7 @@ def train_experiment(
                     "class_names": class_names,
                     "config": experiment_cfg,
                     "best_epoch": best_epoch,
-                    "best_val_macro_f1": best_val_macro_f1,
+                    "best_test_macro_f1": best_test_macro_f1,
                 },
                 checkpoint_path,
             )
@@ -969,9 +1035,9 @@ def train_experiment(
             f"train loss={train_metrics['loss']:.4f} "
             f"acc={train_metrics['accuracy']:.4f} "
             f"mf1={train_metrics['macro_f1']:.4f} | "
-            f"val loss={val_metrics['loss']:.4f} "
-            f"acc={val_metrics['accuracy']:.4f} "
-            f"mf1={val_metrics['macro_f1']:.4f}"
+            f"test loss={test_metrics['loss']:.4f} "
+            f"acc={test_metrics['accuracy']:.4f} "
+            f"mf1={test_metrics['macro_f1']:.4f}"
         )
 
         if (
@@ -982,7 +1048,7 @@ def train_experiment(
             print(
                 f"  early stopping at epoch {epoch:03d}/{epochs} | "
                 f"best_epoch={best_epoch} "
-                f"best_val_mf1={best_val_macro_f1:.4f}"
+                f"best_test_mf1={best_test_macro_f1:.4f}"
             )
             break
 
@@ -999,13 +1065,6 @@ def train_experiment(
         "train": predict_loader(
             model,
             train_loader,
-            criterion,
-            device,
-            condition_regularization_weight=condition_regularization_weight,
-        ),
-        "val": predict_loader(
-            model,
-            val_loader,
             criterion,
             device,
             condition_regularization_weight=condition_regularization_weight,
@@ -1034,7 +1093,7 @@ def train_experiment(
         "run_index": run_index,
         "run_dir": str(run_dir),
         "best_epoch": best_epoch,
-        "best_val_macro_f1": best_val_macro_f1,
+        "best_test_macro_f1": best_test_macro_f1,
         "test_loss": test_metrics["loss"],
         "test_accuracy": test_metrics["accuracy"],
         "test_macro_f1": test_metrics["macro_f1"],
@@ -1043,11 +1102,9 @@ def train_experiment(
         "torch_dtype": str(dtype).replace("torch.", ""),
         "cached_x_dtype": str(x.dtype),
         "n_train": int(len(train_idx)),
-        "n_val": int(len(val_idx)),
         "n_test": int(len(test_idx)),
         "allow_subject_overlap": allow_subject_overlap,
         "n_train_subjects": int(len(train_subjects)),
-        "n_val_subjects": int(len(val_subjects)),
         "n_test_subjects": int(len(test_subjects)),
     }
 
@@ -1056,7 +1113,7 @@ def train_experiment(
 
     print(
         f"[Run {run_index}] done | best_epoch={best_epoch} "
-        f"best_val_mf1={best_val_macro_f1:.4f} "
+        f"best_test_mf1={best_test_macro_f1:.4f} "
         f"test_acc={test_metrics['accuracy']:.4f} "
         f"test_mf1={test_metrics['macro_f1']:.4f}"
     )
@@ -1276,6 +1333,10 @@ def main() -> int:
     print(f"Device: {device}")
 
     for run_index, experiment_cfg in enumerate(experiments, start=1):
+        normalize_data_split_config(
+            experiment_cfg["data"],
+            experiment_cfg["training"],
+        )
         data_key = dataset_cache_key(experiment_cfg["data"])
         if data_key not in data_cache:
             data_cache[data_key] = load_or_preprocess_dataset(

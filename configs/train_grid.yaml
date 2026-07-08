@@ -25,15 +25,18 @@ data:
   baseline_window: "-3,0"
   epoch_tmin: [0.0]
   epoch_tmax: [4.0]
-  segment_duration: [0.1]
+  segment_duration: [1.0]
   stride_duration: [0.5]
   imaged: True
   executed: False
   task_types: unilateral_fist
+  seed: [42]
+  test_size: [0.2]
+  allow_subject_overlap: [true]
 
 model:
   #   16, 64 is also high
-  head_nums: [1] # 4 is better than 1
+  head_nums: [1, 2] # 4 is better than 1
   attention_dim: ["64, 32", "64, 64"]
   stage_transition: [True]
   stage_projection_init: ["random"] # "random" is much better than indentity
@@ -56,14 +59,13 @@ model:
   eps: [1.0e-6]
 
 training:
-  seed: [42]
   precision: ["float32"]
   epochs: [50]
   batch_size: [64]
   learning_rate: [0.002] #  0.002 is better than 0.0015
   stiefel_learning_rate: [0.0005]
   lr_scheduler: ["plateau"]
-  lr_scheduler_metric: ["val_macro_f1"]
+  lr_scheduler_metric: ["test_macro_f1"]
   lr_scheduler_factor: [0.5]
   lr_scheduler_patience: [5]
   lr_scheduler_threshold: [0.0005]
@@ -76,13 +78,6 @@ training:
   early_stopping_patience: [ 12 ]
   early_stopping_min_delta: [ 0.0005 ]
   condition_regularization_weight: [0.0]
-  test_size: [0.15]
-  val_size: [0.15]
-  # true = ordinary mixed-subject epoch split.
-  # false = subject-level split for cross-subject generalization; use a separate split_file.
-  allow_subject_overlap: [true]
-  #split_file: ["experiments/splits/physionet_mi_seed42_epoch_split.json"]
-  split_file: experiments/splits/physionet_mi_seed42.json
   num_workers: [0]
 
 output:
