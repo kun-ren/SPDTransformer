@@ -13,8 +13,8 @@ class MetricType(Enum):
     LogEuclidean = 'log-euclidean'
     LearnableMetric = 'learnable-metric'
     LearnableAffineLogFunction = 'learnable-affine-log-function'
-    #MonotoneNeuralSpline = 'monotone-neural-spline'
-    #MLPLogFunction = 'mlp-log-function'
+    # MonotoneNeuralSpline = 'monotone-neural-spline'
+    # MLPLogFunction = 'mlp-log-function'
 
 
 def _symmetrize(x: torch.Tensor) -> torch.Tensor:
@@ -27,9 +27,9 @@ def _eye_like(x: torch.Tensor) -> torch.Tensor:
 
 
 def _safe_eigh(
-    x: torch.Tensor,
-    eps: float = 1e-9,
-    max_tries: int = 6,
+        x: torch.Tensor,
+        eps: float = 1e-9,
+        max_tries: int = 6,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     x = _symmetrize(x)
     if not torch.isfinite(x).all():
@@ -96,9 +96,9 @@ class _SPDLogEig(torch.autograd.Function):
         safe_eigenvalues = eigenvalues.clamp_min(eps)
         log_eigenvalues = safe_eigenvalues.log()
         y = (
-            eigenvectors
-            * log_eigenvalues.unsqueeze(-2)
-        ) @ eigenvectors.transpose(-1, -2)
+                    eigenvectors
+                    * log_eigenvalues.unsqueeze(-2)
+            ) @ eigenvectors.transpose(-1, -2)
 
         ctx.save_for_backward(safe_eigenvalues, log_eigenvalues, eigenvectors)
         ctx.eps = eps
@@ -111,9 +111,9 @@ class _SPDLogEig(torch.autograd.Function):
 
         grad_output = _symmetrize(grad_output)
         grad_eigenbasis = (
-            eigenvectors.transpose(-1, -2)
-            @ grad_output
-            @ eigenvectors
+                eigenvectors.transpose(-1, -2)
+                @ grad_output
+                @ eigenvectors
         )
 
         lambda_i = safe_eigenvalues.unsqueeze(-1)
@@ -137,42 +137,15 @@ class _SPDLogEig(torch.autograd.Function):
         loewner = torch.where(close, limit, divided_difference)
 
         grad_x = (
-            eigenvectors
-            @ (loewner * grad_eigenbasis)
-            @ eigenvectors.transpose(-1, -2)
+                eigenvectors
+                @ (loewner * grad_eigenbasis)
+                @ eigenvectors.transpose(-1, -2)
         )
         return _symmetrize(grad_x), None
 
 
 def spd_log(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     return _SPDLogEig.apply(x, eps)
-
-
-def stable_attention_softmax(
-    score: torch.Tensor,
-    dim: int = -1,
-    large_value: float = 1e6,
-) -> torch.Tensor:
-    score = torch.nan_to_num(
-        score,
-        nan=-large_value,
-        posinf=large_value,
-        neginf=-large_value,
-    )
-    score = score - score.amax(dim=dim, keepdim=True)
-    attention = torch.softmax(score, dim=dim)
-    attention = torch.nan_to_num(attention, nan=0.0, posinf=0.0, neginf=0.0)
-
-    row_sum = attention.sum(dim=dim, keepdim=True)
-    sequence_length = attention.shape[dim]
-    uniform = torch.full_like(attention, 1.0 / sequence_length)
-    attention = torch.where(
-        row_sum > torch.finfo(attention.dtype).eps,
-        attention / row_sum.clamp_min(torch.finfo(attention.dtype).eps),
-        uniform,
-    )
-    return attention
-
 
 
 
@@ -212,24 +185,23 @@ class PositionBias(nn.Module):
         relative_index = relative_offset + self.max_position - 1
         return self.relative_bias[relative_index]
 
+
 class SingleHeadAttention(nn.Module):
 
     def __init__(
-        self,
-        spd_in_dim,
-        attention_dim,
-        metric='log-euclidean',
-        stage_transition=True,
-        attention_dropout: float = 0.0,
-        debug_attention_dropout: bool = False,
-        tangent_hidden_dim: int | None = None, # only valid when metric type is learnable-tangent-metric
-        tangent_out_dim: int | None = None,
-        learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
-        learnable_metric_rank: int | None = None,
-        eps: float = 1e-6,
-        use_position: bool = False,
-        max_position: int = 128,
-        debug_tensor_stats: bool = False,
+            self,
+            spd_in_dim,
+            attention_dim,
+            metric='log-euclidean',
+            stage_transition=True,
+            attention_dropout: float = 0.0,
+            debug_attention_dropout: bool = False,
+            learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
+            learnable_metric_rank: int | None = None,
+            eps: float = 1e-6,
+            use_position: bool = False,
+            max_position: int = 128,
+            debug_tensor_stats: bool = False,
     ):
         super().__init__()
         self.spd_in_dim = spd_in_dim
@@ -273,24 +245,15 @@ class SingleHeadAttention(nn.Module):
             )
             self.value = GeooptBiMap(in_dim=spd_in_dim, out_dim=self.spd_in_dim, eps=self.eps)
 
-        if self.metric == MetricType.LearnableAffineLogFunction:
-            # softplus(inverse_softplus(1)) = 1, so the initial transform is
-            # g(lambda) = log(lambda + eps).
-            inverse_softplus_one = math.log(math.expm1(1.0))
-            self.affine_log_scale_raw = nn.Parameter(
-                torch.tensor(inverse_softplus_one)
-            )
-        else:
-            self.register_parameter("affine_log_scale_raw", None)
 
         tangent_feature_dim = attention_dim * (attention_dim + 1) // 2
 
         self.tangent_feature_dim = tangent_feature_dim
         if self.metric == MetricType.LearnableMetric:
             if learnable_metric_mode == "low-rank":
-                learnable_metric_rank = learnable_metric_rank or min(64, tangent_feature_dim)
+                self.learnable_metric_rank = learnable_metric_rank or min(21, tangent_feature_dim)
                 self.metric_low_rank = nn.Parameter(
-                    torch.empty(tangent_feature_dim, learnable_metric_rank)
+                    torch.randn(tangent_feature_dim, self.learnable_metric_rank) * 0.02,
                 )
                 nn.init.orthogonal_(self.metric_low_rank)
                 self.left_metric_cholesky = None
@@ -311,9 +274,9 @@ class SingleHeadAttention(nn.Module):
         )
 
     def forward(
-        self,
-        x: torch.Tensor,
-        return_aux: bool = True,
+            self,
+            x: torch.Tensor,
+            return_aux: bool = True,
     ) -> tuple[Tensor, dict[str, torch.Tensor]]:
 
         aux = {}
@@ -323,118 +286,76 @@ class SingleHeadAttention(nn.Module):
 
         v = self.value(x)
 
-
         log_v = spd_log(v)
+        log_q = spd_log(q)
+        log_k = spd_log(k)
 
         if return_aux:
             aux['P_q'] = q
             aux['P_k'] = k
             aux['P_v'] = v
 
+        score = self.learnableRiemannianScore(log_q, log_k)
 
-        dis = self.learnableRiemannianDistance(q, k)
+        attention = torch.softmax(score, dim=-1)
 
-        score = - dis
-        if self.position_bias is not None:
-            score = score + self.position_bias(dis.shape[-1])
-
-        attention = stable_attention_softmax(score, dim=-1)
-
-        attention_before_dropout = attention
         attention = self.attention_dropout(attention)
-
-        self._print_attention_dropout_debug(attention_before_dropout, attention)
 
         weighted_log_v = torch.einsum('...ij,...jmn->...imn', attention, log_v)
 
-
         return weighted_log_v, aux
 
-    def _print_attention_dropout_debug(
-        self,
-        before_dropout: torch.Tensor,
-        after_dropout: torch.Tensor,
-    ) -> None:
-        if not self.debug_attention_dropout:
-            return
-
-        with torch.no_grad():
-            dropped = (before_dropout != 0) & (after_dropout == 0)
-            dropped_ratio = dropped.to(torch.float32).mean().item()
-            before_row_sum = before_dropout.sum(dim=-1)
-            after_row_sum = after_dropout.sum(dim=-1)
-
-            print(
-                "[AttentionDropout] "
-                f"training={self.training} "
-                f"p={self.attention_dropout.p:.4f} "
-                f"shape={tuple(before_dropout.shape)} "
-                f"dropped_ratio={dropped_ratio:.4f} "
-                f"row_sum_before_mean={before_row_sum.mean().item():.4f} "
-                f"row_sum_after_mean={after_row_sum.mean().item():.4f} "
-                f"attn_before_min={before_dropout.min().item():.4e} "
-                f"attn_before_max={before_dropout.max().item():.4e} "
-                f"attn_after_min={after_dropout.min().item():.4e} "
-                f"attn_after_max={after_dropout.max().item():.4e}"
-            )
-
-
-
-    def learnableRiemannianDistance(self, q, k) -> torch.Tensor:
+    def learnableRiemannianScore(self, log_q, log_k) -> torch.Tensor:
 
         if self.metric == MetricType.LogEuclidean:
-            log_q = spd_log(q)
-            log_k = spd_log(k)
-
-            if log_q.ndim == 2 and log_k.ndim == 2:  # condition: only a metrix
-                diff = log_q - log_k
-            else:  # pairwise qk score
-                diff = log_q.unsqueeze(-3) - log_k.unsqueeze(-4)
-                # diff [B, N_q, N_k, D, D]
+            # pairwise qk score
+            diff = log_q.unsqueeze(-3) - log_k.unsqueeze(-4)
+            # diff [B, N_q, N_k, D, D]
             distance = torch.linalg.matrix_norm(diff, ord='fro', dim=(-2, -1))
             return distance
             # [B, N_q, N_k]
 
-        # if self.metric == MetricType.MLPLogFunction:
-        #     phi_q = self._learnable_mlp_log_function(q)
-        #     phi_k = self._learnable_mlp_log_function(k)
-        #
-        #     if phi_q.ndim == 1 and phi_k.ndim == 1:
-        #         diff = phi_q - phi_k
-        #     else:
-        #         diff = phi_q.unsqueeze(-2) - phi_k.unsqueeze(-3)
-        #
-        #     return torch.linalg.vector_norm(diff, ord=2, dim=-1)
         if self.metric == MetricType.LearnableMetric:
-            log_q = spd_log(q)
-            log_k = spd_log(k)
 
             if self.learnable_metric_mode == "low-rank":
-                q_vec = self._upper_triangular_vectorize(log_q)
+                q_vec = self._upper_triangular_vectorize(log_q)  # [b, s, f, tangent_dim]
                 k_vec = self._upper_triangular_vectorize(log_k)
-                q_projected = q_vec @ self.metric_low_rank
-                k_projected = k_vec @ self.metric_low_rank
 
-                if q_vec.ndim == 1 and k_vec.ndim == 1:
-                    projected_squared_distance = (
-                        q_projected - k_projected
-                    ).square().sum(dim=-1)
-                    ambient_squared_distance = (q_vec - k_vec).square().sum(dim=-1)
-                else:
-                    projected_squared_distance = self._pairwise_squared_euclidean(
-                        q_projected,
-                        k_projected,
-                    )
-                    ambient_squared_distance = self._pairwise_squared_euclidean(
-                        q_vec,
-                        k_vec,
-                    )
+                # dot product
 
-                squared_distance = (
-                    projected_squared_distance
-                    + self.eps * ambient_squared_distance
-                )
-                return torch.sqrt(squared_distance.clamp_min(0.0) + self.eps)
+                q_low = torch.einsum("...d,dr->...r", q_vec, self.L)
+                k_low = torch.einsum("...d,dr->...r", k_vec, self.L)
+
+                score_low = torch.einsum("...ir,...jr->...ij", q_low, k_low)
+
+                score_eye = torch.einsum("...id,...jd->...ij", q_vec, k_vec)
+
+                score = score_low + self.eps * score_eye  # [b, s, f, f]
+                score = score / math.sqrt(self.learnable_metric_rank)
+
+                if self.position_bias is not None:
+                    score = score + self.position_bias(score.shape[-1])
+
+                return score
+
+
+                # distance
+                # q_low = torch.einsum("...d,dr->...r", q_vec, self.L)
+                # k_low = torch.einsum("...d,dr->...r", k_vec, self.L)
+                #
+                # diff_low = q_low.unsqueeze(-2) - k_low.unsqueeze(-3)
+                # dist2_low = (diff_low ** 2).sum(dim=-1)
+                #
+                #
+                # diff = q_vec.unsqueeze(-2) - k_vec.unsqueeze(-3)
+                # dist2_eye = (diff ** 2).sum(dim=-1)
+                # dist2 = dist2_low + self.eps * dist2_eye
+                # score = - dist2
+                # score = score / math.sqrt(self.learnable_metric_rank)
+                # score = - dis
+                # if self.position_bias is not None:
+                    # score = score + self.position_bias(score.shape[-1])
+                # return score
 
             elif self.learnable_metric_mode == "kronecker":
 
@@ -458,17 +379,6 @@ class SingleHeadAttention(nn.Module):
             squared_distance = (diff * metric_diff).sum(dim=(-2, -1))
             return torch.sqrt(squared_distance.clamp_min(self.eps))
 
-        if self.metric == MetricType.LearnableAffineLogFunction:
-            log_q = self._spd_affine_log(q)
-            log_k = self._spd_affine_log(k)
-
-            if log_q.ndim == 2 and log_k.ndim == 2:
-                diff = log_q - log_k
-            else:
-                diff = log_q.unsqueeze(-3) - log_k.unsqueeze(-4)
-
-            return torch.linalg.matrix_norm(diff, ord='fro', dim=(-2, -1))
-
         raise NotImplementedError(f"Metric {self.metric.value!r} is not implemented yet.")
 
     @staticmethod
@@ -479,8 +389,8 @@ class SingleHeadAttention(nn.Module):
 
     @staticmethod
     def _pairwise_squared_euclidean(
-        q: torch.Tensor,
-        k: torch.Tensor,
+            q: torch.Tensor,
+            k: torch.Tensor,
     ) -> torch.Tensor:
         q_norm = q.square().sum(dim=-1, keepdim=True)
         k_norm = k.square().sum(dim=-1).unsqueeze(-2)
@@ -492,7 +402,6 @@ class SingleHeadAttention(nn.Module):
         tangent_vector = self._upper_triangular_vectorize(log_x)
         return self.mlp_log_function(tangent_vector)
 
-
     def _spd_affine_log(self, x: torch.Tensor) -> torch.Tensor:
         """
         Apply g_theta(lambda) = a log(lambda + eps) spectrally.
@@ -502,14 +411,14 @@ class SingleHeadAttention(nn.Module):
         """
         eigenvalues, eigenvectors = _safe_eigh(x, eps=self.affine_log_eps)
         log_eigenvalues = (
-            eigenvalues.clamp_min(0.0) + self.affine_log_eps
+                eigenvalues.clamp_min(0.0) + self.affine_log_eps
         ).log()
 
         scale = F.softplus(self.affine_log_scale_raw)
         transformed_eigenvalues = scale * log_eigenvalues
 
         y = (
-            eigenvectors
-            * transformed_eigenvalues.unsqueeze(-2)
-        ) @ eigenvectors.transpose(-1, -2)
+                    eigenvectors
+                    * transformed_eigenvalues.unsqueeze(-2)
+            ) @ eigenvectors.transpose(-1, -2)
         return 0.5 * (y + y.transpose(-1, -2))

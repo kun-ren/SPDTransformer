@@ -7,6 +7,7 @@ from src.models.GeooptBiMap import GeooptBiMap
 from src.models.SPDAttention import SingleHeadAttention, spd_log
 from src.models.SPDFeedForward import SPDFeedForward
 from src.models.LogResidualAdd import LogResidualAdd
+from src.models.SequenceAddNorm import SequenceAddNorm
 from src.models.TraceAddNorm import TraceAddNorm
 
 
@@ -14,7 +15,7 @@ def _symmetrize(x: torch.Tensor) -> torch.Tensor:
     return 0.5 * (x + x.transpose(-1, -2))
 
 
-AddNormType = Literal["trace", "trace_add_norm", "log_residual", "log_residual_add", "none"]
+AddNormType = Literal["trace", "trace_add_norm", "log_residual", "log_residual_add", "sequence_add_norm","none"]
 
 
 def _make_add_norm(
@@ -38,6 +39,15 @@ def _make_add_norm(
         )
     if normalized in {"log_residual", "log_residual_add", "none"}:
         return LogResidualAdd(
+            spd_dim,
+            sequence_length=sequence_length,
+            tau=tau,
+            eps=eps,
+            affine=affine,
+            position_axis=position_axis,
+        )
+    if normalized in {"sequence_add_norm"}:
+        return SequenceAddNorm(
             spd_dim,
             sequence_length=sequence_length,
             tau=tau,
@@ -126,7 +136,7 @@ class SPDMultiHeadEncoder(nn.Module):
         self.time_add_norm1 = _make_add_norm(
             add_norm_type,
             spd_out_dim,
-            sequence_length=frequency_sequence_length,
+            sequence_length=time_sequence_length,
             tau=tau,
             eps=eps,
             affine=layer_norm_affine,
@@ -141,7 +151,7 @@ class SPDMultiHeadEncoder(nn.Module):
         self.time_add_norm2 = _make_add_norm(
             add_norm_type,
             spd_out_dim,
-            sequence_length=frequency_sequence_length,
+            sequence_length=time_sequence_length,
             tau=tau,
             eps=eps,
             affine=layer_norm_affine,
@@ -211,7 +221,7 @@ class SPDMultiHeadEncoder(nn.Module):
         )
         view_shape = [weights.shape[0], *([1] * (stacked.ndim - 1))]
         weighted_log = (stacked * weights.view(view_shape)).sum(dim=0)
-        return _symmetrize(weighted_log)
+        return weighted_log
 
     @classmethod
     def _apply_attention_along_axis(
@@ -313,9 +323,8 @@ class SPDMultiHeadEncoder(nn.Module):
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
 
         if x.ndim == 5 and x.shape[-3] > 1:
-            x_spd = torch.matrix_exp(
-                0.5 * (x_log + x_log.transpose(-1, -2))
-            )
+            x_spd = torch.matrix_exp(_symmetrize(x_log))
+
             frequency_output_log, aux = self._apply_attention_along_axis(
                 self.frequency_attention,
                 self.frequency_head_logits,

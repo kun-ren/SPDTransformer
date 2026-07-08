@@ -7,10 +7,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _sym(x: torch.Tensor) -> torch.Tensor:
-    return 0.5 * (x + x.transpose(-1, -2))
-
-
 def _upper_triangular_vectorize(x: torch.Tensor) -> torch.Tensor:
     spd_dim = x.shape[-1]
     row, col = torch.triu_indices(spd_dim, spd_dim, device=x.device)
@@ -129,4 +125,4 @@ class SPDFeedForward(nn.Module):
         gate = torch.sigmoid(self.raw_gate)
         out_log = x_log + gate * delta_log
 
-        return _sym(out_log)
+        return out_log
