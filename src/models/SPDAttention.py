@@ -13,8 +13,6 @@ class MetricType(Enum):
     LogEuclidean = 'log-euclidean'
     LearnableMetric = 'learnable-metric'
     LearnableAffineLogFunction = 'learnable-affine-log-function'
-    # MonotoneNeuralSpline = 'monotone-neural-spline'
-    # MLPLogFunction = 'mlp-log-function'
 
 
 def _symmetrize(x: torch.Tensor) -> torch.Tensor:
@@ -145,7 +143,18 @@ class _SPDLogEig(torch.autograd.Function):
 
 
 def spd_log(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
-    return _SPDLogEig.apply(x, eps)
+    # Temporarily bypass _SPDLogEig to compare against PyTorch's native
+    # torch.linalg.eigh autograd behavior.
+    # return _SPDLogEig.apply(x, eps)
+    x = _symmetrize(x)
+    eigenvalues, eigenvectors = torch.linalg.eigh(x)
+    safe_eigenvalues = eigenvalues.clamp_min(eps)
+    log_eigenvalues = safe_eigenvalues.log()
+    y = (
+            eigenvectors
+            * log_eigenvalues.unsqueeze(-2)
+    ) @ eigenvectors.transpose(-1, -2)
+    return _symmetrize(y)
 
 
 
@@ -323,8 +332,8 @@ class SingleHeadAttention(nn.Module):
 
                 # dot product
 
-                q_low = torch.einsum("...d,dr->...r", q_vec, self.L)
-                k_low = torch.einsum("...d,dr->...r", k_vec, self.L)
+                q_low = torch.einsum("...d,dr->...r", q_vec, self.metric_low_rank)
+                k_low = torch.einsum("...d,dr->...r", k_vec, self.metric_low_rank)
 
                 score_low = torch.einsum("...ir,...jr->...ij", q_low, k_low)
 

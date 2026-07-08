@@ -15,7 +15,7 @@ def _symmetrize(x: torch.Tensor) -> torch.Tensor:
     return 0.5 * (x + x.transpose(-1, -2))
 
 
-AddNormType = Literal["trace", "trace_add_norm", "log_residual", "log_residual_add", "sequence_add_norm","none"]
+AddNormType = Literal["trace", "trace_add_norm", "log_residual", "log_residual_add", "sequence_add_norm", "none"]
 
 
 def _make_add_norm(
@@ -344,4 +344,4 @@ class SPDMultiHeadEncoder(nn.Module):
 
         x_spd = torch.matrix_exp(x_log)
 
-        return _symmetrize(x_spd), all_aux
+        return x_spd, all_aux

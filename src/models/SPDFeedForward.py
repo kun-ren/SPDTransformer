@@ -28,7 +28,7 @@ def _upper_triangular_unvectorize(
     matrix = vector.new_zeros(*vector.shape[:-1], spd_dim, spd_dim)
     matrix[..., row, col] = vector
     matrix[..., col, row] = vector
-    return _sym(matrix)
+    return matrix
 
 
 def _apply_activation(

@@ -3,11 +3,12 @@ from typing import Literal
 import torch
 from torch import nn
 
+from src.models.SPDMDMClassifier import SPDMDMClassifier
 from src.models.SPDPoolingClassifier import SPDPoolingClassifier
 from src.models.SPDTaskTagClassifier import SPDTaskTagClassifier
 
 
-ClassifierType = Literal["pooling", "task"]
+ClassifierType = Literal["pooling", "task", "mdm"]
 class SPDTransformerClassifier(nn.Module):
     """
     Selects the trial-level classifier style.
@@ -16,7 +17,11 @@ class SPDTransformerClassifier(nn.Module):
         no task tag; use mean or attention pooling over encoder tokens.
 
     classifier_type="task":
-        insert SPD [TASK] token; classify from task-token output.
+        insert SPD [TASK] token; classify encoded task-token output with MDM.
+
+    classifier_type="mdm":
+        pool encoder tokens into one log-domain SPD matrix and classify by
+        distance to learnable MDM prototypes.
     """
 
     def __init__(
@@ -51,11 +56,13 @@ class SPDTransformerClassifier(nn.Module):
         self.debug_tensor_stats = debug_tensor_stats
         if pooling == "task":
             classifier_type = "task"
-            pooling = "attention"
+            pooling = "mean"
+        elif classifier_type == "task" and pooling == "attention":
+            pooling = "mean"
 
-        if classifier_type not in {"pooling", "task"}:
+        if classifier_type not in {"pooling", "task", "mdm"}:
             raise ValueError(
-                "classifier_type must be 'pooling' or 'task', "
+                "classifier_type must be 'pooling', 'task', or 'mdm', "
                 f"got {classifier_type!r}."
             )
 
@@ -87,18 +94,20 @@ class SPDTransformerClassifier(nn.Module):
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
             )
-        else:
-            print("initializing SPDTaskTagClassifier")
-            self.model = SPDTaskTagClassifier(
+        elif classifier_type == "mdm":
+            self.model = SPDMDMClassifier(
+                num_heads=num_heads,
                 spd_in_dim=spd_in_dim,
                 attention_dim=attention_dim,
                 num_classes=num_classes,
+                stage_transition=stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
                 tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
                 metric=metric,
                 depth=depth,
+                pooling=pooling,
                 dropout=dropout,
                 attention_dropout=attention_dropout,
                 debug_attention_dropout=debug_attention_dropout,
@@ -109,9 +118,36 @@ class SPDTransformerClassifier(nn.Module):
                 eps=eps,
                 use_position_bias=use_position_bias,
                 layer_norm_affine=layer_norm_affine,
+                stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
             )
-            print("SPDTaskTagClassifier built")
+        else:
+            self.model = SPDTaskTagClassifier(
+                num_heads=num_heads,
+                spd_in_dim=spd_in_dim,
+                attention_dim=attention_dim,
+                num_classes=num_classes,
+                stage_transition=stage_transition,
+                time_sequence_length=time_sequence_length,
+                frequency_sequence_length=frequency_sequence_length,
+                tau=tau,
+                ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                metric=metric,
+                depth=depth,
+                pooling=pooling,
+                dropout=dropout,
+                attention_dropout=attention_dropout,
+                debug_attention_dropout=debug_attention_dropout,
+                debug_attention_shape=debug_attention_shape,
+                debug_tensor_stats=debug_tensor_stats,
+                learnable_metric_mode=learnable_metric_mode,
+                learnable_metric_rank=learnable_metric_rank,
+                eps=eps,
+                use_position_bias=use_position_bias,
+                layer_norm_affine=layer_norm_affine,
+                stage_projection_init=stage_projection_init,
+                add_norm_type=add_norm_type,
+            )
 
     def forward(
             self,
@@ -119,8 +155,4 @@ class SPDTransformerClassifier(nn.Module):
             return_aux: bool = True,
     ) -> tuple[torch.Tensor, dict]:
 
-        if self.classifier_type == "pooling":
-            return self.model(x, return_aux=return_aux)
-
-        logits = self.model(x)
-        return logits, {}
+        return self.model(x, return_aux=return_aux)

@@ -1,54 +1,20 @@
-from typing import Literal, Any
+from typing import Literal
 
 import torch
 from torch import nn
 from src.models.GeooptBiMap import GeooptBiMap
-from src.models.MultiHeadEncoder import SPDMultiHeadEncoder
+from src.models.MultiHeadEncoder import (
+    AddNormType,
+    SPDMultiHeadEncoder,
+    _make_add_norm,
+    _symmetrize,
+)
 
 from src.models.SPDAttention import (
     SingleHeadAttention,
     spd_log,
 )
 from src.models.SPDFeedForward import SPDFeedForward
-from src.models.LogResidualAdd import LogResidualAdd
-from src.models.TraceAddNorm import TraceAddNorm
-
-
-AddNormType = Literal["trace", "trace_add_norm", "log_residual", "log_residual_add", "none"]
-
-
-def _make_add_norm(
-        add_norm_type: str,
-        spd_dim: int,
-        sequence_length: int,
-        tau: float,
-        eps: float,
-        affine: bool,
-        position_axis: int,
-) -> nn.Module:
-    normalized = str(add_norm_type).strip().lower().replace("-", "_")
-    if normalized in {"trace", "trace_add_norm"}:
-        return TraceAddNorm(
-            spd_dim,
-            sequence_length=sequence_length,
-            tau=tau,
-            eps=eps,
-            affine=affine,
-            position_axis=position_axis,
-        )
-    if normalized in {"log_residual", "log_residual_add", "none"}:
-        return LogResidualAdd(
-            spd_dim,
-            sequence_length=sequence_length,
-            tau=tau,
-            eps=eps,
-            affine=affine,
-            position_axis=position_axis,
-        )
-    raise ValueError(
-        "add_norm_type must be 'trace' or 'log_residual', "
-        f"got {add_norm_type!r}."
-    )
 
 
 class SPDEncoder(nn.Module):
@@ -117,7 +83,7 @@ class SPDEncoder(nn.Module):
         self.time_add_norm1 = _make_add_norm(
             add_norm_type,
             spd_out_dim,
-            sequence_length=frequency_sequence_length,
+            sequence_length=time_sequence_length,
             tau=tau,
             eps=eps,
             affine=layer_norm_affine,
@@ -132,7 +98,7 @@ class SPDEncoder(nn.Module):
         self.time_add_norm2 = _make_add_norm(
             add_norm_type,
             spd_out_dim,
-            sequence_length=frequency_sequence_length,
+            sequence_length=time_sequence_length,
             tau=tau,
             eps=eps,
             affine=layer_norm_affine,
@@ -187,7 +153,7 @@ class SPDEncoder(nn.Module):
             x: torch.Tensor,
             axis: int,
             return_aux: bool = True,
-    ) -> tuple[Any, Any]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if x.ndim < 4:
             raise ValueError(
                 "Expected SPD input with shape (..., sequence, channels, channels), "
@@ -232,40 +198,31 @@ class SPDEncoder(nn.Module):
                 "(batch, time, frequency_bands, channels, channels), "
                 f"got {tuple(x.shape)}."
             )
-        all_aux = {}
-        # first above all
+        all_aux: dict[str, torch.Tensor] = {}
         if self.stage_projection is not None:
-            x = self.stage_projection(x)
+            attention_input = self.stage_projection(x)
             if return_aux:
-                all_aux["P_x"] = x
+                all_aux["P_x"] = attention_input
         else:
-            eye = torch.eye(
-                x.shape[-1],
-                device=x.device,
-                dtype=x.dtype,
-            )
-            x = 0.5 * (x + x.transpose(-1, -2)) + self.eps * eye
+            attention_input = x
 
-        residual_log = spd_log(x)
+        residual_log = spd_log(attention_input)
         time_output_log, aux = self._apply_attention_along_axis(
             self.time_attention,
-            x,
+            attention_input,
             axis=1,
             return_aux=return_aux,
         )
         if return_aux:
-            for name, param in aux.items():
-                all_aux[f"time_{name}"] = param
+            all_aux.update(
+                {f"axis_1_head_0_{name}": param for name, param in aux.items()}
+            )
         x_log = self.time_add_norm1(residual_log, time_output_log)
 
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
 
-
-        # if (batch, time, frequency_bands, channels, channels)
-        if x.ndim == 5 and x.shape[-3] > 1:
-            x_spd = torch.matrix_exp(
-                0.5 * (x_log + x_log.transpose(-1, -2))
-            )
+        if attention_input.ndim == 5 and attention_input.shape[-3] > 1:
+            x_spd = torch.matrix_exp(_symmetrize(x_log))
             frequency_output_log, aux = self._apply_attention_along_axis(
                 self.frequency_attention,
                 x_spd,
@@ -273,20 +230,21 @@ class SPDEncoder(nn.Module):
                 return_aux=return_aux,
             )
             if return_aux:
-                for name, param in aux.items():
-                    all_aux[f"frequency_{name}"] = param
+                all_aux.update(
+                    {f"axis_2_head_0_{name}": param for name, param in aux.items()}
+                )
 
             x_log = self.frequency_add_norm1(x_log, frequency_output_log)
 
             x_log = self.frequency_add_norm2(x_log, self.frequency_ffn(x_log))
 
-        x_log = 0.5 * (x_log + x_log.transpose(-1, -2))
+        x_log = _symmetrize(x_log)
         if return_log:
             return x_log, all_aux
 
         x_spd = torch.matrix_exp(x_log)
 
-        return 0.5 * (x_spd + x_spd.transpose(-1, -2)), all_aux
+        return _symmetrize(x_spd), all_aux
 
 
 class SPDTransformer(nn.Module):
