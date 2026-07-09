@@ -37,7 +37,7 @@ data:
 model:
   #   16, 64 is also high
   head_nums: [1] # 4 is better than 1
-  attention_dim: ["64, 32", "64, 64"]
+  attention_dim: ["64"]
   stage_transition: [True]
   stage_projection_init: ["random"] # "random" is much better than indentity
   add_norm_type: ["sequence_add_norm"]
@@ -52,15 +52,15 @@ model:
   use_position_bias: [false] # slightly better than true in low-rank
   layer_norm_affine: [false] # true
   learnable_metric_mode: ["low-rank"]
-  learnable_metric_rank: [4,8,16]
+  learnable_metric_rank: [8,16]
   eps: [1.0e-6]
 
 training:
   precision: ["float32"]
   epochs: [50]
   batch_size: [64]
-  learning_rate: [0.0007, 0.001, 0.0015] #  0.002 is better than 0.0015
-  stiefel_learning_rate: [0.0001, 0.0002, 0.0003]
+  learning_rate: [0.001, 0.002] #  0.002 is better than 0.0015
+  stiefel_learning_rate: [0.0001, 0.0003]
   lr_scheduler: ["plateau"]
   lr_scheduler_metric: ["test_macro_f1"]
   lr_scheduler_factor: [0.5]
@@ -74,7 +74,7 @@ training:
   gradient_clip_norm: [0.5, 0.8]  # best 0.8
   early_stopping_patience: [ 8 ]
   early_stopping_min_delta: [ 0.0005 ]
-  condition_regularization_weight: [0.0, 1.0e-4, 5.0e-4]
+  condition_regularization_weight: [0.0, 5.0e-4]
   num_workers: [0]
   pin_memory: [true]
   allow_tf32: [false]
