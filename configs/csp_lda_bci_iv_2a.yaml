@@ -1,0 +1,33 @@
+data:
+  dataset: ["bnci2014_001"]
+  root_dir: ["data"]
+  filter_bank:
+    - [8, 30]
+  sfreq: [250]
+  subjects: 1-9
+  events: "left_hand,right_hand,feet,tongue"
+  sessions: "all"
+  channels:
+  reject_threshold_uv: [null]
+  use_ica: [false]
+  use_autoreject: [false]
+  autoreject_random_state: [42]
+  autoreject_n_jobs: [2]
+  autoreject_cv: [10]
+  baseline_correction: [null]
+  epoch_tmin: [0.0]
+  epoch_tmax: [4.0]
+  segment_duration: [4.0]
+  stride_duration: [null]
+  moabb_accept_terms: [true]
+  moabb_force_update: [false]
+
+training:
+  seed: [42]
+  test_size: [0.15]
+  val_size: [0.15]
+  allow_subject_overlap: [true]
+  split_file: experiments/splits/bnci2014_001_csp_lda_seed42.json
+
+output:
+  dir: experiments/results/csp_lda_baseline_bci_iv_2a

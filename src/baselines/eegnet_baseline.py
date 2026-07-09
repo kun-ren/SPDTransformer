@@ -3,9 +3,14 @@ from __future__ import annotations
 import argparse
 import csv
 import random
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 import torch
@@ -14,7 +19,6 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from src.baselines.baseline_utils import (
-    PROJECT_ROOT,
     compute_metrics,
     config_hash,
     expand_data_training_experiments,
@@ -177,7 +181,7 @@ class AuthorEEGNet(nn.Module):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Author-style EEGNet baseline for PhysioNet EEGBCI."
+        description="Author-style EEGNet baseline for motor imagery EEG datasets."
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_EEGNET_CONFIG)
     parser.add_argument("--device", default=None)

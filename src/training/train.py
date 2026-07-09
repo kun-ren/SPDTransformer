@@ -25,7 +25,7 @@ from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from torch import nn
 from torch.utils.data import DataLoader
 
-from script.load_moabb_dataset import parse_int_list
+from src.datasets.BCICompetitionIV2a_preprocess import preprocess_bci_iv_2a_spd
 from src.datasets.PhysioNetMI_preprocess import (
     normalize_float_dtype,
     preprocess_spd,
@@ -35,7 +35,7 @@ from src.models.SPDTransformerClassifier import SPDTransformerClassifier
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_grid.yaml"
-DATASET_CACHE_VERSION = 4
+DATASET_CACHE_VERSION = 5
 DEFAULT_DATASET_CACHE_DIR = PROJECT_ROOT / "experiments" / "cache" / "preprocessed_datasets"
 
 
@@ -217,6 +217,79 @@ def parse_task_types(task_types: Any) -> tuple[str, ...]:
     if isinstance(task_types, str):
         return tuple(part.strip() for part in task_types.split(",") if part.strip())
     return tuple(str(part).strip() for part in task_types if str(part).strip())
+
+
+def parse_subjects(subjects: Any) -> list[int] | None:
+    if subjects is None:
+        return None
+    if isinstance(subjects, str):
+        cleaned = subjects.strip()
+        if cleaned.lower() in {"", "none", "null", "all"}:
+            return None
+        values: list[int] = []
+        for part in cleaned.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                start_raw, end_raw = part.split("-", 1)
+                start = int(start_raw)
+                end = int(end_raw)
+                if start > end:
+                    raise argparse.ArgumentTypeError(f"invalid range: {part}")
+                values.extend(range(start, end + 1))
+            else:
+                values.append(int(part))
+        return sorted(set(values))
+    if isinstance(subjects, (int, np.integer)):
+        return [int(subjects)]
+
+    values = []
+    for subject in subjects:
+        parsed = parse_subjects(subject)
+        if parsed is not None:
+            values.extend(parsed)
+    return sorted(set(values)) or None
+
+
+def normalize_dataset_name(name: Any) -> str:
+    normalized = str(name or "physionet_mi").strip().lower().replace("-", "_")
+    aliases = {
+        "physionet": "physionet_mi",
+        "physionetmi": "physionet_mi",
+        "physionet_mi": "physionet_mi",
+        "eegbci": "physionet_mi",
+        "eeg_bci": "physionet_mi",
+        "bci_iv_2a": "bnci2014_001",
+        "bci_competition_iv_2a": "bnci2014_001",
+        "bciciv_2a": "bnci2014_001",
+        "bcic_iv_2a": "bnci2014_001",
+        "bnci2014_001": "bnci2014_001",
+        "bnci2014001": "bnci2014_001",
+    }
+    if normalized not in aliases:
+        valid = ", ".join(sorted(set(aliases.values())))
+        raise ValueError(f"Unknown data.dataset {name!r}. Valid datasets: {valid}.")
+    return aliases[normalized]
+
+
+def resolve_covariance_signal_scale(value: Any, dataset_name: str) -> float:
+    if value is None:
+        value = "auto"
+    if isinstance(value, str) and value.strip().lower() in {"auto", ""}:
+        # PhysioNet MNE EDF epochs are in Volts; MOABB array output is already
+        # scaled to microvolts through the dataset unit_factor.
+        return 1.0e6 if dataset_name == "physionet_mi" else 1.0
+    return float(value)
+
+
+def normalize_data_preprocessing_config(data_cfg: dict[str, Any]) -> None:
+    dataset_name = normalize_dataset_name(data_cfg.get("dataset", "physionet_mi"))
+    data_cfg["dataset"] = dataset_name
+    data_cfg["covariance_signal_scale"] = resolve_covariance_signal_scale(
+        data_cfg.get("covariance_signal_scale", "auto"),
+        dataset_name=dataset_name,
+    )
 
 
 def parse_bool(value: Any, default: bool = False) -> bool:
@@ -1141,51 +1214,103 @@ def train_experiment(
 def preprocess_dataset(
         data_cfg: dict[str, Any],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    dataset_name = normalize_dataset_name(data_cfg.get("dataset", "physionet_mi"))
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
-
-    subjects = parse_int_list(data_cfg["subjects"])
-    # for dataset in data_cfg["datasets"]:
-    #     dataset["filter_bank"] = filter_bank
-    task_types = parse_task_types(data_cfg.get("task_types"))
-    x, y, class_names, subject_labels = preprocess_spd(
-        filter_bank=filter_bank,
-        root_dir=str(data_cfg.get("root_dir", "data/MNE-eegbci-data/files/eegmmidb/1.0.0")),
-        subjects=subjects,
-        channels=data_cfg.get("channels"),
-        estimator=str(data_cfg.get("estimator", "lwf")),
-        sfreq=float(data_cfg.get("sfreq", 160)),
-        eps=float(data_cfg.get("eps", 1e-8)),
-        segment_duration=float(data_cfg.get("segment_duration", 1.0)),
-        stride_duration=data_cfg.get("stride_duration", 0.5),
-        imaged=parse_bool(data_cfg.get("imaged", True), default=True),
-        executed=parse_bool(data_cfg.get("executed", False), default=False),
-        task_types=task_types,
-        reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
-        baseline_correction=data_cfg.get("baseline_correction"),
-        baseline_window=data_cfg.get("baseline_window"),
-        epoch_tmin=float(data_cfg.get("epoch_tmin", -2.0)),
-        epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
-        use_ica=parse_bool(data_cfg.get("use_ica", False), default=False),
-        ica_n_components=data_cfg.get("ica_n_components", 20),
-        ica_random_state=int(data_cfg.get("ica_random_state", 42)),
-        ica_eog_channels=data_cfg.get("ica_eog_channels"),
-        use_autoreject=parse_bool(
-            data_cfg.get("use_autoreject", False),
-            default=False,
-        ),
-        autoreject_random_state=int(data_cfg.get("autoreject_random_state", 42)),
-        autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
-        autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
-        return_subjects=True,
-        covariance_signal_scale=float(
-            data_cfg.get("covariance_signal_scale", 1e6)
-        ),
-        replace_covariance_diagonal_with_raw_energy=parse_bool(
-            data_cfg.get("replace_covariance_diagonal_with_raw_energy", False),
-            default=False,
-        ),
-        output_dtype=data_cfg.get("covariance_output_dtype", "float32"),
+    subjects = parse_subjects(data_cfg.get("subjects"))
+    covariance_signal_scale = resolve_covariance_signal_scale(
+        data_cfg.get("covariance_signal_scale", "auto"),
+        dataset_name=dataset_name,
     )
+
+    if dataset_name == "physionet_mi":
+        task_types = parse_task_types(data_cfg.get("task_types"))
+        x, y, class_names, subject_labels = preprocess_spd(
+            filter_bank=filter_bank,
+            root_dir=str(
+                data_cfg.get(
+                    "root_dir",
+                    "data/MNE-eegbci-data/files/eegmmidb/1.0.0",
+                )
+            ),
+            subjects=subjects,
+            channels=data_cfg.get("channels"),
+            estimator=str(data_cfg.get("estimator", "lwf")),
+            sfreq=float(data_cfg.get("sfreq", 160)),
+            eps=float(data_cfg.get("eps", 1e-8)),
+            segment_duration=float(data_cfg.get("segment_duration", 1.0)),
+            stride_duration=data_cfg.get("stride_duration", 0.5),
+            imaged=parse_bool(data_cfg.get("imaged", True), default=True),
+            executed=parse_bool(data_cfg.get("executed", False), default=False),
+            task_types=task_types,
+            reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
+            baseline_correction=data_cfg.get("baseline_correction"),
+            baseline_window=data_cfg.get("baseline_window"),
+            epoch_tmin=float(data_cfg.get("epoch_tmin", -2.0)),
+            epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
+            use_ica=parse_bool(data_cfg.get("use_ica", False), default=False),
+            ica_n_components=data_cfg.get("ica_n_components", 20),
+            ica_random_state=int(data_cfg.get("ica_random_state", 42)),
+            ica_eog_channels=data_cfg.get("ica_eog_channels"),
+            use_autoreject=parse_bool(
+                data_cfg.get("use_autoreject", False),
+                default=False,
+            ),
+            autoreject_random_state=int(data_cfg.get("autoreject_random_state", 42)),
+            autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
+            autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
+            return_subjects=True,
+            covariance_signal_scale=covariance_signal_scale,
+            replace_covariance_diagonal_with_raw_energy=parse_bool(
+                data_cfg.get("replace_covariance_diagonal_with_raw_energy", False),
+                default=False,
+            ),
+            output_dtype=data_cfg.get("covariance_output_dtype", "float32"),
+        )
+    elif dataset_name == "bnci2014_001":
+        x, y, class_names, subject_labels = preprocess_bci_iv_2a_spd(
+            filter_bank=filter_bank,
+            root_dir=str(data_cfg.get("root_dir", "data")),
+            subjects=subjects,
+            channels=data_cfg.get("channels"),
+            events=data_cfg.get("events", data_cfg.get("bci_iv_2a_events")),
+            sessions=data_cfg.get("sessions", data_cfg.get("bci_iv_2a_sessions")),
+            estimator=str(data_cfg.get("estimator", "lwf")),
+            sfreq=float(data_cfg.get("sfreq", 250)),
+            eps=float(data_cfg.get("eps", 1e-8)),
+            segment_duration=float(data_cfg.get("segment_duration", 1.0)),
+            stride_duration=data_cfg.get("stride_duration", 0.5),
+            reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
+            baseline_correction=data_cfg.get("baseline_correction"),
+            baseline_window=data_cfg.get("baseline_window"),
+            epoch_tmin=float(data_cfg.get("epoch_tmin", 0.0)),
+            epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
+            use_ica=parse_bool(data_cfg.get("use_ica", False), default=False),
+            use_autoreject=parse_bool(
+                data_cfg.get("use_autoreject", False),
+                default=False,
+            ),
+            autoreject_random_state=int(data_cfg.get("autoreject_random_state", 42)),
+            autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
+            autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
+            return_subjects=True,
+            covariance_signal_scale=covariance_signal_scale,
+            replace_covariance_diagonal_with_raw_energy=parse_bool(
+                data_cfg.get("replace_covariance_diagonal_with_raw_energy", False),
+                default=False,
+            ),
+            output_dtype=data_cfg.get("covariance_output_dtype", "float32"),
+            moabb_accept_terms=parse_bool(
+                data_cfg.get("moabb_accept_terms", True),
+                default=True,
+            ),
+            moabb_force_update=parse_bool(
+                data_cfg.get("moabb_force_update", False),
+                default=False,
+            ),
+        )
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset_name}")
+
     if not np.isfinite(x).all():
         bad_count = int((~np.isfinite(x)).sum())
         raise ValueError(
@@ -1355,6 +1480,7 @@ def main() -> int:
             experiment_cfg["data"],
             experiment_cfg["training"],
         )
+        normalize_data_preprocessing_config(experiment_cfg["data"])
         data_key = dataset_cache_key(experiment_cfg["data"])
         if data_key not in data_cache:
             data_cache[data_key] = load_or_preprocess_dataset(

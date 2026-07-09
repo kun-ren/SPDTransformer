@@ -174,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--device", default=None)
-    parser.add_argument("--output-dir", default="experiments/results/spdnet_baseline")
+    parser.add_argument("--output-dir", default=None)
     parser.add_argument(
         "--dims",
         default=None,
@@ -554,7 +554,11 @@ def main() -> int:
     experiments = expand_data_training_experiments(config)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_output_dir = PROJECT_ROOT / args.output_dir / timestamp
+    output_dir = args.output_dir or config.get("output", {}).get(
+        "dir",
+        "experiments/results/spdnet_baseline",
+    )
+    base_output_dir = PROJECT_ROOT / output_dir / timestamp
     all_metrics = [
         run_experiment(index, experiment, args, base_output_dir, device)
         for index, experiment in enumerate(experiments, start=1)

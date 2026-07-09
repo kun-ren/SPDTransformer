@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.baselines.baseline_utils import (
     DEFAULT_CONFIG,
-    PROJECT_ROOT,
     compute_metrics,
     config_hash,
     expand_data_training_experiments,
@@ -26,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--n-components", type=int, default=6)
-    parser.add_argument("--output-dir", default="experiments/results/csp_lda_baseline")
+    parser.add_argument("--output-dir", default=None)
     return parser
 
 
@@ -152,7 +156,11 @@ def main() -> int:
     config = load_yaml(args.config)
     experiments = expand_data_training_experiments(config)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_output_dir = PROJECT_ROOT / args.output_dir / timestamp
+    output_dir = args.output_dir or config.get("output", {}).get(
+        "dir",
+        "experiments/results/csp_lda_baseline",
+    )
+    base_output_dir = PROJECT_ROOT / output_dir / timestamp
     all_metrics = [
         run_experiment(index, experiment, args.n_components, base_output_dir)
         for index, experiment in enumerate(experiments, start=1)
