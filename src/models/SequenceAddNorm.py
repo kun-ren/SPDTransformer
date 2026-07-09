@@ -71,9 +71,9 @@ class SequenceAddNorm(nn.Module):
 
         beta = (self.sequence_length - sequence_trace) / float(L * d)
 
-        eye = torch.eye(d, device=L.device, dtype=L.dtype)
+        eye = torch.eye(d, device=output_log.device, dtype=output_log.dtype)
 
-        output_log_norm = L + beta[..., None, None] * eye
+        output_log_norm = output_log + beta[..., None, None] * eye
 
         output_log = self._apply_log_domain_affine(output_log_norm)
         return output_log
