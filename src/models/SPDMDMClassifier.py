@@ -127,7 +127,7 @@ class SPDMDMClassifier(nn.Module):
 
         if pooling == "weighted":
             self.token_weight_logits = nn.Parameter(
-                torch.zeros(time_sequence_length, frequency_sequence_length)
+                torch.ones(time_sequence_length, frequency_sequence_length)
             )
         else:
             self.register_parameter("token_weight_logits", None)

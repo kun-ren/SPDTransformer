@@ -259,12 +259,14 @@ def make_loaders(
         batch_size: int,
         num_workers: int,
         dtype: torch.dtype,
+        pin_memory: bool = False,
 ) -> tuple[DataLoader, DataLoader]:
     train_loader = DataLoader(
         MotorImageryDataset(x[train_idx], y[train_idx], dtype=dtype),
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
+        pin_memory=pin_memory,
         drop_last=False,
     )
     test_loader = DataLoader(
@@ -272,6 +274,7 @@ def make_loaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        pin_memory=pin_memory,
         drop_last=False,
     )
     return train_loader, test_loader
@@ -475,9 +478,10 @@ def predict_loader(
     y_pred = []
 
     with torch.no_grad():
+        non_blocking = device.type == "cuda"
         for x_batch, y_batch in loader:
-            x_batch = x_batch.to(device)
-            y_batch = y_batch.to(device)
+            x_batch = x_batch.to(device, non_blocking=non_blocking)
+            y_batch = y_batch.to(device, non_blocking=non_blocking)
 
             use_condition_regularization = condition_regularization_weight > 0
             logits, aux = model(
@@ -593,10 +597,11 @@ def train_one_epoch(
     total_loss = 0.0
     y_true = []
     y_pred = []
+    non_blocking = device.type == "cuda"
 
     for x_batch, y_batch in loader:
-        x_batch = x_batch.to(device)
-        y_batch = y_batch.to(device)
+        x_batch = x_batch.to(device, non_blocking=non_blocking)
+        y_batch = y_batch.to(device, non_blocking=non_blocking)
         use_condition_regularization = condition_regularization_weight > 0
         logits, aux = model(
             x_batch,
@@ -813,6 +818,15 @@ def train_experiment(
     )
     dtype = resolve_precision(precision_name)
     set_seed(seed)
+    if device.type == "cuda":
+        allow_tf32 = parse_bool(
+            training_cfg.get("allow_tf32", False),
+            default=False,
+        )
+        torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+        torch.backends.cudnn.allow_tf32 = allow_tf32
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high" if allow_tf32 else "highest")
 
     run_dir = make_run_dir(base_output_dir, run_index, experiment_cfg)
     save_yaml(run_dir / "config.yaml", experiment_cfg)
@@ -857,6 +871,10 @@ def train_experiment(
         batch_size=int(training_cfg.get("batch_size", 16)),
         num_workers=int(training_cfg.get("num_workers", 0)),
         dtype=dtype,
+        pin_memory=parse_bool(
+            training_cfg.get("pin_memory", device.type == "cuda"),
+            default=device.type == "cuda",
+        ),
     )
 
     time_sequence_length = x.shape[-4]

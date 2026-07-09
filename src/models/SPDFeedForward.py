@@ -92,6 +92,9 @@ class SPDFeedForward(nn.Module):
 
         self.linear_in = nn.Linear(self.feature_dim, self.hidden_feature_dim)
         self.linear_out = nn.Linear(self.hidden_feature_dim, self.feature_dim)
+        row, col = torch.triu_indices(spd_dim, spd_dim)
+        self.register_buffer("triu_row", row, persistent=False)
+        self.register_buffer("triu_col", col, persistent=False)
 
         # Start close to identity: the residual branch exists, but initially
         # contributes almost nothing until the final projection learns.
@@ -114,15 +117,27 @@ class SPDFeedForward(nn.Module):
             )
 
         #x_log = _sym(x_log)
-        vector = _upper_triangular_vectorize(x_log)
+        vector = x_log[..., self.triu_row, self.triu_col]
 
         hidden = self.linear_in(vector)
         hidden = _apply_activation(hidden, self.activation)
         hidden = self.dropout(hidden)
         delta_vector = self.linear_out(hidden)
 
-        delta_log = _upper_triangular_unvectorize(delta_vector, self.spd_dim)
+        delta_log = self._upper_triangular_unvectorize(delta_vector)
         gate = torch.sigmoid(self.raw_gate)
         out_log = x_log + gate * delta_log
 
         return out_log
+
+    def _upper_triangular_unvectorize(self, vector: torch.Tensor) -> torch.Tensor:
+        if vector.shape[-1] != self.feature_dim:
+            raise ValueError(
+                f"Expected vector feature dimension {self.feature_dim}, "
+                f"got {vector.shape[-1]}."
+            )
+
+        matrix = vector.new_zeros(*vector.shape[:-1], self.spd_dim, self.spd_dim)
+        matrix[..., self.triu_row, self.triu_col] = vector
+        matrix[..., self.triu_col, self.triu_row] = vector
+        return matrix

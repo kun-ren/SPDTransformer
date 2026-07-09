@@ -28,9 +28,10 @@ def _safe_eigh(
         x: torch.Tensor,
         eps: float = 1e-9,
         max_tries: int = 6,
+        check_finite: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     x = _symmetrize(x)
-    if not torch.isfinite(x).all():
+    if check_finite and not torch.isfinite(x).all():
         raise ValueError("SPD spectral operation received NaN or Inf values.")
 
     try:
@@ -282,6 +283,9 @@ class SingleHeadAttention(nn.Module):
             if self.use_position
             else None
         )
+        row, col = torch.triu_indices(attention_dim, attention_dim)
+        self.register_buffer("triu_row", row, persistent=False)
+        self.register_buffer("triu_col", col, persistent=False)
 
     def forward(
             self,
@@ -329,8 +333,8 @@ class SingleHeadAttention(nn.Module):
         if self.metric == MetricType.LearnableMetric:
 
             if self.learnable_metric_mode == "low-rank":
-                q_vec = self._upper_triangular_vectorize(log_q)  # [b, s, f, tangent_dim]
-                k_vec = self._upper_triangular_vectorize(log_k)
+                q_vec = self._upper_triangular_vectorize_cached(log_q)
+                k_vec = self._upper_triangular_vectorize_cached(log_k)
 
                 # dot product
 
@@ -408,6 +412,15 @@ class SingleHeadAttention(nn.Module):
         spd_dim = x.shape[-1]
         row, col = torch.triu_indices(spd_dim, spd_dim, device=x.device)
         return x[..., row, col]
+
+    def _upper_triangular_vectorize_cached(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-2:] != (self.attention_dim, self.attention_dim):
+            raise ValueError(
+                "Expected log-SPD matrix shape "
+                f"(..., {self.attention_dim}, {self.attention_dim}), "
+                f"got {tuple(x.shape)}."
+            )
+        return x[..., self.triu_row, self.triu_col]
 
     @staticmethod
     def _pairwise_squared_euclidean(
