@@ -60,16 +60,19 @@ class SequenceAddNorm(nn.Module):
         output_log = (1.0 - eta) * residual_log + eta * sublayer_output_log
 
         d = output_log.shape[-1]
-        L = output_log.shape[-3]
+        position_axis = self._canonical_position_axis(output_log)
+        sequence_length = output_log.shape[position_axis]
 
 
         trace_per_matrix = torch.diagonal(
             output_log, dim1=-2, dim2=-1
         ).sum(dim=-1)
 
-        sequence_trace = trace_per_matrix.sum(dim=-1, keepdim=True)
+        sequence_trace = trace_per_matrix.sum(dim=position_axis, keepdim=True)
 
-        beta = (self.sequence_length - sequence_trace) / float(L * d)
+        beta = (float(sequence_length) - sequence_trace) / float(
+            sequence_length * d
+        )
 
         eye = torch.eye(d, device=output_log.device, dtype=output_log.dtype)
 
@@ -78,11 +81,7 @@ class SequenceAddNorm(nn.Module):
         output_log = self._apply_log_domain_affine(output_log_norm)
         return output_log
 
-
-    def _apply_log_domain_affine(self, output_log: torch.Tensor) -> torch.Tensor:
-        if not self.affine:
-            return output_log
-
+    def _canonical_position_axis(self, output_log: torch.Tensor) -> int:
         position_axis = self.position_axis
         if position_axis < 0:
             position_axis += output_log.ndim
@@ -92,6 +91,13 @@ class SequenceAddNorm(nn.Module):
                 f"got position_axis={self.position_axis} for shape "
                 f"{tuple(output_log.shape)}."
             )
+        return position_axis
+
+    def _apply_log_domain_affine(self, output_log: torch.Tensor) -> torch.Tensor:
+        if not self.affine:
+            return output_log
+
+        position_axis = self._canonical_position_axis(output_log)
 
         current_length = output_log.shape[position_axis]
         if current_length > self.sequence_length:

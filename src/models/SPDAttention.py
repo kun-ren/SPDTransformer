@@ -145,16 +145,16 @@ class _SPDLogEig(torch.autograd.Function):
 def spd_log(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     # Temporarily bypass _SPDLogEig to compare against PyTorch's native
     # torch.linalg.eigh autograd behavior.
-    # return _SPDLogEig.apply(x, eps)
-    x = _symmetrize(x)
-    eigenvalues, eigenvectors = torch.linalg.eigh(x)
-    safe_eigenvalues = eigenvalues.clamp_min(eps)
-    log_eigenvalues = safe_eigenvalues.log()
-    y = (
-            eigenvectors
-            * log_eigenvalues.unsqueeze(-2)
-    ) @ eigenvectors.transpose(-1, -2)
-    return _symmetrize(y)
+    return _SPDLogEig.apply(x, eps)
+    # x = _symmetrize(x)
+    # eigenvalues, eigenvectors = torch.linalg.eigh(x)
+    # safe_eigenvalues = eigenvalues.clamp_min(eps)
+    # log_eigenvalues = safe_eigenvalues.log()
+    # y = (
+    #         eigenvectors
+    #         * log_eigenvalues.unsqueeze(-2)
+    # ) @ eigenvectors.transpose(-1, -2)
+    # return _symmetrize(y)
 
 
 
@@ -224,6 +224,7 @@ class SingleHeadAttention(nn.Module):
         self.debug_tensor_stats = debug_tensor_stats
         self.affine_log_eps = eps
         self.use_position = use_position
+        self.attention_score_clip = 30.0
 
         if self.stage_transition:
             self.query = GeooptBiMap(
@@ -305,6 +306,7 @@ class SingleHeadAttention(nn.Module):
             aux['P_v'] = v
 
         score = self.learnableRiemannianScore(log_q, log_k)
+        score = self._stabilize_attention_score(score)
 
         attention = torch.softmax(score, dim=-1)
 
@@ -389,6 +391,17 @@ class SingleHeadAttention(nn.Module):
             return torch.sqrt(squared_distance.clamp_min(self.eps))
 
         raise NotImplementedError(f"Metric {self.metric.value!r} is not implemented yet.")
+
+    def _stabilize_attention_score(self, score: torch.Tensor) -> torch.Tensor:
+        if not torch.isfinite(score).all():
+            raise RuntimeError(
+                "Non-finite SPD attention score detected before softmax. "
+                "Check SPD eigenvalue range, eps, and attention learning rate."
+            )
+        return score.clamp(
+            min=-self.attention_score_clip,
+            max=self.attention_score_clip,
+        )
 
     @staticmethod
     def _upper_triangular_vectorize(x: torch.Tensor) -> torch.Tensor:

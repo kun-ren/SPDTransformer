@@ -140,7 +140,7 @@ class SPDMultiHeadEncoder(nn.Module):
             tau=tau,
             eps=eps,
             affine=layer_norm_affine,
-            position_axis=-3,
+            position_axis=1,
         )
         self.time_ffn = SPDFeedForward(
             spd_out_dim,
@@ -155,7 +155,7 @@ class SPDMultiHeadEncoder(nn.Module):
             tau=tau,
             eps=eps,
             affine=layer_norm_affine,
-            position_axis=-3,
+            position_axis=1,
         )
 
         self.frequency_attention = nn.ModuleList([
@@ -184,7 +184,7 @@ class SPDMultiHeadEncoder(nn.Module):
             tau=tau,
             eps=eps,
             affine=layer_norm_affine,
-            position_axis=-3,
+            position_axis=2,
         )
         self.frequency_ffn = SPDFeedForward(
             spd_out_dim,
@@ -199,7 +199,7 @@ class SPDMultiHeadEncoder(nn.Module):
             tau=tau,
             eps=eps,
             affine=layer_norm_affine,
-            position_axis=-3,
+            position_axis=2,
         )
 
         self.attention = self.time_attention
