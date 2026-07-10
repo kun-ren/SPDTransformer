@@ -72,6 +72,7 @@ class SPDMDMClassifier(nn.Module):
             stage_transition: bool,
             time_sequence_length: int,
             frequency_sequence_length: int,
+            brain_region_sequence_length: int = 1,
             tau=1.0,
             ffn_hidden_spd_dim=None,
             metric: str = "log-euclidean",
@@ -108,6 +109,7 @@ class SPDMDMClassifier(nn.Module):
             stage_transition=stage_transition,
             time_sequence_length=time_sequence_length,
             frequency_sequence_length=frequency_sequence_length,
+            brain_region_sequence_length=brain_region_sequence_length,
             tau=tau,
             ffn_hidden_spd_dim=ffn_hidden_spd_dim,
             metric=metric,
@@ -127,7 +129,11 @@ class SPDMDMClassifier(nn.Module):
 
         if pooling == "weighted":
             self.token_weight_logits = nn.Parameter(
-                torch.ones(time_sequence_length, frequency_sequence_length)
+                torch.zeros(
+                    time_sequence_length,
+                    frequency_sequence_length,
+                    brain_region_sequence_length,
+                )
             )
         else:
             self.register_parameter("token_weight_logits", None)
@@ -177,43 +183,47 @@ class SPDMDMClassifier(nn.Module):
         if self.token_weight_logits is None:
             raise RuntimeError("token_weight_logits is only defined for weighted pooling.")
 
-        if x_log.ndim == 4:
-            time_len = x_log.shape[1]
-            self._check_weight_shape(time_len, 1)
-            logits = self.token_weight_logits[:time_len, 0]
-            weights = torch.softmax(logits, dim=0)
-            return torch.einsum("t,btmn->bmn", weights, x_log)
-
-        if x_log.ndim == 5:
-            time_len, frequency_len = x_log.shape[1], x_log.shape[2]
-            self._check_weight_shape(time_len, frequency_len)
-            logits = self.token_weight_logits[:time_len, :frequency_len]
-            weights = torch.softmax(logits.reshape(-1), dim=0).reshape(
-                time_len,
-                frequency_len,
+        if x_log.ndim not in {4, 5, 6}:
+            raise ValueError(
+                "Expected encoder output shape "
+                "(batch, time, channels, channels), "
+                "(batch, time, frequency, channels, channels), or "
+                "(batch, time, frequency, brain_region, channels, channels), "
+                f"got {tuple(x_log.shape)}."
             )
 
-            return torch.einsum("tf,btfmn->bmn", weights, x_log)
-
-        raise ValueError(
-            "Expected encoder output shape "
-            "(batch, time, channels, channels) or "
-            "(batch, time, frequency, channels, channels), "
-            f"got {tuple(x_log.shape)}."
-            )
+        token_shape = tuple(x_log.shape[1:-2])
+        logits = self._token_logits_for_shape(token_shape)
+        weights = torch.softmax(logits.reshape(-1), dim=0).reshape(token_shape)
+        view_shape = (1, *token_shape, 1, 1)
+        token_dims = tuple(range(1, x_log.ndim - 2))
+        return (x_log * weights.view(view_shape)).sum(dim=token_dims)
 
 
-    def _check_weight_shape(self, time_len: int, frequency_len: int) -> None:
+    def _token_logits_for_shape(self, token_shape: tuple[int, ...]) -> torch.Tensor:
         assert self.token_weight_logits is not None
-        if (
-                time_len > self.token_weight_logits.shape[0]
-                or frequency_len > self.token_weight_logits.shape[1]
-        ):
+        if not 1 <= len(token_shape) <= 3:
+            raise ValueError(
+                "Weighted MDM pooling supports time, time/frequency, or "
+                f"time/frequency/region tokens, got token shape {token_shape}."
+            )
+
+        max_shape = self.token_weight_logits.shape
+        if any(size > max_size for size, max_size in zip(token_shape, max_shape)):
             raise ValueError(
                 "Weighted MDM pooling was initialized for "
-                f"{tuple(self.token_weight_logits.shape)} time/frequency tokens, "
-                f"but encoder output has {(time_len, frequency_len)}."
+                f"{tuple(max_shape)} time/frequency/region tokens, "
+                f"but encoder output has {token_shape}."
             )
+
+        time_len = token_shape[0]
+        if len(token_shape) == 1:
+            return self.token_weight_logits[:time_len, 0, 0]
+        frequency_len = token_shape[1]
+        if len(token_shape) == 2:
+            return self.token_weight_logits[:time_len, :frequency_len, 0]
+        region_len = token_shape[2]
+        return self.token_weight_logits[:time_len, :frequency_len, :region_len]
 
     def _mdm_logits(self, pooled_log: torch.Tensor) -> torch.Tensor:
         return self.mdm_head(pooled_log)

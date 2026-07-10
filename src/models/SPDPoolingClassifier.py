@@ -29,6 +29,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             stage_transition: bool,
             time_sequence_length: int,
             frequency_sequence_length: int,
+            brain_region_sequence_length: int = 1,
             tau=1.0,
             ffn_hidden_spd_dim=None,
             metric: str = "log-euclidean",
@@ -74,6 +75,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             stage_transition=stage_transition,
             time_sequence_length=time_sequence_length,
             frequency_sequence_length=frequency_sequence_length,
+            brain_region_sequence_length=brain_region_sequence_length,
             tau=tau,
             ffn_hidden_spd_dim=ffn_hidden_spd_dim,
             metric=metric,
@@ -143,19 +145,25 @@ class SPDPoolingClassifier(SPDClassifierBase):
         """
         Average over time but keep frequency-band features separate.
 
-        For 5D input, this returns one tangent feature vector per frequency
-        band and concatenates them. For 4D input, it falls back to temporal
-        mean pooling.
+        For 5D/6D input, this returns one tangent feature vector per frequency
+        band and concatenates them. Region tokens are averaged inside each
+        frequency band. For 4D input, it falls back to temporal mean pooling.
         """
         if x_log.ndim == 4:
             pooled_log = x_log.mean(dim=1)
             return self.upper_triangular_vectorize(pooled_log)
 
+        if x_log.ndim == 6:
+            band_log = x_log.mean(dim=(1, 3))
+            band_features = self.upper_triangular_vectorize(band_log)
+            return band_features.reshape(band_features.shape[0], -1)
+
         if x_log.ndim != 5:
             raise ValueError(
                 "Expected encoder output shape "
                 "(batch, time, channels, channels) or "
-                "(batch, time, frequency, channels, channels), "
+                "(batch, time, frequency, channels, channels) or "
+                "(batch, time, frequency, brain_region, channels, channels), "
                 f"got {tuple(x_log.shape)}."
             )
 

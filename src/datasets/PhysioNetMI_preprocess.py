@@ -47,6 +47,77 @@ def normalize_float_dtype(dtype, default="float32"):
     )
 
 
+PHYSIONET_BRAIN_REGION_PRESETS = {
+    "motor_7": {
+        "left_motor": ["FC5", "FC3", "FC1", "C5", "C3", "C1", "CP3"],
+        "central_motor": ["FC1", "FCZ", "FC2", "C1", "CZ", "C2", "CPZ"],
+        "right_motor": ["FC2", "FC4", "FC6", "C2", "C4", "C6", "CP4"],
+    },
+}
+
+
+def normalize_brain_region_mode(mode):
+    if mode is None:
+        return None
+    normalized = str(mode).strip().lower().replace("-", "_")
+    if normalized in {"", "none", "null", "false", "off", "full"}:
+        return None
+    if normalized not in PHYSIONET_BRAIN_REGION_PRESETS:
+        valid = ", ".join(sorted(PHYSIONET_BRAIN_REGION_PRESETS))
+        raise ValueError(
+            f"Unknown brain_region_mode {mode!r}. Valid presets: {valid}."
+        )
+    return normalized
+
+
+def resolve_brain_region_indices(channel_names, mode):
+    mode = normalize_brain_region_mode(mode)
+    if mode is None:
+        return None, None
+
+    normalized_to_index = {
+        normalize_channel_name(channel_name): index
+        for index, channel_name in enumerate(channel_names)
+    }
+    regions = PHYSIONET_BRAIN_REGION_PRESETS[mode]
+    region_names = []
+    region_indices = []
+    region_size = None
+    for region_name, region_channels in regions.items():
+        normalized_channels = [
+            normalize_channel_name(channel)
+            for channel in region_channels
+        ]
+        missing = [
+            channel
+            for channel in normalized_channels
+            if channel not in normalized_to_index
+        ]
+        if missing:
+            available = ", ".join(sorted(normalized_to_index))
+            raise ValueError(
+                f"Brain region {region_name!r} needs missing channel(s): "
+                f"{', '.join(missing)}. Available channels: {available}"
+            )
+
+        indices = [normalized_to_index[channel] for channel in normalized_channels]
+        if len(set(indices)) != len(indices):
+            raise ValueError(f"Brain region {region_name!r} has duplicate channels.")
+        if region_size is None:
+            region_size = len(indices)
+        elif len(indices) != region_size:
+            raise ValueError(
+                "All brain regions must use the same number of channels to "
+                "stack SPD matrices. "
+                f"Expected {region_size}, got {len(indices)} for {region_name!r}."
+            )
+
+        region_names.append(region_name)
+        region_indices.append(indices)
+
+    return region_names, np.asarray(region_indices, dtype=np.int64)
+
+
 def bandpass_filter(X, sfreq=160.0, low_freq=8.0, high_freq=30.0, **kwargs):
     """
     X shape: (n_trials, n_channels, n_times).
@@ -950,7 +1021,7 @@ def load_subject(
             loaded_run_ids.append(run_id)
 
     if not X_all:
-        return None, None
+        return None, None, None
 
     X_all = np.asarray(X_all)
     y_all = np.asarray(y_all)
@@ -976,7 +1047,7 @@ def load_subject(
         y_all = y_all[autoreject_mask]
         artifact_epochs_all = artifact_epochs_all[autoreject_mask]
         if len(X_all) == 0:
-            return None, None
+            return None, None, None
 
     _, y_all, keep_mask = reject_bad_epochs(
         artifact_epochs_all,
@@ -996,7 +1067,7 @@ def load_subject(
         )
     X_all = X_all[keep_mask]
 
-    return X_all, y_all
+    return X_all, y_all, list(artifact_info["ch_names"])
 
 def build_dataset(
     root_dir,
@@ -1026,6 +1097,7 @@ def build_dataset(
     X_all = []
     y_all = []
     subject_labels = []
+    channel_names = None
 
     subject_dirs = sorted(Path(root_dir).glob("S*"))
     if subjects is not None:
@@ -1055,7 +1127,7 @@ def build_dataset(
 
     for subject_dir in subject_dirs:
 
-        X, y = load_subject(
+        X, y, ch_names = load_subject(
             subject_dir,
             tmin,
             tmax,
@@ -1084,6 +1156,13 @@ def build_dataset(
             continue
         X = np.array(X)
         y = np.array(y)
+        if channel_names is None:
+            channel_names = list(ch_names)
+        elif list(ch_names) != channel_names:
+            raise ValueError(
+                "Channel order changed across subjects. "
+                f"Expected {channel_names}, got {list(ch_names)} for {subject_dir}."
+            )
 
         X_all.append(X)
         y_all.append(y)
@@ -1111,6 +1190,7 @@ def build_dataset(
         "X": np.concatenate(X_all),
         "y": np.concatenate(y_all),
         "subject": np.array(subject_labels),
+        "ch_names": channel_names,
     }
 
 
@@ -1143,6 +1223,7 @@ def preprocess_spd(
     return_subjects=False,
     covariance_signal_scale=1e6,
     replace_covariance_diagonal_with_raw_energy=False,
+    brain_region_mode=None,
     output_dtype="float32",
 ):
     from pyriemann.estimation import Covariances
@@ -1156,10 +1237,14 @@ def preprocess_spd(
         default=False,
     )
     output_dtype = normalize_float_dtype(output_dtype, default="float32")
+    brain_region_mode = normalize_brain_region_mode(brain_region_mode)
 
     frequencies = []
     labels = None
     subject_labels = None
+    channel_names = None
+    brain_region_names = None
+    brain_region_indices = None
     baseline_correction = normalize_baseline_correction_mode(baseline_correction)
 
 
@@ -1190,6 +1275,23 @@ def preprocess_spd(
         )
         temp_x = dataset['X']   #[n_epochs, n_channels, n_samples_per_epoch]
         print(f"Band {filter}: raw-filtered epoch shape {temp_x.shape}")
+        if channel_names is None:
+            channel_names = list(dataset["ch_names"])
+            brain_region_names, brain_region_indices = resolve_brain_region_indices(
+                channel_names,
+                brain_region_mode,
+            )
+            if brain_region_indices is not None:
+                print(
+                    "Using brain-region SPD tokens: "
+                    f"mode={brain_region_mode}, regions={brain_region_names}, "
+                    f"region_size={brain_region_indices.shape[1]}"
+                )
+        elif list(dataset["ch_names"]) != channel_names:
+            raise RuntimeError(
+                "Channel order changed across frequency bands. "
+                "Check raw filtering and channel selection settings."
+            )
 
         if labels is None:
             labels = dataset['y']
@@ -1225,19 +1327,39 @@ def preprocess_spd(
         # floating-point magnitudes; trace normalization below removes this
         # global scale before the model sees the matrices.
         covariance_input = temp_x * float(covariance_signal_scale)
-        cov_x = Covariances(estimator=estimator).fit_transform(
-            covariance_input.reshape(
-                n_epochs * n_segments,
-                n_channels,
-                segment_samples,
+        if brain_region_indices is None:
+            cov_x = Covariances(estimator=estimator).fit_transform(
+                covariance_input.reshape(
+                    n_epochs * n_segments,
+                    n_channels,
+                    segment_samples,
+                )
             )
-        )
-        cov_x = cov_x.reshape(n_epochs, n_segments, n_channels, n_channels)
+            cov_x = cov_x.reshape(n_epochs, n_segments, n_channels, n_channels)
+            covariance_input_for_energy = covariance_input
+        else:
+            n_regions, region_size = brain_region_indices.shape
+            covariance_input = covariance_input[:, :, brain_region_indices, :]
+            cov_x = Covariances(estimator=estimator).fit_transform(
+                covariance_input.reshape(
+                    n_epochs * n_segments * n_regions,
+                    region_size,
+                    segment_samples,
+                )
+            )
+            cov_x = cov_x.reshape(
+                n_epochs,
+                n_segments,
+                n_regions,
+                region_size,
+                region_size,
+            )
+            covariance_input_for_energy = covariance_input
 
         if replace_covariance_diagonal_with_raw_energy:
             cov_x = replace_covariance_diagonal_with_segment_energy(
                 cov_x,
-                covariance_input,
+                covariance_input_for_energy,
             )
             print(
                 "Replaced covariance diagonal with per-channel segment raw "
@@ -1287,7 +1409,9 @@ def preprocess_spd(
     # 6. Encode labels
     y, class_names = encode_labels(labels)
 
-    # Output shape: (n_trials, segment, frequency, n_channels, n_channels)
+    # Output shape:
+    #   full-channel mode: (n_trials, segment, frequency, channels, channels)
+    #   brain-region mode: (n_trials, segment, frequency, region, channels, channels)
     X_spd = np.stack(frequencies, axis=2)
 
     if return_subjects:

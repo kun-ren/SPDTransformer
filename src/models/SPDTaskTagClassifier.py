@@ -28,6 +28,7 @@ class SPDTaskTagClassifier(nn.Module):
             stage_transition: bool,
             time_sequence_length: int,
             frequency_sequence_length: int,
+            brain_region_sequence_length: int = 1,
             tau=1.0,
             ffn_hidden_spd_dim=None,
             metric: str = "log-euclidean",
@@ -66,6 +67,7 @@ class SPDTaskTagClassifier(nn.Module):
             stage_transition=stage_transition,
             time_sequence_length=time_sequence_length + 1,
             frequency_sequence_length=frequency_sequence_length,
+            brain_region_sequence_length=brain_region_sequence_length,
             tau=tau,
             depth=depth,
             ffn_hidden_spd_dim=ffn_hidden_spd_dim,
@@ -91,7 +93,7 @@ class SPDTaskTagClassifier(nn.Module):
 
         if pooling == "weighted":
             self.task_frequency_weight_logits = nn.Parameter(
-                torch.zeros(frequency_sequence_length)
+                torch.zeros(frequency_sequence_length, brain_region_sequence_length)
             )
         else:
             self.register_parameter("task_frequency_weight_logits", None)
@@ -130,10 +132,11 @@ class SPDTaskTagClassifier(nn.Module):
         return logits, aux
 
     def _prepend_task_token(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim not in {4, 5}:
+        if x.ndim not in {4, 5, 6}:
             raise ValueError(
                 "Expected input shape (batch, time, channels, channels) or "
-                "(batch, time, frequency_bands, channels, channels), "
+                "(batch, time, frequency, channels, channels) or "
+                "(batch, time, frequency, brain_region, channels, channels), "
                 f"got {tuple(x.shape)}."
             )
 
@@ -152,7 +155,7 @@ class SPDTaskTagClassifier(nn.Module):
             batch_size = x.shape[0]
             task_token = task_token.reshape(1, 1, self.spd_in_dim, self.spd_in_dim)
             task_token = task_token.expand(batch_size, 1, -1, -1)
-        else:
+        elif x.ndim == 5:
             batch_size, _, n_bands = x.shape[:3]
             task_token = task_token.reshape(
                 1,
@@ -162,6 +165,24 @@ class SPDTaskTagClassifier(nn.Module):
                 self.spd_in_dim,
             )
             task_token = task_token.expand(batch_size, 1, n_bands, -1, -1)
+        else:
+            batch_size, _, n_bands, n_regions = x.shape[:4]
+            task_token = task_token.reshape(
+                1,
+                1,
+                1,
+                1,
+                self.spd_in_dim,
+                self.spd_in_dim,
+            )
+            task_token = task_token.expand(
+                batch_size,
+                1,
+                n_bands,
+                n_regions,
+                -1,
+                -1,
+            )
 
         return torch.cat([task_token, x], dim=1)
 
@@ -175,10 +196,17 @@ class SPDTaskTagClassifier(nn.Module):
                 return task_tokens.mean(dim=1)
             return self._weighted_pool_task_tokens(task_tokens)
 
+        if x_log.ndim == 6:
+            task_tokens = x_log[:, 0]
+            if self.pooling == "mean":
+                return task_tokens.mean(dim=(1, 2))
+            return self._weighted_pool_task_tokens(task_tokens)
+
         raise ValueError(
             "Expected encoder log output shape "
             "(batch, time, channels, channels) or "
-            "(batch, time, frequency, channels, channels), "
+            "(batch, time, frequency, channels, channels) or "
+            "(batch, time, frequency, brain_region, channels, channels), "
             f"got {tuple(x_log.shape)}."
         )
 
@@ -188,14 +216,35 @@ class SPDTaskTagClassifier(nn.Module):
                 "task_frequency_weight_logits is only defined for weighted pooling."
             )
 
-        frequency_len = task_tokens.shape[1]
-        if frequency_len > self.task_frequency_weight_logits.shape[0]:
+        if task_tokens.ndim not in {4, 5}:
             raise ValueError(
-                "Weighted task pooling was initialized for "
-                f"{self.task_frequency_weight_logits.shape[0]} frequency tokens, "
-                f"but encoder output has {frequency_len}."
+                "Expected task token shape "
+                "(batch, frequency, channels, channels) or "
+                "(batch, frequency, brain_region, channels, channels), "
+                f"got {tuple(task_tokens.shape)}."
             )
 
-        logits = self.task_frequency_weight_logits[:frequency_len]
-        weights = torch.softmax(logits, dim=0)
-        return torch.einsum("f,bfmn->bmn", weights, task_tokens)
+        frequency_len = task_tokens.shape[1]
+        region_len = task_tokens.shape[2] if task_tokens.ndim == 5 else 1
+        if (
+                frequency_len > self.task_frequency_weight_logits.shape[0]
+                or region_len > self.task_frequency_weight_logits.shape[1]
+        ):
+            raise ValueError(
+                "Weighted task pooling was initialized for "
+                f"{tuple(self.task_frequency_weight_logits.shape)} "
+                "frequency/region tokens, "
+                f"but encoder output has {(frequency_len, region_len)}."
+            )
+
+        if task_tokens.ndim == 4:
+            logits = self.task_frequency_weight_logits[:frequency_len, 0]
+            weights = torch.softmax(logits, dim=0)
+            return torch.einsum("f,bfmn->bmn", weights, task_tokens)
+
+        logits = self.task_frequency_weight_logits[:frequency_len, :region_len]
+        weights = torch.softmax(logits.reshape(-1), dim=0).reshape(
+            frequency_len,
+            region_len,
+        )
+        return torch.einsum("fr,bfrmn->bmn", weights, task_tokens)

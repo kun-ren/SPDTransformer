@@ -424,6 +424,7 @@ def build_model(
         num_classes: int,
         time_sequence_length,
         frequency_sequence_length,
+        brain_region_sequence_length=1,
 ) -> SPDTransformerClassifier:
     depth = int(model_cfg.get("depth", 1))
     attention_dim = parse_attention_dims(
@@ -437,6 +438,7 @@ def build_model(
         stage_transition=bool(model_cfg.get("stage_transition", True)),
         time_sequence_length=time_sequence_length,
         frequency_sequence_length=frequency_sequence_length,
+        brain_region_sequence_length=brain_region_sequence_length,
         tau=model_cfg.get("tau", 1.0),
         num_classes=num_classes,
         ffn_hidden_spd_dim=model_cfg.get("ffn_hidden_spd_dim", None),
@@ -950,13 +952,15 @@ def train_experiment(
         ),
     )
 
-    time_sequence_length = x.shape[-4]
-    frequency_sequence_length = x.shape[-3]
+    time_sequence_length = x.shape[1]
+    frequency_sequence_length = x.shape[2] if x.ndim >= 5 else 1
+    brain_region_sequence_length = x.shape[3] if x.ndim >= 6 else 1
     model = build_model(
         model_cfg=model_cfg,
         spd_in_dim=x.shape[-1],
         time_sequence_length=time_sequence_length,
         frequency_sequence_length=frequency_sequence_length,
+        brain_region_sequence_length=brain_region_sequence_length,
         num_classes=len(class_names),
     ).to(device=device, dtype=dtype)
 
@@ -1264,6 +1268,7 @@ def preprocess_dataset(
                 data_cfg.get("replace_covariance_diagonal_with_raw_energy", False),
                 default=False,
             ),
+            brain_region_mode=data_cfg.get("brain_region_mode"),
             output_dtype=data_cfg.get("covariance_output_dtype", "float32"),
         )
     elif dataset_name == "bnci2014_001":

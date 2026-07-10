@@ -24,6 +24,7 @@ class SPDEncoder(nn.Module):
             attention_dim,
             time_sequence_length,
             frequency_sequence_length,
+            brain_region_sequence_length=1,
             tau=1.0,
             ffn_hidden_spd_dim=None,
             stage_transition=True,
@@ -145,6 +146,45 @@ class SPDEncoder(nn.Module):
             position_axis=2,
         )
 
+        self.region_attention = SingleHeadAttention(
+            spd_out_dim,
+            attention_dim,
+            self.metric,
+            attention_dropout=attention_dropout,
+            stage_transition=self.stage_transition,
+            debug_attention_dropout=debug_attention_dropout,
+            learnable_metric_mode=learnable_metric_mode,
+            learnable_metric_rank=learnable_metric_rank,
+            eps=eps,
+            use_position=use_position_bias,
+            max_position=brain_region_sequence_length,
+            debug_tensor_stats=debug_tensor_stats,
+        )
+        self.region_add_norm1 = _make_add_norm(
+            add_norm_type,
+            spd_out_dim,
+            sequence_length=brain_region_sequence_length,
+            tau=tau,
+            eps=eps,
+            affine=layer_norm_affine,
+            position_axis=3,
+        )
+        self.region_ffn = SPDFeedForward(
+            spd_out_dim,
+            hidden_spd_dim=ffn_hidden_spd_dim,
+            dropout=dropout,
+            eps=eps
+        )
+        self.region_add_norm2 = _make_add_norm(
+            add_norm_type,
+            spd_out_dim,
+            sequence_length=brain_region_sequence_length,
+            tau=tau,
+            eps=eps,
+            affine=layer_norm_affine,
+            position_axis=3,
+        )
+
         self.attention = self.time_attention
 
     @staticmethod
@@ -192,10 +232,11 @@ class SPDEncoder(nn.Module):
             return_log: bool = False,
             return_aux: bool = True,
     ):
-        if x.ndim not in {4, 5}:
+        if x.ndim not in {4, 5, 6}:
             raise ValueError(
                 "Expected input shape (batch, time, channels, channels) or "
-                "(batch, time, frequency_bands, channels, channels), "
+                "(batch, time, frequency, channels, channels) or "
+                "(batch, time, frequency, brain_region, channels, channels), "
                 f"got {tuple(x.shape)}."
             )
         all_aux: dict[str, torch.Tensor] = {}
@@ -221,7 +262,7 @@ class SPDEncoder(nn.Module):
 
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
 
-        if attention_input.ndim == 5 and attention_input.shape[-3] > 1:
+        if attention_input.ndim >= 5 and attention_input.shape[2] > 1:
             x_spd = torch.matrix_exp(_symmetrize(x_log))
             frequency_output_log, aux = self._apply_attention_along_axis(
                 self.frequency_attention,
@@ -237,6 +278,22 @@ class SPDEncoder(nn.Module):
             x_log = self.frequency_add_norm1(x_log, frequency_output_log)
 
             x_log = self.frequency_add_norm2(x_log, self.frequency_ffn(x_log))
+
+        if attention_input.ndim == 6 and attention_input.shape[3] > 1:
+            x_spd = torch.matrix_exp(_symmetrize(x_log))
+            region_output_log, aux = self._apply_attention_along_axis(
+                self.region_attention,
+                x_spd,
+                axis=3,
+                return_aux=return_aux,
+            )
+            if return_aux:
+                all_aux.update(
+                    {f"axis_3_head_0_{name}": param for name, param in aux.items()}
+                )
+
+            x_log = self.region_add_norm1(x_log, region_output_log)
+            x_log = self.region_add_norm2(x_log, self.region_ffn(x_log))
 
         x_log = _symmetrize(x_log)
         if return_log:
@@ -258,6 +315,7 @@ class SPDTransformer(nn.Module):
             time_sequence_length,
             stage_transition: True,
             frequency_sequence_length,
+            brain_region_sequence_length=1,
             tau=1.0,
             depth: int = 1,
             ffn_hidden_spd_dim=None,
@@ -295,6 +353,7 @@ class SPDTransformer(nn.Module):
                 stage_transition=self.stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
+                brain_region_sequence_length=brain_region_sequence_length,
                 tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
                 metric=metric,
@@ -319,6 +378,7 @@ class SPDTransformer(nn.Module):
                 stage_transition=self.stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
+                brain_region_sequence_length=brain_region_sequence_length,
                 tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
                 metric=metric,
