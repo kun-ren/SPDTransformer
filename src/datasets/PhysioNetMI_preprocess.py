@@ -48,6 +48,16 @@ def normalize_float_dtype(dtype, default="float32"):
 
 
 PHYSIONET_BRAIN_REGION_PRESETS = {
+    "physionet_8x8": {
+        "prefrontal": ["FP1", "FPZ", "FP2", "AF7", "AF3", "AFZ", "AF4", "AF8"],
+        "left_frontal": ["F7", "F5", "F3", "F1", "FC5", "FC3", "FC1", "FT7"],
+        "right_frontal": ["F2", "F4", "F6", "F8", "FC2", "FC4", "FC6", "FT8"],
+        "midline": ["FZ", "FCZ", "CZ", "CPZ", "PZ", "POZ", "OZ", "IZ"],
+        "left_central_temporal": ["C5", "C3", "C1", "T7", "T9", "TP7", "CP5", "CP3"],
+        "right_central_temporal": ["C2", "C4", "C6", "T8", "T10", "TP8", "CP2", "CP4"],
+        "left_parietal_occipital": ["CP1", "P7", "P5", "P3", "P1", "PO7", "PO3", "O1"],
+        "right_parietal_occipital": ["CP6", "P2", "P4", "P6", "P8", "PO4", "PO8", "O2"],
+    },
     "motor_7": {
         "left_motor": ["FC5", "FC3", "FC1", "C5", "C3", "C1", "CP3"],
         "central_motor": ["FC1", "FCZ", "FC2", "C1", "CZ", "C2", "CPZ"],
@@ -83,6 +93,7 @@ def resolve_brain_region_indices(channel_names, mode):
     region_names = []
     region_indices = []
     region_size = None
+    seen_channels = set()
     for region_name, region_channels in regions.items():
         normalized_channels = [
             normalize_channel_name(channel)
@@ -103,6 +114,13 @@ def resolve_brain_region_indices(channel_names, mode):
         indices = [normalized_to_index[channel] for channel in normalized_channels]
         if len(set(indices)) != len(indices):
             raise ValueError(f"Brain region {region_name!r} has duplicate channels.")
+        duplicate_channels = seen_channels & set(normalized_channels)
+        if duplicate_channels:
+            raise ValueError(
+                f"Brain region preset {mode!r} assigns channel(s) to more "
+                f"than one region: {', '.join(sorted(duplicate_channels))}."
+            )
+        seen_channels.update(normalized_channels)
         if region_size is None:
             region_size = len(indices)
         elif len(indices) != region_size:
