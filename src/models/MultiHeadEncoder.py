@@ -283,7 +283,7 @@ class SPDMultiHeadEncoder(nn.Module):
             inverse_perm = [0] * len(perm)
             for new_axis, old_axis in enumerate(perm):
                 inverse_perm[old_axis] = new_axis
-            y_log = y_log.permute(inverse_perm)
+            y_log = y_log.permute(inverse_perm).contiguous()
 
         return y_log, all_aux
 
@@ -323,7 +323,7 @@ class SPDMultiHeadEncoder(nn.Module):
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
 
         if x.ndim == 5 and x.shape[-3] > 1:
-            x_spd = torch.matrix_exp(_symmetrize(x_log))
+            x_spd = torch.matrix_exp(_symmetrize(x_log).contiguous())
 
             frequency_output_log, aux = self._apply_attention_along_axis(
                 self.frequency_attention,
@@ -342,6 +342,6 @@ class SPDMultiHeadEncoder(nn.Module):
         if return_log:
             return x_log, all_aux
 
-        x_spd = torch.matrix_exp(x_log)
+        x_spd = torch.matrix_exp(x_log.contiguous())
 
         return x_spd, all_aux

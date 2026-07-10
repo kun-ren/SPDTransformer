@@ -186,7 +186,7 @@ class SPDEncoder(nn.Module):
             inverse_perm = [0] * len(perm)
             for new_axis, old_axis in enumerate(perm):
                 inverse_perm[old_axis] = new_axis
-            y_log = y_log.permute(inverse_perm)
+            y_log = y_log.permute(inverse_perm).contiguous()
 
         return y_log, aux
 
@@ -227,7 +227,7 @@ class SPDEncoder(nn.Module):
         x_log = time_output_log
 
         if attention_input.ndim == 5 and attention_input.shape[-3] > 1:
-            x_spd = torch.matrix_exp(_symmetrize(x_log))
+            x_spd = torch.matrix_exp(_symmetrize(x_log).contiguous())
             x_spd = self.norm(x_spd)
             frequency_output_log, aux = self._apply_attention_along_axis(
                 self.frequency_attention,
@@ -249,7 +249,7 @@ class SPDEncoder(nn.Module):
         if return_log:
             return x_log, all_aux
 
-        x_spd = torch.matrix_exp(x_log)
+        x_spd = torch.matrix_exp(x_log.contiguous())
 
         return _symmetrize(x_spd), all_aux
 
