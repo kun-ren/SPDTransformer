@@ -11,7 +11,7 @@ data:
   sfreq: [160]
   eps: [1.0e-6]
   covariance_signal_scale: ["auto"]
-  replace_covariance_diagonal_with_raw_energy: [false]
+  replace_covariance_diagonal_with_raw_energy: [true]
   subjects: 1-87,89-109
   # BCI Competition IV-2a / MOABB BNCI2014_001 example:
   # dataset: ["bnci2014_001"]
