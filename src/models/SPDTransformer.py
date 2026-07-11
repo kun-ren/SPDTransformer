@@ -43,6 +43,7 @@ class SPDEncoder(nn.Module):
             add_norm_type: AddNormType = "trace",
     ):
         super().__init__()
+        print("init single head encoder")
         print(f"input_dim: {spd_in_dim}, attention_dim: {attention_dim}")
         self.metric = metric
         self.spd_in_dim = spd_in_dim
