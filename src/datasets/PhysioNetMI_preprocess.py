@@ -361,6 +361,46 @@ def trace_normalize(covs, eps=1e-10):
     return covs * n_channels / traces[..., None, None]
 
 
+def batch_spd_diagonal_mean_normalize(covs, eps=1e-10):
+    """
+    Normalize each batch sample by the mean diagonal value of all its SPD matrices.
+
+    For input shape (batch, ..., channels, channels), all diagonal entries from
+    the non-batch SPD matrices are pooled per batch sample. The output is scaled
+    so each sample has diagonal sum channels * num_matrices, i.e. average
+    diagonal value 1.
+    """
+    covs = np.asarray(covs)
+    if covs.ndim < 3:
+        raise ValueError(
+            "Expected SPD array with shape (batch, ..., channels, channels), "
+            f"got {covs.shape}."
+        )
+
+    n_channels = covs.shape[-1]
+    if covs.shape[-2] != n_channels:
+        raise ValueError(
+            "The last two dimensions must be a square SPD matrix, "
+            f"got {covs.shape[-2:]}."
+        )
+
+    matrix_axes = tuple(range(1, covs.ndim - 2))
+    num_matrices = int(np.prod(covs.shape[1:-2], dtype=np.int64))
+    if num_matrices < 1:
+        raise ValueError(
+            "Expected at least one SPD matrix per batch sample, "
+            f"got shape {covs.shape}."
+        )
+
+    diagonals = np.diagonal(covs, axis1=-2, axis2=-1)
+    diagonal_sum = diagonals.sum(axis=matrix_axes + (-1,))
+    diagonal_sum = np.maximum(diagonal_sum, eps)
+    target_sum = float(n_channels * num_matrices)
+    scale = target_sum / diagonal_sum
+
+    return covs * scale.reshape((covs.shape[0],) + (1,) * (covs.ndim - 1))
+
+
 def regularize_spd(covs, eps=1e-10):
     n_channels = covs.shape[-1]
     eye = np.eye(n_channels, dtype=covs.dtype)
@@ -1395,7 +1435,8 @@ def preprocess_spd(
         print("eig max:", eigvals.max())
         print("cond p99:", np.percentile(eigvals[..., -1] / np.maximum(eigvals[..., 0], eps), 99))
 
-        # cov_x = trace_normalize(cov_x, eps=eps)
+        #cov_x = trace_normalize(cov_x, eps=eps)
+        cov_x = batch_spd_diagonal_mean_normalize(cov_x, eps=eps)
 
         print(f"norm matrix min: {np.min(np.abs(cov_x))}")
         print(f"norm matrix max: {np.max(cov_x)}")
