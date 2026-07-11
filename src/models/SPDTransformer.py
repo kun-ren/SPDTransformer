@@ -14,7 +14,6 @@ from src.models.SPDAttention import (
     SingleHeadAttention,
     spd_log,
 )
-from src.models.SPDDiagonalMeanNormalize import SPDDiagonalMeanNormalize
 from src.models.SPDFeedForward import SPDFeedForward
 
 
@@ -189,8 +188,6 @@ class SPDEncoder(nn.Module):
 
         self.attention = self.time_attention
 
-        self.norm = SPDDiagonalMeanNormalize(eps=eps)
-
 
     @staticmethod
     def _apply_attention_along_axis(
@@ -263,14 +260,11 @@ class SPDEncoder(nn.Module):
             all_aux.update(
                 {f"axis_1_head_0_{name}": param for name, param in aux.items()}
             )
-        #x_log = self.time_add_norm1(residual_log, time_output_log)
-
-        #x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
-        x_log = time_output_log
+        x_log = self.time_add_norm1(residual_log, time_output_log)
+        x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
 
         if attention_input.ndim >= 5 and attention_input.shape[2] > 1:
             x_spd = torch.matrix_exp(_symmetrize(x_log).contiguous())
-            x_spd = self.norm(x_spd)
             frequency_output_log, aux = self._apply_attention_along_axis(
                 self.frequency_attention,
                 x_spd,
@@ -282,10 +276,8 @@ class SPDEncoder(nn.Module):
                     {f"axis_2_head_0_{name}": param for name, param in aux.items()}
                 )
 
-            #x_log = self.frequency_add_norm1(x_log, frequency_output_log)
-
-            #x_log = self.frequency_add_norm2(x_log, self.frequency_ffn(x_log))
-            x_log = frequency_output_log
+            x_log = self.frequency_add_norm1(x_log, frequency_output_log)
+            x_log = self.frequency_add_norm2(x_log, self.frequency_ffn(x_log))
 
         if attention_input.ndim == 6 and attention_input.shape[3] > 1:
             x_spd = torch.matrix_exp(_symmetrize(x_log))
