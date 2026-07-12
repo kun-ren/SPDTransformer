@@ -90,6 +90,7 @@ class SPDMultiHeadEncoder(nn.Module):
         super().__init__()
         if num_heads < 1:
             raise ValueError(f"num_heads must be >= 1, got {num_heads}.")
+        print("init multi head encoder")
 
         print(f"input_dim: {spd_in_dim}, attention_dim: {attention_dim}, heads={num_heads}")
         self.metric = metric

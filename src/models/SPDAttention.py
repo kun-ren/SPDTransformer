@@ -177,7 +177,7 @@ class PositionBias(nn.Module):
 
         self.max_position = max_position
         self.relative_bias = nn.Parameter(
-            torch.zeros(2 * self.max_position - 1)
+            torch.ones(2 * self.max_position - 1)
         )
 
     def forward(self, attention_scope: int) -> torch.Tensor:

@@ -51,7 +51,7 @@ class TraceAddNorm(nn.Module):
             self.affine_weight_raw = nn.Parameter(
                 torch.full((sequence_length,), inverse_softplus_one.item())
             )
-            self.affine_bias = nn.Parameter(torch.zeros(sequence_length))
+            self.affine_bias = nn.Parameter(torch.ones(sequence_length))
         else:
             self.register_parameter("affine_weight_raw", None)
             self.register_parameter("affine_bias", None)
