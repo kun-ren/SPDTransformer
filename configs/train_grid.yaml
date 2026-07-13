@@ -60,7 +60,7 @@ model:
   classifier_type: ["mdm"]
   pooling: ["weighted"]
   dropout: [0.2]
-  attention_dropout: [0.2]   #   fix to 0.0 or 0.1
+  attention_dropout: [0]   #   fix to 0.0 or 0.1
   use_position_bias: [false] # false slightly better than true in low-rank
   layer_norm_affine: [false] # shou
   learnable_metric_mode: ["low-rank"]
