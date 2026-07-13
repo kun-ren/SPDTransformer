@@ -7,7 +7,9 @@ from src.models.GeooptBiMap import GeooptBiMap
 from src.models.SPDAttention import SingleHeadAttention, spd_log
 from src.models.SPDFeedForward import SPDFeedForward
 from src.models.LogResidualAdd import LogResidualAdd
+from src.models.ScaleShapeSequenceAddNorm import ScaleShapeSequenceAddNorm
 from src.models.SequenceAddNorm import SequenceAddNorm
+from src.models.SharedTraceAddNorm import SharedTraceAddNorm
 from src.models.TraceAddNorm import TraceAddNorm
 
 
@@ -15,7 +17,18 @@ def _symmetrize(x: torch.Tensor) -> torch.Tensor:
     return 0.5 * (x + x.transpose(-1, -2))
 
 
-AddNormType = Literal["trace", "trace_add_norm", "log_residual", "log_residual_add", "sequence_add_norm", "none"]
+AddNormType = Literal[
+    "trace",
+    "trace_add_norm",
+    "shared_trace",
+    "shared_trace_add_norm",
+    "scale_shape_sequence",
+    "scale_shape_sequence_add_norm",
+    "log_residual",
+    "log_residual_add",
+    "sequence_add_norm",
+    "none",
+]
 
 
 def _make_add_norm(
@@ -30,6 +43,27 @@ def _make_add_norm(
     normalized = str(add_norm_type).strip().lower().replace("-", "_")
     if normalized in {"trace", "trace_add_norm"}:
         return TraceAddNorm(
+            spd_dim,
+            sequence_length=sequence_length,
+            tau=tau,
+            eps=eps,
+            affine=affine,
+            position_axis=position_axis,
+        )
+    if normalized in {"shared_trace", "shared_trace_add_norm"}:
+        return SharedTraceAddNorm(
+            spd_dim,
+            sequence_length=sequence_length,
+            tau=tau,
+            eps=eps,
+            affine=affine,
+            position_axis=position_axis,
+        )
+    if normalized in {
+            "scale_shape_sequence",
+            "scale_shape_sequence_add_norm",
+    }:
+        return ScaleShapeSequenceAddNorm(
             spd_dim,
             sequence_length=sequence_length,
             tau=tau,
@@ -56,7 +90,8 @@ def _make_add_norm(
             position_axis=position_axis,
         )
     raise ValueError(
-        "add_norm_type must be 'trace' or 'log_residual', "
+        "add_norm_type must be 'trace', 'shared_trace', "
+        "'scale_shape_sequence', 'sequence_add_norm', or 'log_residual', "
         f"got {add_norm_type!r}."
     )
 

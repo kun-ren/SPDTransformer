@@ -445,7 +445,7 @@ def build_model(
         metric=str(model_cfg.get("metric", "log-euclidean")),
         depth=depth,
         classifier_type=str(model_cfg.get("classifier_type", "pooling")),
-        pooling=str(model_cfg.get("pooling", "attention")),
+        pooling=str(model_cfg.get("pooling", "weighted")),
         dropout=float(model_cfg.get("dropout", 0.0)),
         attention_dropout=float(model_cfg.get("attention_dropout", 0.0)),
         debug_attention_dropout=bool(model_cfg.get("debug_attention_dropout", False)),

@@ -9,12 +9,15 @@ from src.models.SPDTaskTagClassifier import SPDTaskTagClassifier
 
 
 ClassifierType = Literal["pooling", "task", "mdm"]
+
+
 class SPDTransformerClassifier(nn.Module):
     """
     Selects the trial-level classifier style.
 
     classifier_type="pooling":
-        no task tag; use mean or attention pooling over encoder tokens.
+        no task tag; use mean or learned positional weighted pooling over
+        encoder tokens, then classify tangent-space features with a linear head.
 
     classifier_type="task":
         insert SPD [TASK] token; classify encoded task-token output with MDM.
@@ -39,7 +42,7 @@ class SPDTransformerClassifier(nn.Module):
             metric: str = "log-euclidean",
             depth: int = 1,
             classifier_type: ClassifierType = "pooling",
-            pooling: str = "attention",
+            pooling: str = "weighted",
             dropout: float = 0.0,
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
@@ -58,9 +61,6 @@ class SPDTransformerClassifier(nn.Module):
         if pooling == "task":
             classifier_type = "task"
             pooling = "mean"
-        elif classifier_type == "task" and pooling == "attention":
-            pooling = "mean"
-
         if classifier_type not in {"pooling", "task", "mdm"}:
             raise ValueError(
                 "classifier_type must be 'pooling', 'task', or 'mdm', "

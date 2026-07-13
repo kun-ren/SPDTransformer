@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" promptOnRemoteOverwrite="CHECK_CONTENT" serverName="kunren@131.130.69.228:22 password" overwriteAll="false" deleteMissingItems="true" confirmBeforeDeletion="false">
+  <component name="PublishConfigData" autoUpload="Always" promptOnRemoteOverwrite="CHECK_CONTENT" serverName="kunren@131.130.69.228:22 password" overwriteAll="false" deleteMissingItems="true" confirmBeforeDeletion="false" showNewOnSourceInSync="false">
     <option name="confirmBeforeDeletion" value="false" />
     <serverData>
       <paths name="kunren@131.130.69.228:22 password">

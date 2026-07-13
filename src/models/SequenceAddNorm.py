@@ -81,40 +81,59 @@ class SequenceAddNorm(nn.Module):
         output_log = self._apply_log_domain_affine(output_log_norm)
         return output_log
 
-    def _canonical_position_axis(self, output_log: torch.Tensor) -> int:
-        position_axis = self.position_axis
-        if position_axis < 0:
-            position_axis += output_log.ndim
-        if not 0 <= position_axis < output_log.ndim - 2:
-            raise ValueError(
-                "position_axis must refer to a non-SPD tensor dimension, "
-                f"got position_axis={self.position_axis} for shape "
-                f"{tuple(output_log.shape)}."
-            )
-        return position_axis
-
     def _apply_log_domain_affine(self, output_log: torch.Tensor) -> torch.Tensor:
         if not self.affine:
             return output_log
 
         position_axis = self._canonical_position_axis(output_log)
-
-        current_length = output_log.shape[position_axis]
-        if current_length > self.sequence_length:
+        position_length = output_log.shape[position_axis]
+        if position_length > self.sequence_length:
             raise ValueError(
-                f"Input position length {current_length} exceeds configured "
+                f"Input position length {position_length} exceeds configured "
                 f"sequence_length {self.sequence_length}."
             )
 
-        view_shape = [1] * output_log.ndim
-        view_shape[position_axis] = current_length
+        gamma = F.softplus(
+            self.affine_weight_raw[:position_length]
+        )
+        beta = self.affine_bias[:position_length]
 
-        gamma = F.softplus(self.affine_weight_raw[:current_length]).view(view_shape)
-        beta = self.affine_bias[:current_length].view(view_shape)
+        # For [B, T, F, R, C, C], axis-specific parameter views are:
+        # time [1, T, 1, 1, 1, 1], frequency [1, 1, F, 1, 1, 1],
+        # and brain region [1, 1, 1, R, 1, 1].
+        parameter_shape = [1] * output_log.ndim
+        parameter_shape[position_axis] = position_length
+        gamma = gamma.reshape(parameter_shape)
+        beta = beta.reshape(parameter_shape)
 
-        eye = torch.eye(
+        identity = torch.eye(
             output_log.shape[-1],
             device=output_log.device,
             dtype=output_log.dtype,
         )
-        return gamma * output_log + beta * eye
+        return gamma * output_log + beta * identity
+
+    def _canonical_position_axis(self, output_log: torch.Tensor) -> int:
+        if output_log.ndim < 3:
+            raise ValueError(
+                "output_log must have at least one leading position dimension "
+                "followed by two SPD matrix dimensions, "
+                f"got shape {tuple(output_log.shape)}."
+            )
+
+        if output_log.shape[-2:] != (self.spd_in_dim, self.spd_in_dim):
+            raise ValueError(
+                f"Expected trailing SPD shape ({self.spd_in_dim}, "
+                f"{self.spd_in_dim}), got {tuple(output_log.shape[-2:])}."
+            )
+
+        position_axis = self.position_axis
+        if position_axis < 0:
+            position_axis += output_log.ndim
+        if not 0 <= position_axis < output_log.ndim - 2:
+            raise ValueError(
+                "position_axis must refer to a dimension before the two SPD "
+                f"matrix dimensions, got position_axis={self.position_axis} "
+                f"for shape {tuple(output_log.shape)}."
+            )
+        return position_axis

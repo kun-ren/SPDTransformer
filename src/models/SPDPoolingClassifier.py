@@ -1,4 +1,4 @@
-from typing import Tuple, Any, Literal
+from typing import Any, Literal
 
 import torch
 from torch import nn
@@ -6,7 +6,9 @@ from torch import nn
 from src.models.SPDClassifierBase import SPDClassifierBase
 from src.models.SPDTransformer import SPDTransformer
 
-SPDPoolingMode = Literal["mean", "band_mean", "attention"]
+SPDPoolingMode = Literal["mean", "weighted"]
+
+
 class SPDPoolingClassifier(SPDClassifierBase):
     """
     Classifier that pools all SPD tokens after the SPDTransformer encoder.
@@ -14,10 +16,15 @@ class SPDPoolingClassifier(SPDClassifierBase):
     Input:
         4D: (batch, time, channels, channels)
         5D: (batch, time, frequency_bands, channels, channels)
+        6D: (batch, time, frequency_bands, brain_regions, channels, channels)
 
     Classification:
-        encoder -> log map -> mean/attention pooling over all tokens
+        encoder -> log map -> mean/weighted pooling over all tokens
         -> upper triangular vector -> linear classifier
+
+    Weighted pooling learns one sample-independent scalar for each
+    time/frequency/region position. Softmax-normalized weights are shared by
+    all samples and all entries of the SPD matrix at that position.
     """
 
     def __init__(
@@ -34,7 +41,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             ffn_hidden_spd_dim=None,
             metric: str = "log-euclidean",
             depth: int = 1,
-            pooling: SPDPoolingMode = "attention",
+            pooling: SPDPoolingMode = "weighted",
             dropout: float = 0.0,
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
@@ -49,11 +56,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             add_norm_type: str = "trace",
     ):
         super().__init__()
-        if pooling not in {"mean", "band_mean", "attention"}:
-            raise ValueError(
-                "SPDPoolingClassifier pooling must be 'mean', "
-                f"'band_mean', or 'attention', got {pooling!r}."
-            )
+        pooling = self._normalize_pooling(pooling)
 
         self.attention_dim = attention_dim
         self.num_classes = num_classes
@@ -61,11 +64,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
         self.debug_tensor_stats = debug_tensor_stats
         self.transformer_out_dim = attention_dim[-1] if stage_transition else spd_in_dim
         self.feature_dim = self.transformer_out_dim * (self.transformer_out_dim + 1) // 2
-        self.classifier_feature_dim = (
-            self.feature_dim * frequency_sequence_length
-            if pooling == "band_mean"
-            else self.feature_dim
-        )
+        self.classifier_feature_dim = self.feature_dim
 
         self.encoder = SPDTransformer(
             num_heads=num_heads,
@@ -93,13 +92,16 @@ class SPDPoolingClassifier(SPDClassifierBase):
             add_norm_type=add_norm_type,
         )
 
-        if pooling == "attention":
-            self.pool_score = nn.Sequential(
-                nn.LayerNorm(self.feature_dim),
-                nn.Linear(self.feature_dim, 1),
+        if pooling == "weighted":
+            self.token_weight_logits = nn.Parameter(
+                torch.zeros(
+                    time_sequence_length,
+                    frequency_sequence_length,
+                    brain_region_sequence_length,
+                )
             )
         else:
-            self.pool_score = None
+            self.register_parameter("token_weight_logits", None)
 
         self.classifier = self.build_linear_classifier(
             feature_dim=self.classifier_feature_dim,
@@ -122,12 +124,9 @@ class SPDPoolingClassifier(SPDClassifierBase):
 
         if self.pooling == "mean":
             pooled_log = self._mean_pool(x_log)
-            features = self.upper_triangular_vectorize(pooled_log)
-        elif self.pooling == "band_mean":
-            features = self._band_mean_pool_features(x_log)
         else:
-            pooled_log = self._attention_pool(x_log)
-            features = self.upper_triangular_vectorize(pooled_log)
+            pooled_log = self._weighted_pool(x_log)
+        features = self.upper_triangular_vectorize(pooled_log)
 
         logits = self.classifier(features)
 
@@ -141,51 +140,59 @@ class SPDPoolingClassifier(SPDClassifierBase):
         token_dims = tuple(range(1, x_log.ndim - 2))
         return x_log.mean(dim=token_dims)
 
-    def _band_mean_pool_features(self, x_log: torch.Tensor) -> torch.Tensor:
-        """
-        Average over time but keep frequency-band features separate.
+    def _weighted_pool(self, x_log: torch.Tensor) -> torch.Tensor:
+        if self.token_weight_logits is None:
+            raise RuntimeError("token_weight_logits is only defined for weighted pooling.")
 
-        For 5D/6D input, this returns one tangent feature vector per frequency
-        band and concatenates them. Region tokens are averaged inside each
-        frequency band. For 4D input, it falls back to temporal mean pooling.
-        """
-        if x_log.ndim == 4:
-            pooled_log = x_log.mean(dim=1)
-            return self.upper_triangular_vectorize(pooled_log)
-
-        if x_log.ndim == 6:
-            band_log = x_log.mean(dim=(1, 3))
-            band_features = self.upper_triangular_vectorize(band_log)
-            return band_features.reshape(band_features.shape[0], -1)
-
-        if x_log.ndim != 5:
+        if x_log.ndim not in {4, 5, 6}:
             raise ValueError(
                 "Expected encoder output shape "
-                "(batch, time, channels, channels) or "
-                "(batch, time, frequency, channels, channels) or "
+                "(batch, time, channels, channels), "
+                "(batch, time, frequency, channels, channels), or "
                 "(batch, time, frequency, brain_region, channels, channels), "
                 f"got {tuple(x_log.shape)}."
             )
 
-        band_log = x_log.mean(dim=1)
-        band_features = self.upper_triangular_vectorize(band_log)
-        return band_features.reshape(band_features.shape[0], -1)
+        token_shape = tuple(x_log.shape[1:-2])
+        logits = self._token_logits_for_shape(token_shape)
+        weights = torch.softmax(logits.reshape(-1), dim=0).reshape(token_shape)
+        view_shape = (1, *token_shape, 1, 1)
+        token_dims = tuple(range(1, x_log.ndim - 2))
+        return (x_log * weights.view(view_shape)).sum(dim=token_dims)
 
-    def _attention_pool(self, x_log: torch.Tensor) -> torch.Tensor:
-        """
+    def _token_logits_for_shape(self, token_shape: tuple[int, ...]) -> torch.Tensor:
+        assert self.token_weight_logits is not None
+        if not 1 <= len(token_shape) <= 3:
+            raise ValueError(
+                "Weighted pooling supports time, time/frequency, or "
+                f"time/frequency/region tokens, got token shape {token_shape}."
+            )
 
-        :param x:
-        :return: pooled spd matrix, (batch, channels, channels)
-        """
-        batch_size = x_log.shape[0]
-        spd_dim = x_log.shape[-1]
-        # log_tokens = (batch, tim x frequency_bands, channels, channels)
-        log_tokens = x_log.reshape(batch_size, -1, spd_dim, spd_dim)
-        token_features = self.upper_triangular_vectorize(log_tokens)
+        max_shape = self.token_weight_logits.shape
+        if any(size > max_size for size, max_size in zip(token_shape, max_shape)):
+            raise ValueError(
+                "Weighted pooling was initialized for "
+                f"{tuple(max_shape)} time/frequency/region tokens, "
+                f"but encoder output has {token_shape}."
+            )
 
+        time_len = token_shape[0]
+        if len(token_shape) == 1:
+            return self.token_weight_logits[:time_len, 0, 0]
+        frequency_len = token_shape[1]
+        if len(token_shape) == 2:
+            return self.token_weight_logits[:time_len, :frequency_len, 0]
+        region_len = token_shape[2]
+        return self.token_weight_logits[:time_len, :frequency_len, :region_len]
 
-        scores = self.pool_score(token_features).squeeze(-1)
-
-        weights = torch.softmax(scores, dim=-1)
-
-        return torch.einsum("bt,btmn->bmn", weights, log_tokens)
+    @staticmethod
+    def _normalize_pooling(pooling: str) -> SPDPoolingMode:
+        normalized = str(pooling).strip().lower().replace("-", "_")
+        if normalized == "mean":
+            return "mean"
+        if normalized in {"weighted", "weight", "learned_weighted"}:
+            return "weighted"
+        raise ValueError(
+            "SPDPoolingClassifier pooling must be 'mean' or 'weighted', "
+            f"got {pooling!r}."
+        )
