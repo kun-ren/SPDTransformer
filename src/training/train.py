@@ -431,6 +431,20 @@ def build_model(
         model_cfg.get("attention_dim", spd_in_dim),
         depth=depth,
     )
+
+    def optional_int(key: str) -> int | None:
+        value = model_cfg.get(key)
+        return None if value is None else int(value)
+
+    tangent_use_position_embedding = model_cfg.get(
+        "tangent_use_position_embedding"
+    )
+    if tangent_use_position_embedding is not None:
+        tangent_use_position_embedding = parse_bool(
+            tangent_use_position_embedding,
+            default=True,
+        )
+
     return SPDTransformerClassifier(
         num_heads=int(model_cfg.get("head_nums", 1)),
         spd_in_dim=spd_in_dim,
@@ -458,6 +472,17 @@ def build_model(
         layer_norm_affine=bool(model_cfg.get("layer_norm_affine", True)),
         stage_projection_init=str(model_cfg.get("stage_projection_init", "identity")),
         add_norm_type=str(model_cfg.get("add_norm_type", "trace")),
+        encoder_type=str(model_cfg.get("encoder_type", "spd")),
+        tangent_d_model=optional_int("tangent_d_model"),
+        tangent_nhead=optional_int("tangent_nhead"),
+        tangent_num_layers=optional_int("tangent_num_layers"),
+        tangent_dim_feedforward=optional_int("tangent_dim_feedforward"),
+        tangent_activation=str(model_cfg.get("tangent_activation", "gelu")),
+        tangent_norm_first=parse_bool(
+            model_cfg.get("tangent_norm_first", False),
+            default=False,
+        ),
+        tangent_use_position_embedding=tangent_use_position_embedding,
     )
 
 
@@ -564,7 +589,7 @@ def predict_loader(
                 return_aux=use_condition_regularization,
             )
             cond_loss = logits.new_tensor(0.0)
-            if use_condition_regularization:
+            if use_condition_regularization and aux:
                 for name, P_bimap in aux.items():
                     cond_loss = cond_loss + condition_regularization(P_bimap)
                 cond_loss = cond_loss / len(aux)
@@ -662,7 +687,7 @@ def train_one_epoch(
         loader: DataLoader,
         criterion: nn.Module,
         optimizer_euclid: torch.optim.Optimizer,
-        optimizer_stiefel: geoopt.optim.RiemannianAdam,
+        optimizer_stiefel: geoopt.optim.RiemannianAdam | None,
         device: torch.device,
         gradient_clip_norm: float | None = None,
         debug_anomaly: bool = False,
@@ -685,7 +710,7 @@ def train_one_epoch(
         cls_loss = criterion(logits, y_batch)
 
         cond_loss = logits.new_tensor(0.0)
-        if use_condition_regularization:
+        if use_condition_regularization and aux:
             for name, P_bimap in aux.items():
                 cond_loss = cond_loss + condition_regularization(P_bimap)
             cond_loss = cond_loss / len(aux)
@@ -700,8 +725,11 @@ def train_one_epoch(
                 "Check input SPD matrices, learning rate, and model numerical stability."
             )
 
-        optimizer_euclid.zero_grad()
-        optimizer_stiefel.zero_grad()
+        optimizers = [optimizer_euclid]
+        if optimizer_stiefel is not None:
+            optimizers.append(optimizer_stiefel)
+        for optimizer in optimizers:
+            optimizer.zero_grad()
 
         if debug_anomaly:
             with torch.autograd.detect_anomaly():
@@ -713,7 +741,7 @@ def train_one_epoch(
         if gradient_clip_norm is not None and gradient_clip_norm > 0:
             params_to_clip = [
                 p
-                for optimizer in (optimizer_euclid, optimizer_stiefel)
+                for optimizer in optimizers
                 for group in optimizer.param_groups
                 for p in group["params"]
                 if p.grad is not None
@@ -724,8 +752,8 @@ def train_one_epoch(
                 max_norm=gradient_clip_norm,
             )
 
-        optimizer_euclid.step()
-        optimizer_stiefel.step()
+        for optimizer in optimizers:
+            optimizer.step()
         assert_model_finite(model, "optimizer step")
 
         total_loss += loss.item() * y_batch.size(0)
@@ -787,11 +815,17 @@ def append_history(path: Path, row: dict[str, Any]) -> None:
         writer.writerow(row)
 
 
-def optimizer_lr_values(optimizer: torch.optim.Optimizer) -> list[float]:
+def optimizer_lr_values(
+        optimizer: torch.optim.Optimizer | None,
+) -> list[float]:
+    if optimizer is None:
+        return []
     return [float(group["lr"]) for group in optimizer.param_groups]
 
 
 def format_lr_values(values: list[float]) -> str:
+    if not values:
+        return "none"
     return ",".join(f"{value:.3e}" for value in values)
 
 
@@ -813,7 +847,7 @@ def resolve_scheduler_metric(metric_name: str, test_metrics: dict[str, float]) -
 def build_lr_schedulers(
         training_cfg: dict[str, Any],
         optimizer_euclid: torch.optim.Optimizer,
-        optimizer_stiefel: torch.optim.Optimizer,
+        optimizer_stiefel: torch.optim.Optimizer | None,
 ) -> tuple[str | None, str | None, Any, Any]:
     scheduler_name = str(training_cfg.get("lr_scheduler", "none")).lower()
     if scheduler_name in {"", "none", "null", "false", "off"}:
@@ -857,16 +891,18 @@ def build_lr_schedulers(
         min_lr=float(training_cfg.get("lr_scheduler_min_lr", 1e-6)),
         **scheduler_kwargs,
     )
-    stiefel_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer_stiefel,
-        min_lr=float(
-            training_cfg.get(
-                "stiefel_lr_scheduler_min_lr",
-                training_cfg.get("lr_scheduler_min_lr", 1e-6),
-            )
-        ),
-        **scheduler_kwargs,
-    )
+    stiefel_scheduler = None
+    if optimizer_stiefel is not None:
+        stiefel_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer_stiefel,
+            min_lr=float(
+                training_cfg.get(
+                    "stiefel_lr_scheduler_min_lr",
+                    training_cfg.get("lr_scheduler_min_lr", 1e-6),
+                )
+            ),
+            **scheduler_kwargs,
+        )
     return scheduler_name, metric_name, euclid_scheduler, stiefel_scheduler
 
 
@@ -986,12 +1022,14 @@ def train_experiment(
         lr=float(training_cfg.get("learning_rate", 1e-3)),
     )
 
-    optimizer_stiefel = geoopt.optim.RiemannianAdam(
-        stiefel_params,
-        lr=float(training_cfg.get("stiefel_learning_rate", 1e-3)),
-        weight_decay=0.0,
-        stabilize=10,
-    )
+    optimizer_stiefel = None
+    if stiefel_params:
+        optimizer_stiefel = geoopt.optim.RiemannianAdam(
+            stiefel_params,
+            lr=float(training_cfg.get("stiefel_learning_rate", 1e-3)),
+            weight_decay=0.0,
+            stabilize=10,
+        )
     (
         lr_scheduler_name,
         lr_scheduler_metric,
@@ -1082,7 +1120,8 @@ def train_experiment(
                 test_metrics,
             )
             lr_scheduler_euclid.step(scheduler_value)
-            lr_scheduler_stiefel.step(scheduler_value)
+            if lr_scheduler_stiefel is not None:
+                lr_scheduler_stiefel.step(scheduler_value)
             new_euclid_lrs = optimizer_lr_values(optimizer_euclid)
             new_stiefel_lrs = optimizer_lr_values(optimizer_stiefel)
             if (
@@ -1107,7 +1146,11 @@ def train_experiment(
             "test_accuracy": test_metrics["accuracy"],
             "test_macro_f1": test_metrics["macro_f1"],
             "euclid_lr": optimizer_lr_values(optimizer_euclid)[0],
-            "stiefel_lr": optimizer_lr_values(optimizer_stiefel)[0],
+            "stiefel_lr": (
+                optimizer_lr_values(optimizer_stiefel)[0]
+                if optimizer_stiefel is not None
+                else None
+            ),
         }
         append_history(history_path, row)
 

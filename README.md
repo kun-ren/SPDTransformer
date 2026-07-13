@@ -58,6 +58,26 @@ signed band-pass waveforms, or `--show-trials 5` to overlay individual trials.
 python src\training\train.py --config configs/train_grid.yaml --device cuda:0
 ```
 
+##### Tangent-space Transformer + weighted MDM baseline
+
+This baseline reuses `preprocess_spd`, maps every SPD token to the
+Log-Euclidean tangent space, applies PyTorch's native Transformer encoder, and
+uses the same learned weighted pooling and Log-Euclidean MDM classifier style
+as SPDTransformer.
+
+```powershell
+python src\baselines\tangent_transformer_mdm_baseline.py --config configs\tangent_transformer_mdm.yaml --device cuda:0
+```
+
+For the strict brain-region SPDTransformer ablation, use the shared training
+pipeline. This keeps preprocessing, split, weighted MDM head, optimizer
+settings, scheduler, and reporting aligned with `train_grid.yaml`; only the
+encoder changes to the native tangent-vector Transformer.
+
+```powershell
+python src\training\train.py --config configs\train_grid_tangent_ablation.yaml --device cuda:0
+```
+
 ##### Result
 
 Each set of configuration will be saved in

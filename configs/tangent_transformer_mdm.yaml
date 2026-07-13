@@ -1,0 +1,76 @@
+data:
+  # Uses the same preprocess_spd arguments as the SPDTransformer experiment.
+  dataset: ["physionet_mi"]
+  root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
+  filter_bank:
+    - [8, 13]
+    - [13, 20]
+    - [20, 30]
+  estimator: ["cov"]
+  sfreq: [160]
+  eps: [1.0e-6]
+  covariance_signal_scale: ["auto"]
+  covariance_output_dtype: ["float32"]
+  replace_covariance_diagonal_with_raw_energy: [true]
+  brain_region_mode: ["physionet_8x8"]
+  subjects: 1-87,89-109
+  channels:
+  reject_threshold_uv: [null]
+  use_ica: [false]
+  ica_n_components: [13]
+  ica_random_state: [42]
+  ica_eog_channels: ["FP1,FP2"]
+  use_autoreject: [true]
+  autoreject_random_state: [42]
+  autoreject_n_jobs: [8]
+  autoreject_cv: [10]
+  baseline_correction: [null]
+  baseline_window: "-3,0"
+  epoch_tmin: [-1.0]
+  epoch_tmax: [4.0]
+  segment_duration: [1.0]
+  stride_duration: [0.5]
+  imaged: true
+  executed: false
+  task_types: unilateral_fist
+
+model:
+  # SPD(8) has 36 independent tangent coordinates. Input/output projections
+  # allow d_model to be selected independently while the MDM head remains in
+  # the original Log-Euclidean tangent-matrix space.
+  d_model: [128]
+  nhead: [4]
+  num_layers: [2]
+  dim_feedforward: [256]
+  dropout: [0.2]
+  activation: ["gelu"]
+  norm_first: [false]
+  use_position_embedding: [true]
+  pooling: ["weighted"]
+  eps: [1.0e-6]
+
+training:
+  precision: ["float32"]
+  seed: [42]
+  test_size: [0.15]
+  val_size: [0.15]
+  allow_subject_overlap: [true]
+  split_file: experiments/splits/physionet_mi_seed42.json
+  epochs: [150]
+  batch_size: [128]
+  learning_rate: [0.001]
+  weight_decay: [0.01]
+  gradient_clip_norm: [1.0]
+  lr_scheduler: ["plateau"]
+  lr_scheduler_factor: [0.5]
+  lr_scheduler_patience: [10]
+  lr_scheduler_threshold: [0.0008]
+  lr_scheduler_threshold_mode: ["abs"]
+  lr_scheduler_min_lr: [1.0e-6]
+  early_stopping_patience: [15]
+  early_stopping_min_delta: [0.0008]
+  num_workers: [0]
+  pin_memory: [true]
+
+output:
+  dir: experiments/results/tangent_transformer_mdm_baseline

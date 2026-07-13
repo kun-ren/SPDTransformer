@@ -6,9 +6,13 @@ from torch import nn
 from src.models.SPDMDMClassifier import SPDMDMClassifier
 from src.models.SPDPoolingClassifier import SPDPoolingClassifier
 from src.models.SPDTaskTagClassifier import SPDTaskTagClassifier
+from src.models.TangentTransformerMDMClassifier import (
+    TangentTransformerMDMClassifier,
+)
 
 
 ClassifierType = Literal["pooling", "task", "mdm"]
+EncoderType = Literal["spd", "tangent"]
 
 
 class SPDTransformerClassifier(nn.Module):
@@ -55,6 +59,14 @@ class SPDTransformerClassifier(nn.Module):
             layer_norm_affine: bool = True,
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: str = "trace",
+            encoder_type: EncoderType = "spd",
+            tangent_d_model: int | None = None,
+            tangent_nhead: int | None = None,
+            tangent_num_layers: int | None = None,
+            tangent_dim_feedforward: int | None = None,
+            tangent_activation: Literal["relu", "gelu"] = "gelu",
+            tangent_norm_first: bool = False,
+            tangent_use_position_embedding: bool | None = None,
     ):
         super().__init__()
         self.debug_tensor_stats = debug_tensor_stats
@@ -67,8 +79,71 @@ class SPDTransformerClassifier(nn.Module):
                 f"got {classifier_type!r}."
             )
 
+        encoder_type = str(encoder_type).strip().lower().replace("-", "_")
+        encoder_aliases = {
+            "spd": "spd",
+            "spd_transformer": "spd",
+            "riemannian": "spd",
+            "tangent": "tangent",
+            "tangent_transformer": "tangent",
+            "euclidean": "tangent",
+        }
+        if encoder_type not in encoder_aliases:
+            raise ValueError(
+                "encoder_type must be 'spd' or 'tangent', "
+                f"got {encoder_type!r}."
+            )
+        encoder_type = encoder_aliases[encoder_type]
+        if encoder_type == "tangent" and classifier_type != "mdm":
+            raise ValueError(
+                "The tangent Transformer ablation currently requires "
+                "classifier_type='mdm' so that the classifier remains "
+                "identical to the SPDTransformer weighted-MDM setup."
+            )
+
         self.classifier_type = classifier_type
-        if classifier_type == "pooling":
+        self.encoder_type = encoder_type
+        if encoder_type == "tangent":
+            transformer_out_dim = (
+                int(attention_dim[-1]) if stage_transition else int(spd_in_dim)
+            )
+            tangent_input_dim = spd_in_dim * (spd_in_dim + 1) // 2
+            if tangent_d_model is None:
+                tangent_d_model = tangent_input_dim
+            if tangent_nhead is None:
+                tangent_nhead = num_heads
+            if tangent_num_layers is None:
+                tangent_num_layers = depth
+            if tangent_dim_feedforward is None:
+                tangent_dim_feedforward = ffn_hidden_spd_dim
+            if tangent_use_position_embedding is None:
+                tangent_use_position_embedding = use_position_bias
+
+            self.model = TangentTransformerMDMClassifier(
+                spd_dim=spd_in_dim,
+                output_spd_dim=transformer_out_dim,
+                num_classes=num_classes,
+                token_shape=(
+                    int(time_sequence_length),
+                    int(frequency_sequence_length),
+                    int(brain_region_sequence_length),
+                ),
+                d_model=int(tangent_d_model),
+                nhead=int(tangent_nhead),
+                num_layers=int(tangent_num_layers),
+                dim_feedforward=(
+                    None
+                    if tangent_dim_feedforward is None
+                    else int(tangent_dim_feedforward)
+                ),
+                dropout=dropout,
+                activation=tangent_activation,
+                norm_first=tangent_norm_first,
+                pooling=pooling,
+                use_position_embedding=bool(tangent_use_position_embedding),
+                eps=eps,
+            )
+        elif classifier_type == "pooling":
             self.model = SPDPoolingClassifier(
                 num_heads=num_heads,
                 spd_in_dim=spd_in_dim,
@@ -158,5 +233,7 @@ class SPDTransformerClassifier(nn.Module):
             x: torch.Tensor,
             return_aux: bool = True,
     ) -> tuple[torch.Tensor, dict]:
-
+        if self.encoder_type == "tangent":
+            logits = self.model(x, return_aux=False)
+            return logits, {}
         return self.model(x, return_aux=return_aux)
