@@ -45,3 +45,4 @@ training:
 
 output:
   dir: experiments/results/mdm_baseline_bci_iv_2a
+  dataset_cache_dir: experiments/cache/mdm_preprocessed_datasets

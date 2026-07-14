@@ -18,6 +18,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+MDM_DATASET_CACHE_VERSION = 1
+DEFAULT_MDM_DATASET_CACHE_DIR = (
+    PROJECT_ROOT / "experiments" / "cache" / "mdm_preprocessed_datasets"
+)
+
 from src.baselines.baseline_utils import (
     DEFAULT_CONFIG,
     compute_metrics,
@@ -61,6 +66,23 @@ def _subjects_hash(subjects: np.ndarray | None) -> str | None:
         return None
     subject_labels = np.asarray(subjects, dtype=np.str_)
     return hashlib.sha1("\n".join(subject_labels.tolist()).encode("utf-8")).hexdigest()
+
+
+def resolve_project_path(path_value: Any, default: Path) -> Path:
+    if path_value in {None, ""}:
+        return default
+    path = Path(str(path_value))
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
+
+
+def dataset_cache_key(data_cfg: dict[str, Any]) -> str:
+    return config_hash({"data": data_cfg})
+
+
+def dataset_cache_path(cache_dir: Path, data_key: str) -> Path:
+    return cache_dir / f"mdm_spd_dataset_{data_key}.npz"
 
 
 def _is_none_like(value: Any) -> bool:
@@ -207,6 +229,115 @@ def validate_data_model_compatibility(
             f"epoch=({data_cfg.get('epoch_tmin')!r}, {data_cfg.get('epoch_tmax')!r}), "
             f"brain_region_mode={data_cfg.get('brain_region_mode')!r})."
         )
+
+
+def load_cached_dataset(
+    cache_path: Path,
+    data_cfg: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]] | None:
+    if not cache_path.exists():
+        return None
+
+    try:
+        with np.load(cache_path, allow_pickle=False) as payload:
+            metadata_json = str(payload["metadata_json"].item())
+            metadata = json.loads(metadata_json)
+            if metadata.get("cache_version") != MDM_DATASET_CACHE_VERSION:
+                print(f"  MDM dataset cache version changed, rebuilding: {cache_path}")
+                return None
+            if metadata.get("data_config") != data_cfg:
+                print(
+                    "  MDM dataset cache key collision or config mismatch, "
+                    f"rebuilding: {cache_path}"
+                )
+                return None
+
+            x_spd = np.asarray(payload["x_spd"])
+            y = np.asarray(payload["y"], dtype=np.int64)
+            subject_labels = np.asarray(payload["subject_labels"], dtype=np.str_)
+            class_names = [str(name) for name in payload["class_names"].tolist()]
+
+        if not np.isfinite(x_spd).all():
+            bad_count = int((~np.isfinite(x_spd)).sum())
+            print(
+                f"  Cached MDM SPD dataset contains {bad_count} NaN/Inf values, "
+                "rebuilding."
+            )
+            return None
+        if len(subject_labels) != len(y):
+            print("  Cached subject label count does not match y length, rebuilding.")
+            return None
+        return x_spd, y, subject_labels, class_names
+    except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
+        print(f"  Failed to read MDM dataset cache {cache_path}: {error}. Rebuilding.")
+        return None
+
+
+def save_cached_dataset(
+    cache_path: Path,
+    data_cfg: dict[str, Any],
+    x_spd: np.ndarray,
+    y: np.ndarray,
+    subject_labels: np.ndarray,
+    class_names: list[str],
+) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "cache_version": MDM_DATASET_CACHE_VERSION,
+        "data_config": data_cfg,
+    }
+    tmp_path = cache_path.with_name(
+        f"{cache_path.stem}.{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.tmp"
+    )
+    with tmp_path.open("wb") as handle:
+        np.savez(
+            handle,
+            x_spd=x_spd,
+            y=y.astype(np.int64, copy=False),
+            subject_labels=np.asarray(subject_labels, dtype=np.str_),
+            class_names=np.asarray(class_names, dtype=np.str_),
+            metadata_json=np.asarray(
+                json.dumps(metadata, sort_keys=True, default=str),
+                dtype=np.str_,
+            ),
+        )
+    tmp_path.replace(cache_path)
+
+
+def load_or_preprocess_spd(
+    data_cfg: dict[str, Any],
+    cache_dir: Path,
+    memory_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    data_key = dataset_cache_key(data_cfg)
+    if data_key in memory_cache:
+        print(f"\nUsing in-memory MDM data cache {data_key}")
+        return memory_cache[data_key]
+
+    cache_path = dataset_cache_path(cache_dir, data_key)
+    cached_dataset = load_cached_dataset(cache_path, data_cfg)
+    if cached_dataset is not None:
+        print(f"\nLoaded MDM preprocessed data from cache {data_key}: {cache_path}")
+        x_cached, y_cached, subjects_cached, class_names_cached = cached_dataset
+        print(
+            f"  X.shape={x_cached.shape}, y.shape={y_cached.shape}, "
+            f"subjects={len(set(subjects_cached.tolist()))}, "
+            f"classes={class_names_cached}"
+        )
+        memory_cache[data_key] = cached_dataset
+        return cached_dataset
+
+    print(f"\nPreprocessing MDM data config {data_key}: {data_cfg}")
+    dataset = load_spd_like_train(data_cfg)
+    x_spd, y, subject_labels, class_names = dataset
+    print(
+        f"  X.shape={x_spd.shape}, y.shape={y.shape}, "
+        f"subjects={len(set(subject_labels.tolist()))}, classes={class_names}"
+    )
+    save_cached_dataset(cache_path, data_cfg, x_spd, y, subject_labels, class_names)
+    print(f"  Saved MDM preprocessed data cache: {cache_path}")
+    memory_cache[data_key] = dataset
+    return dataset
 
 
 def normalize_metric_name(value: Any) -> str:
@@ -591,6 +722,8 @@ def run_experiment(
     cli_mean_metric: str | None,
     cli_distance_metric: str | None,
     base_output_dir: Path,
+    dataset_cache_dir: Path,
+    data_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]],
 ) -> dict:
     from pyriemann.classification import MDM
 
@@ -600,7 +733,11 @@ def run_experiment(
 
     validate_data_model_compatibility(data_cfg, model_cfg)
 
-    x_spd, y, subject_labels, class_names = load_spd_like_train(data_cfg)
+    x_spd, y, subject_labels, class_names = load_or_preprocess_spd(
+        data_cfg,
+        dataset_cache_dir,
+        data_cache,
+    )
     x_trial_spd, pooling_summary = pool_spd_tokens(
         x_spd,
         model_cfg,
@@ -686,7 +823,13 @@ def main() -> int:
         "dir",
         "experiments/results/mdm_baseline",
     )
+    dataset_cache_dir = resolve_project_path(
+        config.get("output", {}).get("dataset_cache_dir"),
+        DEFAULT_MDM_DATASET_CACHE_DIR,
+    )
     base_output_dir = PROJECT_ROOT / output_dir / timestamp
+    data_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]] = {}
+    print(f"MDM dataset cache: {dataset_cache_dir}")
     all_metrics = []
     completed_count = 0
     skipped_count = 0
@@ -699,6 +842,8 @@ def main() -> int:
                 args.mean_metric,
                 args.distance_metric,
                 base_output_dir,
+                dataset_cache_dir,
+                data_cache,
             )
             completed_count += 1
         except (IncompatibleExperiment, ValueError) as exc:

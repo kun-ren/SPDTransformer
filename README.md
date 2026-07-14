@@ -1,7 +1,25 @@
+
+
+
+
+
 ### SDP Transformer
 
+#### baselines
+#### MDM
+```bash
+python src\baselines\mdm_baseline.py --config configs\mdm_grid_bci_iv_2a.yaml
+```
 
+```bash
+python src\baselines\mdm_baseline.py --config configs\mdm_grid_bci_iv_2a.yaml
+```
 
+##### TangentTransformer
+
+```bash
+
+```
 ##### Change to working directory
 
 ```
