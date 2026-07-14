@@ -3,23 +3,27 @@ data:
   root_dir: ["data"]
   filter_bank:
     - [8, 30]
-  estimator: ["cov"]
+  estimator: ["lwf"]
   sfreq: [250]
   eps: [1.0e-6]
   covariance_signal_scale: ["auto"]
   replace_covariance_diagonal_with_raw_energy: [false]
+  brain_region_mode: [null]
   subjects: 1-9
   events: "left_hand,right_hand,feet,tongue"
   sessions: "all"
   channels:
   reject_threshold_uv: [null]
   use_ica: [false]
-  use_autoreject: [false]
+  ica_n_components: [13]
+  ica_random_state: [42]
+  ica_eog_channels: ["FP1,FP2"]
+  use_autoreject: [true]
   autoreject_random_state: [42]
-  autoreject_n_jobs: [2]
+  autoreject_n_jobs: [8]
   autoreject_cv: [10]
   baseline_correction: [null]
-  baseline_window: "0,1"
+  baseline_window: "-3,0"
   epoch_tmin: [0.0]
   epoch_tmax: [4.0]
   segment_duration: [4.0]
@@ -30,6 +34,8 @@ data:
 model:
   pooling: ["original"]
   token_weight_logits: null
+  metric_mean: ["riemann"]
+  metric_distance: ["riemann"]
 
 training:
   seed: [42]

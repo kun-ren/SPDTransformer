@@ -28,12 +28,27 @@ from src.baselines.baseline_utils import (
     matrix_exp,
     matrix_log,
     parse_bool,
+    normalize_filter_bank,
     resolve_split_file,
     save_json,
 )
 
 
 TOKEN_WEIGHT_KEYS = {"token_weight_logits", "token_weights"}
+MDM_METRIC_KEYS = {
+    "metric",
+    "mdm_metric",
+    "mean_metric",
+    "metric_mean",
+    "mdm_mean_metric",
+    "distance_metric",
+    "metric_distance",
+    "mdm_distance_metric",
+}
+
+
+class IncompatibleExperiment(ValueError):
+    """Raised when an expanded data/model combination should be skipped."""
 
 
 def _labels_hash(y: np.ndarray) -> str:
@@ -56,9 +71,46 @@ def _is_none_like(value: Any) -> bool:
     return False
 
 
+def is_band_pair(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(number, (int, float)) for number in value)
+    )
+
+
+def is_filter_bank_scheme(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(
+        is_band_pair(item) for item in value
+    )
+
+
+def mdm_data_grid_values(key: str, value: Any) -> list[Any]:
+    if key == "filter_bank":
+        if is_filter_bank_scheme(value):
+            return [normalize_filter_bank(value)]
+        if isinstance(value, list) and value and all(
+            is_filter_bank_scheme(item) for item in value
+        ):
+            return [normalize_filter_bank(item) for item in value]
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def expand_mdm_data_grid(section: dict[str, Any]) -> list[dict[str, Any]]:
+    if not section:
+        return [{}]
+    keys = list(section)
+    value_lists = [mdm_data_grid_values(key, section[key]) for key in keys]
+    return [dict(zip(keys, values)) for values in itertools.product(*value_lists)]
+
+
 def mdm_model_grid_values(key: str, value: Any) -> list[Any]:
     if key in TOKEN_WEIGHT_KEYS:
         return [None if _is_none_like(value) else value]
+    if key in MDM_METRIC_KEYS and isinstance(value, dict):
+        return [value]
     if isinstance(value, list):
         return value
     return [value]
@@ -73,7 +125,7 @@ def expand_mdm_model_grid(section: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def expand_mdm_experiments(config: dict[str, Any]) -> list[dict[str, Any]]:
-    data_grid = expand_grid(config.get("data", {}))
+    data_grid = expand_mdm_data_grid(config.get("data", {}))
     model_grid = expand_mdm_model_grid(config.get("model", {}))
     training_grid = expand_grid(config.get("training", {}))
     output_cfg = deepcopy(config.get("output", {}))
@@ -106,6 +158,135 @@ def normalize_token_pooling(pooling: Any) -> str:
         "MDM token pooling must be 'original', 'mean', or 'weighted', "
         f"got {pooling!r}."
     )
+
+
+def obvious_original_mdm_token_count(data_cfg: dict[str, Any]) -> int | None:
+    token_count = 1
+    filter_bank = data_cfg.get("filter_bank")
+    if is_filter_bank_scheme(filter_bank):
+        token_count *= len(filter_bank)
+
+    brain_region_mode = data_cfg.get("brain_region_mode")
+    if not _is_none_like(brain_region_mode):
+        # Exact region count is dataset-specific and resolved during preprocessing.
+        # Any enabled region preset creates more than one SPD token per trial.
+        token_count *= 2
+
+    epoch_tmin = data_cfg.get("epoch_tmin")
+    epoch_tmax = data_cfg.get("epoch_tmax")
+    segment_duration = data_cfg.get("segment_duration")
+    if (
+        not _is_none_like(epoch_tmin)
+        and not _is_none_like(epoch_tmax)
+        and not _is_none_like(segment_duration)
+    ):
+        epoch_duration = float(epoch_tmax) - float(epoch_tmin)
+        if float(segment_duration) < epoch_duration - 1e-9:
+            token_count *= 2
+
+    return token_count
+
+
+def validate_data_model_compatibility(
+    data_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+) -> None:
+    pooling = normalize_token_pooling(
+        model_cfg.get("pooling", model_cfg.get("token_pooling", "mean"))
+    )
+    if pooling != "original":
+        return
+
+    token_count = obvious_original_mdm_token_count(data_cfg)
+    if token_count is not None and token_count > 1:
+        raise IncompatibleExperiment(
+            "pooling='original' requires one SPD matrix per trial, but this "
+            "data config obviously creates multiple tokens "
+            f"(filter_bank={data_cfg.get('filter_bank')!r}, "
+            f"segment_duration={data_cfg.get('segment_duration')!r}, "
+            f"epoch=({data_cfg.get('epoch_tmin')!r}, {data_cfg.get('epoch_tmax')!r}), "
+            f"brain_region_mode={data_cfg.get('brain_region_mode')!r})."
+        )
+
+
+def normalize_metric_name(value: Any) -> str:
+    if _is_none_like(value):
+        raise ValueError("MDM metric names cannot be null or empty.")
+    return str(value).strip().lower().replace("-", "")
+
+
+def metric_config_value(
+    model_cfg: dict[str, Any],
+    *keys: str,
+) -> Any:
+    for key in keys:
+        if key in model_cfg and not _is_none_like(model_cfg[key]):
+            return model_cfg[key]
+    return None
+
+
+def resolve_mdm_metric(
+    model_cfg: dict[str, Any],
+    cli_metric: Any = None,
+    cli_mean_metric: Any = None,
+    cli_distance_metric: Any = None,
+) -> str | dict[str, str]:
+    configured_metric = metric_config_value(model_cfg, "metric", "mdm_metric")
+    base_metric = cli_metric if not _is_none_like(cli_metric) else configured_metric
+    if _is_none_like(base_metric):
+        base_metric = "riemann"
+
+    if isinstance(base_metric, dict):
+        metric_mean = metric_config_value(base_metric, "mean")
+        metric_distance = metric_config_value(base_metric, "distance")
+        fallback_metric = None
+    else:
+        metric_mean = None
+        metric_distance = None
+        fallback_metric = base_metric
+
+    configured_mean = metric_config_value(
+        model_cfg,
+        "mean_metric",
+        "metric_mean",
+        "mdm_mean_metric",
+    )
+    configured_distance = metric_config_value(
+        model_cfg,
+        "distance_metric",
+        "metric_distance",
+        "mdm_distance_metric",
+    )
+    mean_metric = (
+        cli_mean_metric
+        if not _is_none_like(cli_mean_metric)
+        else configured_mean
+        if not _is_none_like(configured_mean)
+        else metric_mean
+    )
+    distance_metric = (
+        cli_distance_metric
+        if not _is_none_like(cli_distance_metric)
+        else configured_distance
+        if not _is_none_like(configured_distance)
+        else metric_distance
+    )
+
+    if _is_none_like(mean_metric) and _is_none_like(distance_metric):
+        return normalize_metric_name(fallback_metric or base_metric)
+
+    if _is_none_like(mean_metric):
+        mean_metric = fallback_metric
+    if _is_none_like(distance_metric):
+        distance_metric = fallback_metric
+    if _is_none_like(mean_metric) or _is_none_like(distance_metric):
+        raise ValueError(
+            "Both MDM mean and distance metrics must be set when using a metric dict."
+        )
+    return {
+        "mean": normalize_metric_name(mean_metric),
+        "distance": normalize_metric_name(distance_metric),
+    }
 
 
 def validate_spd_array(x_spd: np.ndarray) -> None:
@@ -202,7 +383,7 @@ def pool_spd_tokens(
                 x_spd.shape[-1],
             )
         else:
-            raise ValueError(
+            raise IncompatibleExperiment(
                 "pooling='original' requires exactly one SPD matrix per trial. "
                 f"Current token shape is {token_shape}; use pooling='mean' or "
                 "pooling='weighted' for segmented/filter-bank/brain-region inputs."
@@ -376,15 +557,39 @@ def build_parser() -> argparse.ArgumentParser:
         description="MDM baseline using the same SPD preprocessing config as train.py."
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--metric", default="riemann")
+    parser.add_argument(
+        "--metric",
+        default=None,
+        help=(
+            "Use the same pyRiemann metric for class means and distances. "
+            "Defaults to config model.metric or riemann."
+        ),
+    )
+    parser.add_argument(
+        "--mean-metric",
+        default=None,
+        help="Override the metric used to compute MDM class centroids.",
+    )
+    parser.add_argument(
+        "--distance-metric",
+        default=None,
+        help="Override the metric used to classify by distance to centroids.",
+    )
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Raise incompatible grid combinations instead of recording skips.",
+    )
     return parser
 
 
 def run_experiment(
     run_index: int,
     experiment_cfg: dict,
-    metric: str,
+    cli_metric: str | None,
+    cli_mean_metric: str | None,
+    cli_distance_metric: str | None,
     base_output_dir: Path,
 ) -> dict:
     from pyriemann.classification import MDM
@@ -392,6 +597,8 @@ def run_experiment(
     data_cfg = experiment_cfg["data"]
     model_cfg = experiment_cfg.get("model", {})
     training_cfg = experiment_cfg["training"]
+
+    validate_data_model_compatibility(data_cfg, model_cfg)
 
     x_spd, y, subject_labels, class_names = load_spd_like_train(data_cfg)
     x_trial_spd, pooling_summary = pool_spd_tokens(
@@ -405,6 +612,12 @@ def run_experiment(
         subject_labels=subject_labels,
     )
 
+    metric = resolve_mdm_metric(
+        model_cfg,
+        cli_metric=cli_metric,
+        cli_mean_metric=cli_mean_metric,
+        cli_distance_metric=cli_distance_metric,
+    )
     classifier = MDM(metric=metric)
     classifier.fit(x_trial_spd[train_idx], y[train_idx])
 
@@ -442,10 +655,25 @@ def run_experiment(
     save_json(run_dir / "summary.json", summary)
     print(f"[MDM run {run_index}] saved {run_dir}")
     return {
+        "status": "completed",
         "run_index": run_index,
         "run_dir": str(run_dir),
         "test_accuracy": rows[-1]["accuracy"],
         "test_macro_f1": rows[-1]["macro_f1"],
+    }
+
+
+def skipped_experiment_summary(
+    run_index: int,
+    experiment_cfg: dict,
+    reason: Exception,
+) -> dict:
+    return {
+        "status": "skipped",
+        "run_index": run_index,
+        "config_hash": config_hash(experiment_cfg),
+        "reason": str(reason),
+        "config": experiment_cfg,
     }
 
 
@@ -459,12 +687,33 @@ def main() -> int:
         "experiments/results/mdm_baseline",
     )
     base_output_dir = PROJECT_ROOT / output_dir / timestamp
-    all_metrics = [
-        run_experiment(index, experiment, args.metric, base_output_dir)
-        for index, experiment in enumerate(experiments, start=1)
-    ]
+    all_metrics = []
+    completed_count = 0
+    skipped_count = 0
+    for index, experiment in enumerate(experiments, start=1):
+        try:
+            result = run_experiment(
+                index,
+                experiment,
+                args.metric,
+                args.mean_metric,
+                args.distance_metric,
+                base_output_dir,
+            )
+            completed_count += 1
+        except (IncompatibleExperiment, ValueError) as exc:
+            if args.fail_fast:
+                raise
+            result = skipped_experiment_summary(index, experiment, exc)
+            skipped_count += 1
+            print(f"[MDM run {index}] skipped: {exc}")
+        all_metrics.append(result)
+
     save_json(base_output_dir / "summary.json", all_metrics)
-    print(f"All MDM runs complete: {base_output_dir}")
+    print(
+        f"All MDM runs complete: {base_output_dir} | "
+        f"completed={completed_count}, skipped={skipped_count}"
+    )
     return 0
 
 

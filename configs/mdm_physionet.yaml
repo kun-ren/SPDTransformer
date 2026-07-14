@@ -2,7 +2,7 @@ data:
   dataset: ["physionet_mi"]
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
   filter_bank:
-    - [8, 30]
+    - [5, 50]
   estimator: ["lwf"]
   sfreq: [160]
   eps: [1.0e-6]
@@ -34,6 +34,8 @@ data:
 model:
   pooling: ["original"]
   token_weight_logits: null
+  metric_mean: ["riemann"]
+  metric_distance: ["riemann"]
 
 training:
   seed: [42]
