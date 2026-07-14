@@ -2,14 +2,13 @@ data:
   dataset: ["physionet_mi"]
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
   filter_bank:
-    - [ 8, 13 ]
-    - [ 13, 20 ]
-    - [ 20, 30 ]
+    - [8, 30]
   estimator: ["lwf"]
   sfreq: [160]
   eps: [1.0e-6]
   covariance_signal_scale: ["auto"]
   replace_covariance_diagonal_with_raw_energy: [false]
+  brain_region_mode: [null]
   subjects: 1-87,89-109
   #channels: "FC5, FC3, FC1, FCz, FC2, FC4, FC6, C5, C3, C1, Cz, C2, C4, C6, CP5, CP3, CP1, CPz, CP2, CP4, CP6"
   channels:
@@ -26,11 +25,15 @@ data:
   baseline_window: "-3,0"
   epoch_tmin: [0.0]
   epoch_tmax: [4.0]
-  segment_duration: [1.0]
-  stride_duration: [0.5]
+  segment_duration: [4.0]
+  stride_duration: [4.0]
   imaged: true
   executed: false
   task_types: unilateral_fist
+
+model:
+  pooling: ["original"]
+  token_weight_logits: null
 
 training:
   seed: [42]

@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import itertools
 import json
 import sys
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
@@ -19,14 +22,18 @@ from src.baselines.baseline_utils import (
     DEFAULT_CONFIG,
     compute_metrics,
     config_hash,
-    expand_data_training_experiments,
+    expand_grid,
     load_spd_like_train,
     load_yaml,
-    log_euclidean_token_mean,
+    matrix_exp,
+    matrix_log,
     parse_bool,
     resolve_split_file,
     save_json,
 )
+
+
+TOKEN_WEIGHT_KEYS = {"token_weight_logits", "token_weights"}
 
 
 def _labels_hash(y: np.ndarray) -> str:
@@ -39,6 +46,199 @@ def _subjects_hash(subjects: np.ndarray | None) -> str | None:
         return None
     subject_labels = np.asarray(subjects, dtype=np.str_)
     return hashlib.sha1("\n".join(subject_labels.tolist()).encode("utf-8")).hexdigest()
+
+
+def _is_none_like(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"", "none", "null", "false", "off"}
+    return False
+
+
+def mdm_model_grid_values(key: str, value: Any) -> list[Any]:
+    if key in TOKEN_WEIGHT_KEYS:
+        return [None if _is_none_like(value) else value]
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def expand_mdm_model_grid(section: dict[str, Any]) -> list[dict[str, Any]]:
+    if not section:
+        return [{}]
+    keys = list(section)
+    value_lists = [mdm_model_grid_values(key, section[key]) for key in keys]
+    return [dict(zip(keys, values)) for values in itertools.product(*value_lists)]
+
+
+def expand_mdm_experiments(config: dict[str, Any]) -> list[dict[str, Any]]:
+    data_grid = expand_grid(config.get("data", {}))
+    model_grid = expand_mdm_model_grid(config.get("model", {}))
+    training_grid = expand_grid(config.get("training", {}))
+    output_cfg = deepcopy(config.get("output", {}))
+    experiments = []
+    for data_cfg, model_cfg, training_cfg in itertools.product(
+        data_grid,
+        model_grid,
+        training_grid,
+    ):
+        experiments.append(
+            {
+                "data": deepcopy(data_cfg),
+                "model": deepcopy(model_cfg),
+                "training": deepcopy(training_cfg),
+                "output": deepcopy(output_cfg),
+            }
+        )
+    return experiments
+
+
+def normalize_token_pooling(pooling: Any) -> str:
+    normalized = str(pooling or "mean").strip().lower().replace("-", "_")
+    if normalized in {"original", "raw", "none", "identity", "trial", "single"}:
+        return "original"
+    if normalized in {"mean", "mdm_mean", "log_euclidean_mean"}:
+        return "mean"
+    if normalized in {"weighted", "weight", "mdm_weighted", "learned_weighted"}:
+        return "weighted"
+    raise ValueError(
+        "MDM token pooling must be 'original', 'mean', or 'weighted', "
+        f"got {pooling!r}."
+    )
+
+
+def validate_spd_array(x_spd: np.ndarray) -> None:
+    if x_spd.ndim < 3:
+        raise ValueError(
+            "Expected SPD input shape (trial, ..., channels, channels), "
+            f"got {x_spd.shape}."
+        )
+    if x_spd.shape[-1] != x_spd.shape[-2]:
+        raise ValueError(f"Last two SPD dimensions must be square, got {x_spd.shape}.")
+
+
+def token_shape_of(x_spd: np.ndarray) -> tuple[int, ...]:
+    validate_spd_array(x_spd)
+    return tuple(int(size) for size in x_spd.shape[1:-2])
+
+
+def softmax_np(logits: np.ndarray) -> np.ndarray:
+    flat_logits = logits.reshape(-1).astype(np.float64)
+    flat_logits = flat_logits - np.max(flat_logits)
+    flat_weights = np.exp(flat_logits)
+    flat_weights = flat_weights / flat_weights.sum()
+    return flat_weights.reshape(logits.shape)
+
+
+def resolve_token_weights(
+    model_cfg: dict[str, Any],
+    token_shape: tuple[int, ...],
+) -> tuple[np.ndarray, str]:
+    if not token_shape:
+        raise ValueError("Weighted token pooling requires at least one token dimension.")
+    if len(token_shape) > 3:
+        raise ValueError(
+            "Weighted MDM pooling supports segment, segment/frequency, or "
+            f"segment/frequency/region tokens, got token shape {token_shape}."
+        )
+
+    raw_logits = model_cfg.get("token_weight_logits")
+    raw_weights = model_cfg.get("token_weights")
+    if not _is_none_like(raw_logits) and not _is_none_like(raw_weights):
+        raise ValueError("Set only one of token_weight_logits or token_weights.")
+
+    if _is_none_like(raw_logits) and _is_none_like(raw_weights):
+        uniform = np.full(token_shape, 1.0 / np.prod(token_shape), dtype=np.float64)
+        return uniform, "uniform"
+
+    raw_value = raw_weights if not _is_none_like(raw_weights) else raw_logits
+    values = np.asarray(raw_value, dtype=np.float64)
+    if values.shape == ():
+        values = np.full(token_shape, float(values), dtype=np.float64)
+    elif values.shape == token_shape:
+        values = values.astype(np.float64, copy=False)
+    elif values.ndim == 1 and values.size == int(np.prod(token_shape)):
+        values = values.reshape(token_shape)
+    else:
+        raise ValueError(
+            "Token weights/logits must be scalar, flat with "
+            f"{int(np.prod(token_shape))} values, or shaped as {token_shape}; "
+            f"got shape {values.shape}."
+        )
+
+    if not np.isfinite(values).all():
+        raise ValueError("Token weights/logits contain NaN or Inf.")
+
+    if not _is_none_like(raw_weights):
+        if np.any(values < 0):
+            raise ValueError("token_weights must be non-negative.")
+        total = values.sum()
+        if total <= 0:
+            raise ValueError("token_weights must sum to a positive value.")
+        return values / total, "configured_weights"
+
+    return softmax_np(values), "configured_logits"
+
+
+def pool_spd_tokens(
+    x_spd: np.ndarray,
+    model_cfg: dict[str, Any],
+    eps: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    pooling = normalize_token_pooling(
+        model_cfg.get("pooling", model_cfg.get("token_pooling", "mean"))
+    )
+    token_shape = token_shape_of(x_spd)
+    token_axes = tuple(range(1, x_spd.ndim - 2))
+
+    if pooling == "original":
+        if not token_shape:
+            x_trial_spd = x_spd
+        elif int(np.prod(token_shape)) == 1:
+            x_trial_spd = x_spd.reshape(
+                x_spd.shape[0],
+                x_spd.shape[-2],
+                x_spd.shape[-1],
+            )
+        else:
+            raise ValueError(
+                "pooling='original' requires exactly one SPD matrix per trial. "
+                f"Current token shape is {token_shape}; use pooling='mean' or "
+                "pooling='weighted' for segmented/filter-bank/brain-region inputs."
+            )
+        return x_trial_spd.astype(np.float64), {
+            "mode": "original",
+            "token_shape": list(token_shape),
+            "has_parameters": False,
+        }
+
+    if not token_shape:
+        return x_spd.astype(np.float64), {
+            "mode": pooling,
+            "token_shape": [],
+            "has_parameters": False,
+        }
+
+    log_x = matrix_log(x_spd, eps=eps)
+    if pooling == "mean":
+        pooled_log = log_x.mean(axis=token_axes)
+        return matrix_exp(pooled_log).astype(np.float64), {
+            "mode": "mean",
+            "token_shape": list(token_shape),
+            "has_parameters": False,
+        }
+
+    weights, source = resolve_token_weights(model_cfg, token_shape)
+    view_shape = (1, *token_shape, 1, 1)
+    pooled_log = (log_x * weights.reshape(view_shape)).sum(axis=token_axes)
+    return matrix_exp(pooled_log).astype(np.float64), {
+        "mode": "weighted",
+        "token_shape": list(token_shape),
+        "weight_source": source,
+        "has_parameters": True,
+        "token_weights": weights.tolist(),
+    }
 
 
 def create_train_test_indices(
@@ -190,10 +390,15 @@ def run_experiment(
     from pyriemann.classification import MDM
 
     data_cfg = experiment_cfg["data"]
+    model_cfg = experiment_cfg.get("model", {})
     training_cfg = experiment_cfg["training"]
 
     x_spd, y, subject_labels, class_names = load_spd_like_train(data_cfg)
-    x_trial_spd = log_euclidean_token_mean(x_spd)
+    x_trial_spd, pooling_summary = pool_spd_tokens(
+        x_spd,
+        model_cfg,
+        eps=float(model_cfg.get("eps", data_cfg.get("eps", 1e-8))),
+    )
     train_idx, test_idx = get_train_test_indices(
         y,
         training_cfg,
@@ -231,7 +436,7 @@ def run_experiment(
         "class_names": class_names,
         "x_spd_shape": list(x_spd.shape),
         "x_trial_spd_shape": list(x_trial_spd.shape),
-        "token_pooling": "log_euclidean_mean_over_segment_and_frequency",
+        "token_pooling": pooling_summary,
         "splits": rows,
     }
     save_json(run_dir / "summary.json", summary)
@@ -247,7 +452,7 @@ def run_experiment(
 def main() -> int:
     args = build_parser().parse_args()
     config = load_yaml(args.config)
-    experiments = expand_data_training_experiments(config)
+    experiments = expand_mdm_experiments(config)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = args.output_dir or config.get("output", {}).get(
         "dir",

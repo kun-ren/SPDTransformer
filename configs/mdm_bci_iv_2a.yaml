@@ -22,10 +22,14 @@ data:
   baseline_window: "0,1"
   epoch_tmin: [0.0]
   epoch_tmax: [4.0]
-  segment_duration: [0.25]
-  stride_duration: [0.125]
+  segment_duration: [4.0]
+  stride_duration: [4.0]
   moabb_accept_terms: [true]
   moabb_force_update: [false]
+
+model:
+  pooling: ["original"]
+  token_weight_logits: null
 
 training:
   seed: [42]
