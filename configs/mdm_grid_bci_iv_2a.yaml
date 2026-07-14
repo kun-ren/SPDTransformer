@@ -2,7 +2,6 @@ data:
   dataset: ["bnci2014_001"]
   root_dir: ["data"]
   filter_bank:
-    - [[5, 50]]
     - [[8, 30]]
     - [[8, 13], [13, 20], [20, 30]]
   estimator: ["lwf"]
