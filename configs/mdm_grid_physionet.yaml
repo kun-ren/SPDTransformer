@@ -2,32 +2,30 @@ data:
   dataset: ["physionet_mi"]
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
   filter_bank:
-    - [[8, 30]]
     - [[8, 13], [13, 20], [20, 30]]
   estimator: ["lwf"]
   sfreq: [160]
   eps: [1.0e-6]
   covariance_signal_scale: ["auto"]
   replace_covariance_diagonal_with_raw_energy: [false]
-  brain_region_mode: [null, "physionet_8x8"]
+  brain_region_mode: ["physionet_8x8"]
   subjects: 1-87,89-109
   channels:
     - null
-    - "FC5, FC3, FC1, FCz, FC2, FC4, FC6, C5, C3, C1, Cz, C2, C4, C6, CP5, CP3, CP1, CPz, CP2, CP4, CP6"
   reject_threshold_uv: [null]
   use_ica: [false]
   ica_n_components: [13]
   ica_random_state: [42]
   ica_eog_channels: ["FP1,FP2"]
-  use_autoreject: [true, false]
+  use_autoreject: [true]
   autoreject_random_state: [42]
   autoreject_n_jobs: [16]
-  autoreject_cv: [10, 5]
+  autoreject_cv: [10]
   baseline_correction: [null]
   baseline_window: "-3,0"
   epoch_tmin: [0.0]
   epoch_tmax: [4.0]
-  segment_duration: [4.0, 1.0]
+  segment_duration: [4.0]
   stride_duration: [0.5]
   imaged: true
   executed: false
@@ -46,6 +44,15 @@ training:
   test_size: [0.2]
   allow_subject_overlap: [true]
   split_file: null
+  # Used only by classifier_type="differentiable".
+  epochs: [100]
+  batch_size: [128]
+  learning_rate: [0.0022]
+  weight_decay: [0.01]
+  gradient_clip_norm: [0.8]
+  precision: ["float32"]
+  num_workers: [0]
+  pin_memory: [true]
 
 output:
   dir: experiments/results/mdm_grid_physionet

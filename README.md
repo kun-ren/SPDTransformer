@@ -11,8 +11,27 @@
 python src\baselines\mdm_baseline.py --config configs\mdm_grid_bci_iv_2a.yaml
 ```
 
-```bash
-python src\baselines\mdm_baseline.py --config configs\mdm_grid_bci_iv_2a.yaml
+The MDM baseline supports two classifiers through `model.classifier_type`:
+
+- `pyriemann` (default): classical MDM with configurable centroid and distance
+  metrics (`metric_mean` and `metric_distance`).
+- `differentiable`: learned Log-Euclidean class prototypes with a trainable
+  distance scale. With `pooling: weighted`, token weights are learned jointly.
+
+The differentiable classifier uses `training.epochs`, `batch_size`,
+`learning_rate`, `weight_decay`, `gradient_clip_norm`, and `precision`. It uses
+the same train/test split as classical MDM and never selects a checkpoint on the
+test split.
+
+```yaml
+model:
+  classifier_type: ["differentiable"]
+  pooling: ["weighted"]
+
+training:
+  epochs: [100]
+  batch_size: [64]
+  learning_rate: [0.01]
 ```
 
 ##### TangentTransformer
