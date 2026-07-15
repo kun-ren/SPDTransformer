@@ -34,7 +34,7 @@ data:
 model:
   # Add "differentiable" to compare trainable Log-Euclidean prototypes.
   classifier_type: ["differentiable"]
-  pooling: ["mean", "weighted"]
+  pooling: ["weighted"]
   token_weight_logits: null
 #  metric_mean: ["riemann", "logeuclid"]
 #  metric_distance: ["riemann", "logeuclid"]
@@ -45,11 +45,11 @@ training:
   allow_subject_overlap: [true]
   split_file: null
   # Used only by classifier_type="differentiable".
-  epochs: [100]
+  epochs: [150]
   batch_size: [128]
-  learning_rate: [0.0022]
-  weight_decay: [0.01]
-  gradient_clip_norm: [0.8]
+  learning_rate: [0.012]  # best 0.012
+  weight_decay: [0.08] # best 0.08
+  gradient_clip_norm: [0.025]   # best 0.025
   precision: ["float32"]
   num_workers: [0]
   pin_memory: [true]
