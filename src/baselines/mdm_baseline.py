@@ -5,6 +5,7 @@ import csv
 import hashlib
 import itertools
 import json
+import random
 import sys
 from copy import deepcopy
 from datetime import datetime
@@ -37,6 +38,13 @@ from src.baselines.baseline_utils import (
     resolve_split_file,
     save_json,
 )
+
+# MNE's native runtime must initialize before PyTorch on Windows.
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
+
+from src.models.SPDMDMClassifier import LogEuclideanPrototypeClassifier
 
 
 TOKEN_WEIGHT_KEYS = {"token_weight_logits", "token_weights"}
@@ -143,7 +151,21 @@ def expand_mdm_model_grid(section: dict[str, Any]) -> list[dict[str, Any]]:
         return [{}]
     keys = list(section)
     value_lists = [mdm_model_grid_values(key, section[key]) for key in keys]
-    return [dict(zip(keys, values)) for values in itertools.product(*value_lists)]
+    expanded = []
+    seen: set[str] = set()
+    for values in itertools.product(*value_lists):
+        model_cfg = dict(zip(keys, values))
+        if resolve_classifier_type(model_cfg) == "differentiable":
+            model_cfg = {
+                key: value
+                for key, value in model_cfg.items()
+                if key not in MDM_METRIC_KEYS
+            }
+        model_key = json.dumps(model_cfg, sort_keys=True, default=str)
+        if model_key not in seen:
+            expanded.append(model_cfg)
+            seen.add(model_key)
+    return expanded
 
 
 def expand_mdm_experiments(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -168,6 +190,29 @@ def expand_mdm_experiments(config: dict[str, Any]) -> list[dict[str, Any]]:
     return experiments
 
 
+def override_mdm_classifier(
+    experiments: list[dict[str, Any]],
+    classifier_type: Any,
+) -> list[dict[str, Any]]:
+    if _is_none_like(classifier_type):
+        return experiments
+
+    normalized = normalize_classifier_type(classifier_type)
+    overridden = []
+    seen: set[str] = set()
+    for experiment in experiments:
+        updated = deepcopy(experiment)
+        updated["model"]["classifier_type"] = normalized
+        if normalized == "differentiable":
+            for key in MDM_METRIC_KEYS:
+                updated["model"].pop(key, None)
+        experiment_key = json.dumps(updated, sort_keys=True, default=str)
+        if experiment_key not in seen:
+            overridden.append(updated)
+            seen.add(experiment_key)
+    return overridden
+
+
 def normalize_token_pooling(pooling: Any) -> str:
     normalized = str(pooling or "mean").strip().lower().replace("-", "_")
     if normalized in {"original", "raw", "none", "identity", "trial", "single"}:
@@ -180,6 +225,32 @@ def normalize_token_pooling(pooling: Any) -> str:
         "MDM token pooling must be 'original', 'mean', or 'weighted', "
         f"got {pooling!r}."
     )
+
+
+def normalize_classifier_type(value: Any) -> str:
+    normalized = str(value or "pyriemann").strip().lower().replace("-", "_")
+    if normalized in {"pyriemann", "classic", "classical", "mdm"}:
+        return "pyriemann"
+    if normalized in {
+        "differentiable",
+        "learnable",
+        "learned",
+        "prototype",
+        "log_euclidean_prototype",
+    }:
+        return "differentiable"
+    raise ValueError(
+        "MDM classifier_type must be 'pyriemann' or 'differentiable', "
+        f"got {value!r}."
+    )
+
+
+def resolve_classifier_type(model_cfg: dict[str, Any]) -> str:
+    value = model_cfg.get(
+        "classifier_type",
+        model_cfg.get("classifier", model_cfg.get("mdm_classifier", "pyriemann")),
+    )
+    return normalize_classifier_type(value)
 
 
 def obvious_original_mdm_token_count(data_cfg: dict[str, Any]) -> int | None:
@@ -553,6 +624,342 @@ def pool_spd_tokens(
     }
 
 
+def resolve_precision(value: Any) -> torch.dtype:
+    normalized = str(value or "float32").strip().lower()
+    if normalized in {"float32", "float", "single", "fp32"}:
+        return torch.float32
+    if normalized in {"float64", "double", "fp64"}:
+        return torch.float64
+    raise ValueError(f"Unsupported precision: {value!r}.")
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+class IndexedLogSPDDataset(Dataset):
+    def __init__(
+        self,
+        x_log: torch.Tensor,
+        y: torch.Tensor,
+        indices: np.ndarray,
+    ) -> None:
+        self.x_log = x_log
+        self.y = y
+        self.indices = torch.from_numpy(indices).long()
+
+    def __len__(self) -> int:
+        return int(self.indices.numel())
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        source_index = self.indices[index]
+        return self.x_log[source_index], self.y[source_index]
+
+
+def make_log_spd_loader(
+    x_log: torch.Tensor,
+    y: torch.Tensor,
+    indices: np.ndarray,
+    batch_size: int,
+    shuffle: bool,
+    num_workers: int,
+    pin_memory: bool,
+    generator: torch.Generator | None = None,
+) -> DataLoader:
+    return DataLoader(
+        IndexedLogSPDDataset(x_log, y, indices),
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False,
+        generator=generator,
+    )
+
+
+def train_differentiable_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    gradient_clip_norm: float | None,
+) -> dict[str, float]:
+    model.train()
+    total_loss = 0.0
+    total_samples = 0
+    y_true: list[int] = []
+    y_pred: list[int] = []
+    non_blocking = device.type == "cuda"
+
+    for x_batch, y_batch in loader:
+        x_batch = x_batch.to(device, non_blocking=non_blocking)
+        y_batch = y_batch.to(device, non_blocking=non_blocking)
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(x_batch)
+        loss = criterion(logits, y_batch)
+        if not torch.isfinite(loss):
+            raise RuntimeError(
+                "Non-finite differentiable MDM loss detected. "
+                "Check covariance scaling and the learning rate."
+            )
+        loss.backward()
+        if gradient_clip_norm is not None and gradient_clip_norm > 0:
+            nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_norm)
+        optimizer.step()
+
+        total_loss += float(loss.item()) * y_batch.size(0)
+        total_samples += y_batch.size(0)
+        y_true.extend(y_batch.detach().cpu().tolist())
+        y_pred.extend(logits.argmax(dim=1).detach().cpu().tolist())
+
+    metrics = compute_metrics(
+        np.asarray(y_true, dtype=np.int64),
+        np.asarray(y_pred, dtype=np.int64),
+    )
+    metrics["loss"] = float(total_loss / max(total_samples, 1))
+    return metrics
+
+
+def evaluate_differentiable(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> dict[str, float]:
+    model.eval()
+    total_loss = 0.0
+    total_samples = 0
+    y_true: list[int] = []
+    y_pred: list[int] = []
+    non_blocking = device.type == "cuda"
+
+    with torch.no_grad():
+        for x_batch, y_batch in loader:
+            x_batch = x_batch.to(device, non_blocking=non_blocking)
+            y_batch = y_batch.to(device, non_blocking=non_blocking)
+            logits = model(x_batch)
+            loss = criterion(logits, y_batch)
+            total_loss += float(loss.item()) * y_batch.size(0)
+            total_samples += y_batch.size(0)
+            y_true.extend(y_batch.cpu().tolist())
+            y_pred.extend(logits.argmax(dim=1).cpu().tolist())
+
+    metrics = compute_metrics(
+        np.asarray(y_true, dtype=np.int64),
+        np.asarray(y_pred, dtype=np.int64),
+    )
+    metrics["loss"] = float(total_loss / max(total_samples, 1))
+    return metrics
+
+
+def run_differentiable_mdm(
+    x_spd: np.ndarray,
+    y: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    class_names: list[str],
+    model_cfg: dict[str, Any],
+    training_cfg: dict[str, Any],
+    device: torch.device,
+    precision_override: str | None,
+    run_dir: Path,
+    experiment_cfg: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    seed = int(training_cfg.get("seed", 42))
+    set_seed(seed)
+    dtype = resolve_precision(
+        precision_override or training_cfg.get("precision", "float32")
+    )
+    eps = float(model_cfg.get("eps", 1e-6))
+    x_log_np = matrix_log(x_spd, eps=eps)
+    if not np.isfinite(x_log_np).all():
+        raise RuntimeError("Matrix logarithm produced NaN or Inf values.")
+    x_log = torch.from_numpy(x_log_np).to(dtype=dtype)
+    del x_log_np
+    y_tensor = torch.from_numpy(np.asarray(y, dtype=np.int64)).long()
+
+    token_shape = token_shape_of(x_spd)
+    pooling = normalize_token_pooling(
+        model_cfg.get("pooling", model_cfg.get("token_pooling", "mean"))
+    )
+    model = LogEuclideanPrototypeClassifier(
+        spd_dim=int(x_spd.shape[-1]),
+        num_classes=len(class_names),
+        token_shape=token_shape,
+        pooling=pooling,
+        eps=eps,
+        prototype_init_std=float(model_cfg.get("prototype_init_std", 1e-3)),
+    ).to(device=device, dtype=dtype)
+
+    weight_source = None
+    if model.token_weight_logits is not None:
+        initial_weights, weight_source = resolve_token_weights(model_cfg, token_shape)
+        initial_logits = np.log(np.maximum(initial_weights, np.finfo(np.float64).tiny))
+        with torch.no_grad():
+            model.token_weight_logits.copy_(
+                torch.as_tensor(initial_logits, device=device, dtype=dtype)
+            )
+
+    batch_size = int(training_cfg.get("batch_size", 64))
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be positive, got {batch_size}.")
+    num_workers = int(training_cfg.get("num_workers", 0))
+    pin_memory = parse_bool(
+        training_cfg.get("pin_memory", device.type == "cuda"),
+        default=device.type == "cuda",
+    )
+    generator = torch.Generator().manual_seed(seed)
+    loaders = {
+        "train": make_log_spd_loader(
+            x_log,
+            y_tensor,
+            train_idx,
+            batch_size,
+            True,
+            num_workers,
+            pin_memory,
+            generator,
+        ),
+        "train_eval": make_log_spd_loader(
+            x_log,
+            y_tensor,
+            train_idx,
+            batch_size,
+            False,
+            num_workers,
+            pin_memory,
+        ),
+        "test": make_log_spd_loader(
+            x_log,
+            y_tensor,
+            test_idx,
+            batch_size,
+            False,
+            num_workers,
+            pin_memory,
+        ),
+    }
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(training_cfg.get("learning_rate", 1e-2)),
+        weight_decay=float(training_cfg.get("weight_decay", 0.0)),
+    )
+    gradient_clip_norm = training_cfg.get("gradient_clip_norm")
+    if gradient_clip_norm is not None:
+        gradient_clip_norm = float(gradient_clip_norm)
+    epochs = int(training_cfg.get("epochs", 100))
+    if epochs < 1:
+        raise ValueError(f"epochs must be positive, got {epochs}.")
+
+    print(
+        f"  classifier=differentiable dtype={dtype} device={device} "
+        f"epochs={epochs} batch_size={batch_size} pooling={pooling}"
+    )
+    history_rows: list[dict[str, Any]] = []
+    for epoch in range(1, epochs + 1):
+        train_metrics = train_differentiable_epoch(
+            model,
+            loaders["train"],
+            criterion,
+            optimizer,
+            device,
+            gradient_clip_norm,
+        )
+        history_rows.append(
+            {
+                "epoch": epoch,
+                "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                "train_loss": train_metrics["loss"],
+                "train_accuracy": train_metrics["accuracy"],
+                "train_macro_f1": train_metrics["macro_f1"],
+            }
+        )
+        print(
+            f"  epoch {epoch:03d}/{epochs} | "
+            f"loss={train_metrics['loss']:.4f} "
+            f"acc={train_metrics['accuracy']:.4f} "
+            f"mf1={train_metrics['macro_f1']:.4f}"
+        )
+
+    write_csv(run_dir / "history.csv", history_rows)
+    state_dict = {
+        name: tensor.detach().cpu().clone()
+        for name, tensor in model.state_dict().items()
+    }
+    torch.save(
+        {
+            "model_state_dict": state_dict,
+            "class_names": class_names,
+            "config": experiment_cfg,
+            "x_spd_shape": list(x_spd.shape),
+            "token_shape": list(token_shape),
+        },
+        run_dir / "model.pt",
+    )
+
+    rows = []
+    for split_name, split_idx, loader_name in (
+        ("train", train_idx, "train_eval"),
+        ("test", test_idx, "test"),
+    ):
+        metrics = evaluate_differentiable(
+            model,
+            loaders[loader_name],
+            criterion,
+            device,
+        )
+        rows.append(
+            {
+                "split": split_name,
+                "n_samples": int(len(split_idx)),
+                "loss": metrics["loss"],
+                "accuracy": metrics["accuracy"],
+                "macro_f1": metrics["macro_f1"],
+            }
+        )
+
+    token_weights = model.token_weights()
+    pooling_summary = {
+        "mode": pooling,
+        "token_shape": list(token_shape),
+        "has_parameters": token_weights is not None,
+    }
+    if token_weights is not None:
+        pooling_summary.update(
+            {
+                "weight_source": weight_source,
+                "token_weights": token_weights.detach().cpu().tolist(),
+            }
+        )
+    learned_scale = (
+        torch.nn.functional.softplus(model.mdm_head.logit_scale_raw) + eps
+    )
+    details = {
+        "metric": {"mean": "logeuclid", "distance": "logeuclid"},
+        "x_trial_spd_shape": [int(x_spd.shape[0]), int(x_spd.shape[-1]), int(x_spd.shape[-1])],
+        "token_pooling": pooling_summary,
+        "training_epochs": epochs,
+        "learned_logit_scale": float(learned_scale.detach().cpu()),
+        "parameter_count": int(sum(parameter.numel() for parameter in model.parameters())),
+    }
+    return rows, details
+
+
 def create_train_test_indices(
     y: np.ndarray,
     test_size: float,
@@ -689,6 +1096,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument(
+        "--classifier-type",
+        default=None,
+        help="Override model.classifier_type: pyriemann or differentiable.",
+    )
+    parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--precision",
+        default=None,
+        help="Override differentiable training precision: float32 or float64.",
+    )
+    parser.add_argument(
         "--metric",
         default=None,
         help=(
@@ -718,18 +1136,22 @@ def build_parser() -> argparse.ArgumentParser:
 def run_experiment(
     run_index: int,
     experiment_cfg: dict,
+    cli_classifier_type: str | None,
     cli_metric: str | None,
     cli_mean_metric: str | None,
     cli_distance_metric: str | None,
     base_output_dir: Path,
     dataset_cache_dir: Path,
     data_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]],
+    device: torch.device,
+    precision_override: str | None,
 ) -> dict:
-    from pyriemann.classification import MDM
-
     data_cfg = experiment_cfg["data"]
     model_cfg = experiment_cfg.get("model", {})
     training_cfg = experiment_cfg["training"]
+    classifier_type = normalize_classifier_type(
+        cli_classifier_type or resolve_classifier_type(model_cfg)
+    )
 
     validate_data_model_compatibility(data_cfg, model_cfg)
 
@@ -738,59 +1160,85 @@ def run_experiment(
         dataset_cache_dir,
         data_cache,
     )
-    x_trial_spd, pooling_summary = pool_spd_tokens(
-        x_spd,
-        model_cfg,
-        eps=float(model_cfg.get("eps", data_cfg.get("eps", 1e-8))),
-    )
     train_idx, test_idx = get_train_test_indices(
         y,
         training_cfg,
         subject_labels=subject_labels,
     )
 
-    metric = resolve_mdm_metric(
-        model_cfg,
-        cli_metric=cli_metric,
-        cli_mean_metric=cli_mean_metric,
-        cli_distance_metric=cli_distance_metric,
-    )
-    classifier = MDM(metric=metric)
-    classifier.fit(x_trial_spd[train_idx], y[train_idx])
-
-    split_indices = {
-        "train": train_idx,
-        "test": test_idx,
-    }
-    rows = []
-    for split_name, split_idx in split_indices.items():
-        prediction = classifier.predict(x_trial_spd[split_idx])
-        row = {
-            "split": split_name,
-            "n_samples": int(len(split_idx)),
-        }
-        row.update(compute_metrics(y[split_idx], prediction))
-        rows.append(row)
-
     run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(experiment_cfg)}"
-    run_dir.mkdir(parents=True, exist_ok=False)
-    with (run_dir / "results.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
+
+    if classifier_type == "pyriemann":
+        from pyriemann.classification import MDM
+
+        x_trial_spd, pooling_summary = pool_spd_tokens(
+            x_spd,
+            model_cfg,
+            eps=float(model_cfg.get("eps", data_cfg.get("eps", 1e-8))),
+        )
+        metric = resolve_mdm_metric(
+            model_cfg,
+            cli_metric=cli_metric,
+            cli_mean_metric=cli_mean_metric,
+            cli_distance_metric=cli_distance_metric,
+        )
+        classifier = MDM(metric=metric)
+        classifier.fit(x_trial_spd[train_idx], y[train_idx])
+
+        rows = []
+        for split_name, split_idx in {"train": train_idx, "test": test_idx}.items():
+            prediction = classifier.predict(x_trial_spd[split_idx])
+            row = {
+                "split": split_name,
+                "n_samples": int(len(split_idx)),
+            }
+            row.update(compute_metrics(y[split_idx], prediction))
+            rows.append(row)
+        classifier_details = {
+            "metric": metric,
+            "x_trial_spd_shape": list(x_trial_spd.shape),
+            "token_pooling": pooling_summary,
+        }
+        run_dir.mkdir(parents=True, exist_ok=False)
+        save_json(run_dir / "config.json", experiment_cfg)
+    else:
+        if any(
+            not _is_none_like(value)
+            for value in (cli_metric, cli_mean_metric, cli_distance_metric)
+        ):
+            raise ValueError(
+                "--metric, --mean-metric, and --distance-metric only apply to "
+                "classifier_type='pyriemann'."
+            )
+        run_dir.mkdir(parents=True, exist_ok=False)
+        save_json(run_dir / "config.json", experiment_cfg)
+        rows, classifier_details = run_differentiable_mdm(
+            x_spd=x_spd,
+            y=y,
+            train_idx=train_idx,
+            test_idx=test_idx,
+            class_names=class_names,
+            model_cfg=model_cfg,
+            training_cfg=training_cfg,
+            device=device,
+            precision_override=precision_override,
+            run_dir=run_dir,
+            experiment_cfg=experiment_cfg,
+        )
+
+    write_csv(run_dir / "results.csv", rows)
 
     summary = {
         "baseline": "mdm",
-        "metric": metric,
+        "classifier_type": classifier_type,
         "config": experiment_cfg,
         "class_names": class_names,
         "x_spd_shape": list(x_spd.shape),
-        "x_trial_spd_shape": list(x_trial_spd.shape),
-        "token_pooling": pooling_summary,
         "splits": rows,
     }
+    summary.update(classifier_details)
     save_json(run_dir / "summary.json", summary)
-    print(f"[MDM run {run_index}] saved {run_dir}")
+    print(f"[MDM run {run_index}] {classifier_type} saved {run_dir}")
     return {
         "status": "completed",
         "run_index": run_index,
@@ -818,6 +1266,7 @@ def main() -> int:
     args = build_parser().parse_args()
     config = load_yaml(args.config)
     experiments = expand_mdm_experiments(config)
+    experiments = override_mdm_classifier(experiments, args.classifier_type)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = args.output_dir or config.get("output", {}).get(
         "dir",
@@ -828,6 +1277,11 @@ def main() -> int:
         DEFAULT_MDM_DATASET_CACHE_DIR,
     )
     base_output_dir = PROJECT_ROOT / output_dir / timestamp
+    device = torch.device(
+        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is not available.")
     data_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]] = {}
     print(f"MDM dataset cache: {dataset_cache_dir}")
     all_metrics = []
@@ -838,12 +1292,15 @@ def main() -> int:
             result = run_experiment(
                 index,
                 experiment,
+                args.classifier_type,
                 args.metric,
                 args.mean_metric,
                 args.distance_metric,
                 base_output_dir,
                 dataset_cache_dir,
                 data_cache,
+                device,
+                args.precision,
             )
             completed_count += 1
         except (IncompatibleExperiment, ValueError) as exc:

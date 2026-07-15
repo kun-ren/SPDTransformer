@@ -32,6 +32,8 @@ data:
   moabb_force_update: [false]
 
 model:
+  # Add "differentiable" to compare trainable Log-Euclidean prototypes.
+  classifier_type: ["pyriemann"]
   pooling: ["original", "mean", "weighted"]
   token_weight_logits: null
   metric_mean: ["riemann", "logeuclid"]

@@ -8,6 +8,7 @@ from src.models.SPDTransformer import SPDTransformer
 
 
 MDMPoolingMode = Literal["mean", "weighted"]
+BaselineMDMPoolingMode = Literal["original", "mean", "weighted"]
 
 
 class LogEuclideanMDMHead(nn.Module):
@@ -52,6 +53,107 @@ class LogEuclideanMDMHead(nn.Module):
         distances = diff.square().sum(dim=(-2, -1))
         scale = F.softplus(self.logit_scale_raw) + self.eps
         return -scale * distances
+
+
+class LogEuclideanPrototypeClassifier(nn.Module):
+    """Differentiable MDM classifier for fixed log-SPD input tokens."""
+
+    def __init__(
+            self,
+            spd_dim: int,
+            num_classes: int,
+            token_shape: tuple[int, ...] = (),
+            pooling: BaselineMDMPoolingMode = "mean",
+            eps: float = 1e-6,
+            prototype_init_std: float = 1e-3,
+    ) -> None:
+        super().__init__()
+        self.spd_dim = int(spd_dim)
+        self.num_classes = int(num_classes)
+        self.token_shape = tuple(int(size) for size in token_shape)
+        self.pooling = self._normalize_pooling(pooling)
+
+        if self.spd_dim < 1:
+            raise ValueError(f"spd_dim must be positive, got {self.spd_dim}.")
+        if self.num_classes < 2:
+            raise ValueError(
+                f"num_classes must be >= 2, got {self.num_classes}."
+            )
+        if any(size < 1 for size in self.token_shape):
+            raise ValueError(
+                f"token_shape entries must be positive, got {self.token_shape}."
+            )
+        if self.pooling == "original" and self._token_count() != 1:
+            raise ValueError(
+                "pooling='original' requires exactly one log-SPD token, "
+                f"got token_shape={self.token_shape}."
+            )
+
+        if self.pooling == "weighted" and self.token_shape:
+            self.token_weight_logits = nn.Parameter(torch.zeros(self.token_shape))
+        else:
+            self.register_parameter("token_weight_logits", None)
+
+        self.mdm_head = LogEuclideanMDMHead(
+            spd_dim=self.spd_dim,
+            num_classes=self.num_classes,
+            eps=eps,
+            prototype_init_std=prototype_init_std,
+        )
+
+    @staticmethod
+    def _normalize_pooling(pooling: str) -> BaselineMDMPoolingMode:
+        normalized = str(pooling).strip().lower().replace("-", "_")
+        if normalized in {"original", "raw", "none", "identity", "trial", "single"}:
+            return "original"
+        if normalized in {"mean", "mdm_mean", "log_euclidean_mean"}:
+            return "mean"
+        if normalized in {"weighted", "weight", "mdm_weighted", "learned_weighted"}:
+            return "weighted"
+        raise ValueError(
+            "LogEuclideanPrototypeClassifier pooling must be 'original', "
+            f"'mean', or 'weighted', got {pooling!r}."
+        )
+
+    def _token_count(self) -> int:
+        count = 1
+        for size in self.token_shape:
+            count *= size
+        return count
+
+    def token_weights(self) -> torch.Tensor | None:
+        if self.token_weight_logits is None:
+            return None
+        return torch.softmax(self.token_weight_logits.reshape(-1), dim=0).reshape(
+            self.token_shape
+        )
+
+    def pool_log_tokens(self, x_log: torch.Tensor) -> torch.Tensor:
+        expected_shape = (*self.token_shape, self.spd_dim, self.spd_dim)
+        if tuple(x_log.shape[1:]) != expected_shape:
+            raise ValueError(
+                "Expected log-SPD input shape "
+                f"(batch, {expected_shape}), got {tuple(x_log.shape)}."
+            )
+
+        x_log = 0.5 * (x_log + x_log.transpose(-1, -2))
+        if not self.token_shape:
+            return x_log
+        if self.pooling == "original":
+            return x_log.reshape(x_log.shape[0], self.spd_dim, self.spd_dim)
+
+        token_dims = tuple(range(1, x_log.ndim - 2))
+        if self.pooling == "mean":
+            return x_log.mean(dim=token_dims)
+
+        weights = self.token_weights()
+        if weights is None:
+            raise RuntimeError("Weighted pooling requires token_weight_logits.")
+        view_shape = (1, *self.token_shape, 1, 1)
+        return (x_log * weights.view(view_shape)).sum(dim=token_dims)
+
+    def forward(self, x_log: torch.Tensor) -> torch.Tensor:
+        return self.mdm_head(self.pool_log_tokens(x_log))
 
 
 class SPDMDMClassifier(nn.Module):

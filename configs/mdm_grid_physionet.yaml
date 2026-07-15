@@ -34,10 +34,12 @@ data:
   task_types: unilateral_fist
 
 model:
-  pooling: ["original", "mean", "weighted"]
+  # Add "differentiable" to compare trainable Log-Euclidean prototypes.
+  classifier_type: ["pyriemann"]
+  pooling: ["mean", "weighted"]
   token_weight_logits: null
-  metric_mean: ["riemann", "logeuclid"]
-  metric_distance: ["riemann", "logeuclid"]
+#  metric_mean: ["riemann", "logeuclid"]
+#  metric_distance: ["riemann", "logeuclid"]
 
 training:
   seed: [42]
