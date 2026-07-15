@@ -868,7 +868,8 @@ def run_differentiable_mdm(
 
     print(
         f"  classifier=differentiable dtype={dtype} device={device} "
-        f"epochs={epochs} batch_size={batch_size} pooling={pooling}"
+        f"epochs={epochs} batch_size={batch_size} pooling={pooling}",
+        flush=True,
     )
     history_rows: list[dict[str, Any]] = []
     for epoch in range(1, epochs + 1):
@@ -880,6 +881,12 @@ def run_differentiable_mdm(
             device,
             gradient_clip_norm,
         )
+        test_metrics = evaluate_differentiable(
+            model,
+            loaders["test"],
+            criterion,
+            device,
+        )
         history_rows.append(
             {
                 "epoch": epoch,
@@ -887,13 +894,20 @@ def run_differentiable_mdm(
                 "train_loss": train_metrics["loss"],
                 "train_accuracy": train_metrics["accuracy"],
                 "train_macro_f1": train_metrics["macro_f1"],
+                "test_loss": test_metrics["loss"],
+                "test_accuracy": test_metrics["accuracy"],
+                "test_macro_f1": test_metrics["macro_f1"],
             }
         )
         print(
             f"  epoch {epoch:03d}/{epochs} | "
-            f"loss={train_metrics['loss']:.4f} "
+            f"train loss={train_metrics['loss']:.4f} "
             f"acc={train_metrics['accuracy']:.4f} "
-            f"mf1={train_metrics['macro_f1']:.4f}"
+            f"mf1={train_metrics['macro_f1']:.4f} | "
+            f"test loss={test_metrics['loss']:.4f} "
+            f"acc={test_metrics['accuracy']:.4f} "
+            f"mf1={test_metrics['macro_f1']:.4f}",
+            flush=True,
         )
 
     write_csv(run_dir / "history.csv", history_rows)
