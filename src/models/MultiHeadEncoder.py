@@ -4,7 +4,11 @@ import torch
 from torch import nn
 
 from src.models.GeooptBiMap import GeooptBiMap
-from src.models.SPDAttention import SingleHeadAttention, spd_log
+from src.models.SPDAttention import (
+    SingleHeadAttention,
+    normalize_position_bias_axes,
+    spd_log,
+)
 from src.models.SPDFeedForward import SPDFeedForward
 from src.models.LogResidualAdd import LogResidualAdd
 from src.models.ScaleShapeSequenceAddNorm import ScaleShapeSequenceAddNorm
@@ -117,6 +121,10 @@ class SPDMultiHeadEncoder(nn.Module):
             learnable_metric_rank: int | None = None,
             eps: float = 1e-6,
             use_position_bias: bool = True,
+            position_bias_axes: str | tuple[str, ...] | list[str] | None = None,
+            position_bias_max: float = 0.5,
+            attention_score_target_rms: float = 1.0,
+            attention_score_clip: float = 5.0,
             layer_norm_affine: bool = True,
             dropout: float = 0.0,
             stage_projection_init: Literal["identity", "random"] = "identity",
@@ -136,6 +144,10 @@ class SPDMultiHeadEncoder(nn.Module):
         self.debug_tensor_stats = debug_tensor_stats
         self.stage_transition = stage_transition
         self.eps = eps
+        enabled_position_bias_axes = normalize_position_bias_axes(
+            use_position_bias,
+            position_bias_axes,
+        )
 
         self.stage_projection = None
         if self.stage_transition and attention_dim != spd_in_dim:
@@ -162,8 +174,11 @@ class SPDMultiHeadEncoder(nn.Module):
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
                 eps=eps,
-                use_position=use_position_bias,
+                use_position="time" in enabled_position_bias_axes,
                 max_position=time_sequence_length,
+                position_bias_max=position_bias_max,
+                attention_score_target_rms=attention_score_target_rms,
+                attention_score_clip=attention_score_clip,
                 debug_tensor_stats=debug_tensor_stats,
             )
             for _ in range(num_heads)
@@ -206,8 +221,11 @@ class SPDMultiHeadEncoder(nn.Module):
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
                 eps=eps,
-                use_position=use_position_bias,
+                use_position="frequency" in enabled_position_bias_axes,
                 max_position=frequency_sequence_length,
+                position_bias_max=position_bias_max,
+                attention_score_target_rms=attention_score_target_rms,
+                attention_score_clip=attention_score_clip,
                 debug_tensor_stats=debug_tensor_stats,
             )
             for _ in range(num_heads)
@@ -250,8 +268,11 @@ class SPDMultiHeadEncoder(nn.Module):
                 learnable_metric_mode=learnable_metric_mode,
                 learnable_metric_rank=learnable_metric_rank,
                 eps=eps,
-                use_position=use_position_bias,
+                use_position="region" in enabled_position_bias_axes,
                 max_position=brain_region_sequence_length,
+                position_bias_max=position_bias_max,
+                attention_score_target_rms=attention_score_target_rms,
+                attention_score_clip=attention_score_clip,
                 debug_tensor_stats=debug_tensor_stats,
             )
             for _ in range(num_heads)

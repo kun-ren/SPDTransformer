@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from enum import Enum
 import math
 from typing import Literal
@@ -163,9 +164,9 @@ class PositionBias(nn.Module):
     """
     Learnable relative-position bias for one attention axis.
 
-    For query position i and key position j, the returned score bias is
-    indexed by the signed relative offset j - i. This keeps the bias tied to
-    relative distance instead of memorizing a separate value for every pair.
+    The effective bias is exactly zero at initialization, so enabling this
+    module starts from the no-position-bias model. A learnable ReZero-style
+    gate can then admit a symmetric locality prior when it helps the task.
     """
 
     def __init__(self, max_position: int) -> None:
@@ -327,7 +328,7 @@ class SingleHeadAttention(nn.Module):
             diff = log_q.unsqueeze(-3) - log_k.unsqueeze(-4)
             # diff [B, N_q, N_k, D, D]
             distance = torch.linalg.matrix_norm(diff, ord='fro', dim=(-2, -1))
-            return distance
+            return - distance / 5
             # [B, N_q, N_k]
 
         if self.metric == MetricType.LearnableMetric:
@@ -379,20 +380,30 @@ class SingleHeadAttention(nn.Module):
                 else:
                     diff = log_q.unsqueeze(-3) - log_k.unsqueeze(-4)
 
-            left_cholesky = torch.tril(self.left_metric_cholesky)
-            right_cholesky = torch.tril(self.right_metric_cholesky)
-            eye = torch.eye(
-                self.spd_out_dim,
-                device=diff.device,
-                dtype=diff.dtype,
-            )
-            g1 = left_cholesky @ left_cholesky.transpose(-1, -2) + self.eps * eye
-            g2 = right_cholesky @ right_cholesky.transpose(-1, -2) + self.eps * eye
+                left_cholesky = torch.tril(self.left_metric_cholesky)
+                right_cholesky = torch.tril(self.right_metric_cholesky)
+                eye = torch.eye(
+                    diff.shape[-1],
+                    device=diff.device,
+                    dtype=diff.dtype,
+                )
+                g1 = (
+                    left_cholesky @ left_cholesky.transpose(-1, -2)
+                    + self.eps * eye
+                )
+                g2 = (
+                    right_cholesky @ right_cholesky.transpose(-1, -2)
+                    + self.eps * eye
+                )
 
-            left_metric_diff = torch.einsum("ab,...bc->...ac", g1, diff)
-            metric_diff = torch.einsum("...ab,bc->...ac", left_metric_diff, g2)
-            squared_distance = (diff * metric_diff).sum(dim=(-2, -1))
-            return torch.sqrt(squared_distance.clamp_min(self.eps))
+                left_metric_diff = torch.einsum("ab,...bc->...ac", g1, diff)
+                metric_diff = torch.einsum(
+                    "...ab,bc->...ac",
+                    left_metric_diff,
+                    g2,
+                )
+                squared_distance = (diff * metric_diff).sum(dim=(-2, -1))
+                return -torch.sqrt(squared_distance.clamp_min(self.eps))
 
         raise NotImplementedError(f"Metric {self.metric.value!r} is not implemented yet.")
 
