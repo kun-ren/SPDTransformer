@@ -23,6 +23,7 @@ from src.baselines.baseline_utils import (
     compute_metrics,
     config_hash,
     expand_grid,
+    expand_data_grid,
     get_split_indices,
     load_spd_like_train,
     load_yaml,
@@ -74,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def expand_experiments(config: dict[str, Any]) -> list[dict[str, Any]]:
-    data_grid = expand_grid(config.get("data", {}))
+    data_grid = expand_data_grid(config.get("data", {}))
     model_grid = expand_grid(config.get("model", {}))
     training_grid = expand_grid(config.get("training", {}))
     return [

@@ -15,6 +15,46 @@ class MetricType(Enum):
     LearnableMetric = 'learnable-metric'
     LearnableAffineLogFunction = 'learnable-affine-log-function'
 
+POSITION_BIAS_AXES = frozenset({"time", "frequency", "region"})
+
+
+def normalize_position_bias_axes(
+        use_position_bias: bool,
+        position_bias_axes: str | Iterable[str] | None = None,
+) -> frozenset[str]:
+    """Normalize the configurable attention axes that receive position bias.
+
+    Position bias is conservative by default: when enabled without an explicit
+    axis list, it is used only for time. Frequency and brain-region order do not
+    generally have the same one-dimensional distance semantics as time.
+    """
+    if not use_position_bias:
+        return frozenset()
+
+    if position_bias_axes is None:
+        return frozenset({"time"})
+
+    if isinstance(position_bias_axes, str):
+        normalized = position_bias_axes.strip().lower().replace("-", "_")
+        if normalized in {"", "none", "off", "false"}:
+            return frozenset()
+        if normalized in {"all", "true"}:
+            return POSITION_BIAS_AXES
+        axes = {
+            axis.strip()
+            for axis in normalized.replace(";", ",").split(",")
+            if axis.strip()
+        }
+    else:
+        axes = {str(axis).strip().lower() for axis in position_bias_axes}
+
+    unknown = axes - POSITION_BIAS_AXES
+    if unknown:
+        valid = ", ".join(sorted(POSITION_BIAS_AXES))
+        raise ValueError(
+            f"Unknown position-bias axes {sorted(unknown)}. Valid axes: {valid}."
+        )
+    return frozenset(axes)
 
 def _symmetrize(x: torch.Tensor) -> torch.Tensor:
     return 0.5 * (x + x.transpose(-1, -2))
@@ -169,17 +209,24 @@ class PositionBias(nn.Module):
     gate can then admit a symmetric locality prior when it helps the task.
     """
 
-    def __init__(self, max_position: int) -> None:
+    def __init__(
+            self,
+            max_position: int,
+            max_bias: float = 0.5,
+    ) -> None:
         super().__init__()
         if max_position < 1:
             raise ValueError(
                 f"max_position must be positive, got {max_position}."
             )
+        if max_bias <= 0:
+            raise ValueError(f"max_bias must be positive, got {max_bias}.")
 
         self.max_position = max_position
-        self.relative_bias = nn.Parameter(
-            torch.ones(2 * self.max_position - 1)
-        )
+        self.max_bias = float(max_bias)
+        distance = torch.arange(max_position, dtype=torch.get_default_dtype())
+        self.distance_bias = nn.Parameter(-distance / max(max_position - 1, 1))
+        self.gate = nn.Parameter(torch.zeros(()))
 
     def forward(self, attention_scope: int) -> torch.Tensor:
         if not 1 <= attention_scope <= self.max_position:
@@ -190,11 +237,15 @@ class PositionBias(nn.Module):
 
         positions = torch.arange(
             attention_scope,
-            device=self.relative_bias.device,
+            device=self.distance_bias.device,
         )
-        relative_offset = positions[None, :] - positions[:, None]
-        relative_index = relative_offset + self.max_position - 1
-        return self.relative_bias[relative_index]
+        distance = (positions[None, :] - positions[:, None]).abs()
+        distance_values = (
+            self.max_bias
+            * torch.tanh(self.gate)
+            * torch.tanh(self.distance_bias[:attention_scope])
+        )
+        return distance_values[distance]
 
 
 class SingleHeadAttention(nn.Module):
@@ -202,31 +253,82 @@ class SingleHeadAttention(nn.Module):
     def __init__(
             self,
             spd_in_dim,
-            attention_dim,
+            attention_dim=None,
             metric='log-euclidean',
             stage_transition=True,
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
-            learnable_metric_mode: Literal["low-rank", "kronecker"] = "low-rank",
+            learnable_metric_mode: Literal["full", "low-rank"] = "low-rank",
+            learnable_metric_score: Literal["qgk", "distance"] = "qgk",
             learnable_metric_rank: int | None = None,
             eps: float = 1e-6,
             use_position: bool = False,
             max_position: int = 128,
+            position_bias_max: float = 0.5,
+            attention_score_target_rms: float = 1.0,
+            attention_score_clip: float = 5.0,
             debug_tensor_stats: bool = False,
+            spd_out_dim: int | None = None,
+            metric_eps: float | None = None,
     ):
         super().__init__()
+        if attention_dim is None:
+            if spd_out_dim is None:
+                raise ValueError("attention_dim must be provided.")
+            attention_dim = int(spd_out_dim)
+        elif spd_out_dim is not None and int(spd_out_dim) != int(attention_dim):
+            raise ValueError(
+                "attention_dim and legacy spd_out_dim must match when both "
+                f"are provided, got {attention_dim} and {spd_out_dim}."
+            )
+        if metric_eps is not None:
+            eps = float(metric_eps)
+
         self.spd_in_dim = spd_in_dim
         self.attention_dim = attention_dim
         self.metric = MetricType(metric)
         self.stage_transition = stage_transition
-        self.learnable_metric_mode = learnable_metric_mode
+        normalized_metric_mode = (
+            str(learnable_metric_mode).strip().lower().replace("_", "-")
+        )
+        if normalized_metric_mode in {"matrix", "full-rank", "unparameterized"}:
+            normalized_metric_mode = "full"
+        if normalized_metric_mode not in {"full", "low-rank"}:
+            raise ValueError(
+                "learnable_metric_mode must be 'full' or 'low-rank', got "
+                f"{learnable_metric_mode!r}."
+            )
+        normalized_metric_score = (
+            str(learnable_metric_score).strip().lower().replace("_", "-")
+        )
+        if normalized_metric_score in {"dot", "dot-product", "bilinear", "similarity"}:
+            normalized_metric_score = "qgk"
+        if normalized_metric_score in {"dist", "squared-distance", "distance-squared"}:
+            normalized_metric_score = "distance"
+        if normalized_metric_score not in {"qgk", "distance"}:
+            raise ValueError(
+                "learnable_metric_score must be 'qgk' or 'distance', got "
+                f"{learnable_metric_score!r}."
+            )
+        self.learnable_metric_mode = normalized_metric_mode
+        self.learnable_metric_score = normalized_metric_score
         self.eps = eps
         self.attention_dropout = nn.Dropout(attention_dropout)
         self.debug_attention_dropout = debug_attention_dropout
         self.debug_tensor_stats = debug_tensor_stats
         self.affine_log_eps = eps
         self.use_position = use_position
-        self.attention_score_clip = 30.0
+        if attention_score_target_rms <= 0:
+            raise ValueError(
+                "attention_score_target_rms must be positive, got "
+                f"{attention_score_target_rms}."
+            )
+        if attention_score_clip <= 0:
+            raise ValueError(
+                f"attention_score_clip must be positive, got {attention_score_clip}."
+            )
+        self.attention_score_target_rms = float(attention_score_target_rms)
+        self.attention_score_clip = float(attention_score_clip)
 
         if self.stage_transition:
             self.query = GeooptBiMap(
@@ -257,36 +359,53 @@ class SingleHeadAttention(nn.Module):
             )
             self.value = GeooptBiMap(in_dim=spd_in_dim, out_dim=self.spd_in_dim, eps=self.eps)
 
+        if self.metric == MetricType.LearnableAffineLogFunction:
+            inverse_softplus_one = math.log(math.expm1(1.0))
+            self.affine_log_scale_raw = nn.Parameter(
+                torch.tensor(inverse_softplus_one)
+            )
+        else:
+            self.register_parameter("affine_log_scale_raw", None)
 
         tangent_feature_dim = attention_dim * (attention_dim + 1) // 2
 
         self.tangent_feature_dim = tangent_feature_dim
+        self.learnable_metric_rank = None
+        self.metric_matrix = None
+        self.metric_low_rank = None
         if self.metric == MetricType.LearnableMetric:
-            if learnable_metric_mode == "low-rank":
-                self.learnable_metric_rank = learnable_metric_rank or min(21, tangent_feature_dim)
+            if self.learnable_metric_mode == "full":
+                # Direct, unconstrained dense G in tangent-vector coordinates.
+                # It is symmetrized at use time but receives no factorization.
+                self.metric_matrix = nn.Parameter(torch.eye(tangent_feature_dim))
+            else:
+                rank = (
+                    min(21, tangent_feature_dim)
+                    if learnable_metric_rank is None or int(learnable_metric_rank) <= 0
+                    else int(learnable_metric_rank)
+                )
+                if rank > tangent_feature_dim:
+                    raise ValueError(
+                        "learnable_metric_rank must not exceed tangent feature "
+                        f"dimension {tangent_feature_dim}, got {rank}."
+                    )
+                self.learnable_metric_rank = rank
                 self.metric_low_rank = nn.Parameter(
                     torch.randn(tangent_feature_dim, self.learnable_metric_rank) * 0.02,
                 )
                 nn.init.orthogonal_(self.metric_low_rank)
-                self.left_metric_cholesky = None
-                self.right_metric_cholesky = None
-            elif learnable_metric_mode == "kronecker":  # learnable anisotropic log-map attention
-                self.metric_low_rank = None
-                self.left_metric_cholesky = nn.Parameter(torch.eye(attention_dim))
-                self.right_metric_cholesky = nn.Parameter(torch.eye(attention_dim))
-        else:
-            self.metric_low_rank = None
-            self.left_metric_cholesky = None
-            self.right_metric_cholesky = None
 
         self.position_bias = (
-            PositionBias(max_position=max_position)
+            PositionBias(max_position=max_position, max_bias=position_bias_max)
             if self.use_position
             else None
         )
         row, col = torch.triu_indices(attention_dim, attention_dim)
         self.register_buffer("triu_row", row, persistent=False)
         self.register_buffer("triu_col", col, persistent=False)
+        vector_scale = torch.ones(row.numel())
+        vector_scale[row != col] = math.sqrt(2.0)
+        self.register_buffer("triu_scale", vector_scale, persistent=False)
 
     def forward(
             self,
@@ -301,9 +420,9 @@ class SingleHeadAttention(nn.Module):
 
         v = self.value(x)
 
-        log_v = spd_log(v)
-        log_q = spd_log(q)
-        log_k = spd_log(k)
+        log_v = spd_log(v, eps=self.eps)
+        log_q = spd_log(q, eps=self.eps)
+        log_k = spd_log(k, eps=self.eps)
 
         if return_aux:
             aux['P_q'] = q
@@ -311,6 +430,8 @@ class SingleHeadAttention(nn.Module):
             aux['P_v'] = v
 
         score = self.learnableRiemannianScore(log_q, log_k)
+        if self.position_bias is not None:
+            score = score + self.position_bias(score.shape[-1])
         score = self._stabilize_attention_score(score)
 
         attention = torch.softmax(score, dim=-1)
@@ -332,78 +453,15 @@ class SingleHeadAttention(nn.Module):
             # [B, N_q, N_k]
 
         if self.metric == MetricType.LearnableMetric:
+            q_vec = self._upper_triangular_vectorize_cached(log_q)
+            k_vec = self._upper_triangular_vectorize_cached(log_k)
 
-            if self.learnable_metric_mode == "low-rank":
-                q_vec = self._upper_triangular_vectorize_cached(log_q)
-                k_vec = self._upper_triangular_vectorize_cached(log_k)
+            if self.learnable_metric_mode == "full":
+                score = self._full_metric_score(q_vec, k_vec)
+            else:
+                score = self._low_rank_metric_score(q_vec, k_vec)
 
-                # dot product
-
-                q_low = torch.einsum("...d,dr->...r", q_vec, self.metric_low_rank)
-                k_low = torch.einsum("...d,dr->...r", k_vec, self.metric_low_rank)
-
-                score_low = torch.einsum("...ir,...jr->...ij", q_low, k_low)
-
-                score_eye = torch.einsum("...id,...jd->...ij", q_vec, k_vec)
-
-                score = score_low + self.eps * score_eye  # [b, s, f, f]
-                score = score / math.sqrt(self.learnable_metric_rank)
-
-                if self.position_bias is not None:
-                    score = score + self.position_bias(score.shape[-1])
-
-                return score
-
-
-                # distance
-                # q_low = torch.einsum("...d,dr->...r", q_vec, self.L)
-                # k_low = torch.einsum("...d,dr->...r", k_vec, self.L)
-                #
-                # diff_low = q_low.unsqueeze(-2) - k_low.unsqueeze(-3)
-                # dist2_low = (diff_low ** 2).sum(dim=-1)
-                #
-                #
-                # diff = q_vec.unsqueeze(-2) - k_vec.unsqueeze(-3)
-                # dist2_eye = (diff ** 2).sum(dim=-1)
-                # dist2 = dist2_low + self.eps * dist2_eye
-                # score = - dist2
-                # score = score / math.sqrt(self.learnable_metric_rank)
-                # score = - dis
-                # if self.position_bias is not None:
-                    # score = score + self.position_bias(score.shape[-1])
-                # return score
-
-            elif self.learnable_metric_mode == "kronecker":
-
-                if log_q.ndim == 2 and log_k.ndim == 2:
-                    diff = log_q - log_k
-                else:
-                    diff = log_q.unsqueeze(-3) - log_k.unsqueeze(-4)
-
-                left_cholesky = torch.tril(self.left_metric_cholesky)
-                right_cholesky = torch.tril(self.right_metric_cholesky)
-                eye = torch.eye(
-                    diff.shape[-1],
-                    device=diff.device,
-                    dtype=diff.dtype,
-                )
-                g1 = (
-                    left_cholesky @ left_cholesky.transpose(-1, -2)
-                    + self.eps * eye
-                )
-                g2 = (
-                    right_cholesky @ right_cholesky.transpose(-1, -2)
-                    + self.eps * eye
-                )
-
-                left_metric_diff = torch.einsum("ab,...bc->...ac", g1, diff)
-                metric_diff = torch.einsum(
-                    "...ab,bc->...ac",
-                    left_metric_diff,
-                    g2,
-                )
-                squared_distance = (diff * metric_diff).sum(dim=(-2, -1))
-                return -torch.sqrt(squared_distance.clamp_min(self.eps))
+            return score
 
         raise NotImplementedError(f"Metric {self.metric.value!r} is not implemented yet.")
 
@@ -413,16 +471,25 @@ class SingleHeadAttention(nn.Module):
                 "Non-finite SPD attention score detected before softmax. "
                 "Check SPD eigenvalue range, eps, and attention learning rate."
             )
-        return score.clamp(
+        score = score - score.mean(dim=-1, keepdim=True)
+        row_rms = score.square().mean(dim=-1, keepdim=True).sqrt()
+        compression = (
+            row_rms / self.attention_score_target_rms
+        ).clamp_min(1.0)
+        score = score / compression
+        score = score.clamp(
             min=-self.attention_score_clip,
             max=self.attention_score_clip,
         )
+        return score - score.amax(dim=-1, keepdim=True)
 
     @staticmethod
     def _upper_triangular_vectorize(x: torch.Tensor) -> torch.Tensor:
         spd_dim = x.shape[-1]
         row, col = torch.triu_indices(spd_dim, spd_dim, device=x.device)
-        return x[..., row, col]
+        scale = torch.ones(row.numel(), device=x.device, dtype=x.dtype)
+        scale[row != col] = math.sqrt(2.0)
+        return x[..., row, col] * scale
 
     def _upper_triangular_vectorize_cached(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-2:] != (self.attention_dim, self.attention_dim):
@@ -431,7 +498,57 @@ class SingleHeadAttention(nn.Module):
                 f"(..., {self.attention_dim}, {self.attention_dim}), "
                 f"got {tuple(x.shape)}."
             )
-        return x[..., self.triu_row, self.triu_col]
+        return x[..., self.triu_row, self.triu_col] * self.triu_scale.to(
+            dtype=x.dtype
+        )
+
+    def _full_metric_score(
+            self,
+            q_vec: torch.Tensor,
+            k_vec: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.metric_matrix is None:
+            raise RuntimeError("Full metric score requires metric_matrix G.")
+
+        metric = 0.5 * (
+            self.metric_matrix + self.metric_matrix.transpose(-1, -2)
+        )
+        scale = math.sqrt(self.tangent_feature_dim)
+
+        if self.learnable_metric_score == "qgk":
+            q_metric = torch.einsum("...id,df->...if", q_vec, metric)
+            score = torch.einsum("...id,...jd->...ij", q_metric, k_vec)
+            return score / scale
+
+        diff = q_vec.unsqueeze(-2) - k_vec.unsqueeze(-3)
+        metric_diff = torch.einsum("...ijd,df->...ijf", diff, metric)
+        squared_distance = (diff * metric_diff).sum(dim=-1)
+        return -squared_distance / scale
+
+    def _low_rank_metric_score(
+            self,
+            q_vec: torch.Tensor,
+            k_vec: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.metric_low_rank is None or self.learnable_metric_rank is None:
+            raise RuntimeError("Low-rank metric score requires factor L and rank r.")
+
+        scale = math.sqrt(self.learnable_metric_rank)
+        if self.learnable_metric_score == "qgk":
+            q_low = torch.einsum("...d,dr->...r", q_vec, self.metric_low_rank)
+            k_low = torch.einsum("...d,dr->...r", k_vec, self.metric_low_rank)
+            score_low = torch.einsum("...ir,...jr->...ij", q_low, k_low)
+            score_eye = torch.einsum("...id,...jd->...ij", q_vec, k_vec)
+            return (score_low + self.eps * score_eye) / scale
+
+        diff = q_vec.unsqueeze(-2) - k_vec.unsqueeze(-3)
+        diff_low = torch.einsum("...ijd,dr->...ijr", diff, self.metric_low_rank)
+        squared_distance_low = diff_low.square().sum(dim=-1)
+        squared_distance_eye = diff.square().sum(dim=-1)
+        squared_distance = (
+            squared_distance_low + self.eps * squared_distance_eye
+        )
+        return -squared_distance / scale
 
     @staticmethod
     def _pairwise_squared_euclidean(

@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-MDM_DATASET_CACHE_VERSION = 1
+MDM_DATASET_CACHE_VERSION = 2
 DEFAULT_MDM_DATASET_CACHE_DIR = (
     PROJECT_ROOT / "experiments" / "cache" / "mdm_preprocessed_datasets"
 )
@@ -28,13 +28,14 @@ from src.baselines.baseline_utils import (
     DEFAULT_CONFIG,
     compute_metrics,
     config_hash,
+    expand_data_grid,
     expand_grid,
     load_spd_like_train,
     load_yaml,
     matrix_exp,
     matrix_log,
     parse_bool,
-    normalize_filter_bank,
+    normalize_data_time_config,
     resolve_split_file,
     save_json,
 )
@@ -86,7 +87,22 @@ def resolve_project_path(path_value: Any, default: Path) -> Path:
 
 
 def dataset_cache_key(data_cfg: dict[str, Any]) -> str:
-    return config_hash({"data": data_cfg})
+    return config_hash({"data": mdm_preprocessing_data_config(data_cfg)})
+
+
+def mdm_preprocessing_data_config(data_cfg: dict[str, Any]) -> dict[str, Any]:
+    canonical = normalize_data_time_config(data_cfg)
+    split_only_keys = {
+        "seed",
+        "test_size",
+        "val_size",
+        "allow_subject_overlap",
+    }
+    return {
+        key: deepcopy(value)
+        for key, value in canonical.items()
+        if key not in split_only_keys
+    }
 
 
 def dataset_cache_path(cache_dir: Path, data_key: str) -> Path:
@@ -113,27 +129,6 @@ def is_filter_bank_scheme(value: Any) -> bool:
     return isinstance(value, list) and bool(value) and all(
         is_band_pair(item) for item in value
     )
-
-
-def mdm_data_grid_values(key: str, value: Any) -> list[Any]:
-    if key == "filter_bank":
-        if is_filter_bank_scheme(value):
-            return [normalize_filter_bank(value)]
-        if isinstance(value, list) and value and all(
-            is_filter_bank_scheme(item) for item in value
-        ):
-            return [normalize_filter_bank(item) for item in value]
-    if isinstance(value, list):
-        return value
-    return [value]
-
-
-def expand_mdm_data_grid(section: dict[str, Any]) -> list[dict[str, Any]]:
-    if not section:
-        return [{}]
-    keys = list(section)
-    value_lists = [mdm_data_grid_values(key, section[key]) for key in keys]
-    return [dict(zip(keys, values)) for values in itertools.product(*value_lists)]
 
 
 def mdm_model_grid_values(key: str, value: Any) -> list[Any]:
@@ -169,7 +164,7 @@ def expand_mdm_model_grid(section: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def expand_mdm_experiments(config: dict[str, Any]) -> list[dict[str, Any]]:
-    data_grid = expand_mdm_data_grid(config.get("data", {}))
+    data_grid = expand_data_grid(config.get("data", {}))
     model_grid = expand_mdm_model_grid(config.get("model", {}))
     training_grid = expand_grid(config.get("training", {}))
     output_cfg = deepcopy(config.get("output", {}))
@@ -254,6 +249,12 @@ def resolve_classifier_type(model_cfg: dict[str, Any]) -> str:
 
 
 def obvious_original_mdm_token_count(data_cfg: dict[str, Any]) -> int | None:
+    has_explicit_epoch = "epoch_slice" in data_cfg or {
+        "epoch_tmin",
+        "epoch_tmax",
+    }.issubset(data_cfg)
+    has_explicit_segment = "segment_slice" in data_cfg or "segment_duration" in data_cfg
+    data_cfg = normalize_data_time_config(data_cfg)
     token_count = 1
     filter_bank = data_cfg.get("filter_bank")
     if is_filter_bank_scheme(filter_bank):
@@ -265,14 +266,9 @@ def obvious_original_mdm_token_count(data_cfg: dict[str, Any]) -> int | None:
         # Any enabled region preset creates more than one SPD token per trial.
         token_count *= 2
 
-    epoch_tmin = data_cfg.get("epoch_tmin")
-    epoch_tmax = data_cfg.get("epoch_tmax")
-    segment_duration = data_cfg.get("segment_duration")
-    if (
-        not _is_none_like(epoch_tmin)
-        and not _is_none_like(epoch_tmax)
-        and not _is_none_like(segment_duration)
-    ):
+    if has_explicit_epoch and has_explicit_segment:
+        epoch_tmin, epoch_tmax = data_cfg["epoch_slice"]
+        segment_duration, _ = data_cfg["segment_slice"]
         epoch_duration = float(epoch_tmax) - float(epoch_tmin)
         if float(segment_duration) < epoch_duration - 1e-9:
             token_count *= 2
@@ -296,8 +292,8 @@ def validate_data_model_compatibility(
             "pooling='original' requires one SPD matrix per trial, but this "
             "data config obviously creates multiple tokens "
             f"(filter_bank={data_cfg.get('filter_bank')!r}, "
-            f"segment_duration={data_cfg.get('segment_duration')!r}, "
-            f"epoch=({data_cfg.get('epoch_tmin')!r}, {data_cfg.get('epoch_tmax')!r}), "
+            f"segment_slice={data_cfg.get('segment_slice')!r}, "
+            f"epoch_slice={data_cfg.get('epoch_slice')!r}, "
             f"brain_region_mode={data_cfg.get('brain_region_mode')!r})."
         )
 
@@ -380,13 +376,14 @@ def load_or_preprocess_spd(
     cache_dir: Path,
     memory_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    preprocessing_cfg = mdm_preprocessing_data_config(data_cfg)
     data_key = dataset_cache_key(data_cfg)
     if data_key in memory_cache:
         print(f"\nUsing in-memory MDM data cache {data_key}")
         return memory_cache[data_key]
 
     cache_path = dataset_cache_path(cache_dir, data_key)
-    cached_dataset = load_cached_dataset(cache_path, data_cfg)
+    cached_dataset = load_cached_dataset(cache_path, preprocessing_cfg)
     if cached_dataset is not None:
         print(f"\nLoaded MDM preprocessed data from cache {data_key}: {cache_path}")
         x_cached, y_cached, subjects_cached, class_names_cached = cached_dataset
@@ -398,14 +395,21 @@ def load_or_preprocess_spd(
         memory_cache[data_key] = cached_dataset
         return cached_dataset
 
-    print(f"\nPreprocessing MDM data config {data_key}: {data_cfg}")
-    dataset = load_spd_like_train(data_cfg)
+    print(f"\nPreprocessing MDM data config {data_key}: {preprocessing_cfg}")
+    dataset = load_spd_like_train(preprocessing_cfg)
     x_spd, y, subject_labels, class_names = dataset
     print(
         f"  X.shape={x_spd.shape}, y.shape={y.shape}, "
         f"subjects={len(set(subject_labels.tolist()))}, classes={class_names}"
     )
-    save_cached_dataset(cache_path, data_cfg, x_spd, y, subject_labels, class_names)
+    save_cached_dataset(
+        cache_path,
+        preprocessing_cfg,
+        x_spd,
+        y,
+        subject_labels,
+        class_names,
+    )
     print(f"  Saved MDM preprocessed data cache: {cache_path}")
     memory_cache[data_key] = dataset
     return dataset
@@ -1016,12 +1020,18 @@ def get_train_test_indices(
     y: np.ndarray,
     training_cfg: dict,
     subject_labels: np.ndarray | None = None,
+    data_cfg: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    test_size = float(training_cfg.get("test_size", 0.2))
-    seed = int(training_cfg.get("seed", 42))
-    split_file = resolve_split_file(training_cfg.get("split_file"))
+    split_cfg = dict(training_cfg)
+    if data_cfg is not None:
+        for key in ("seed", "test_size", "allow_subject_overlap"):
+            if key in data_cfg:
+                split_cfg[key] = data_cfg[key]
+    test_size = float(split_cfg.get("test_size", 0.2))
+    seed = int(split_cfg.get("seed", 42))
+    split_file = resolve_split_file(split_cfg.get("split_file"))
     allow_subject_overlap = parse_bool(
-        training_cfg.get("allow_subject_overlap", True),
+        split_cfg.get("allow_subject_overlap", True),
         default=True,
     )
     split_strategy = "epoch" if allow_subject_overlap else "subject"
@@ -1178,6 +1188,7 @@ def run_experiment(
         y,
         training_cfg,
         subject_labels=subject_labels,
+        data_cfg=data_cfg,
     )
 
     run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(experiment_cfg)}"

@@ -15,18 +15,16 @@ data:
   autoreject_n_jobs: [2]
   autoreject_cv: [10]
   baseline_correction: [null]
-  epoch_tmin: [0.0]
-  epoch_tmax: [4.0]
-  segment_duration: [4.0]
-  stride_duration: [null]
+  epoch_slice: [[0.0, 4.0]]
+  segment_slice: [[4.0, null]]
   moabb_accept_terms: [true]
   moabb_force_update: [false]
-
-training:
-  seed: [42]
   test_size: [0.15]
   val_size: [0.15]
   allow_subject_overlap: [true]
+
+training:
+  seed: [42]
   split_file: experiments/splits/bnci2014_001_csp_lda_seed42.json
 
 output:

@@ -357,6 +357,7 @@ def run_experiment(
         y,
         training_cfg,
         subject_labels=subject_labels,
+        data_cfg=data_cfg,
     )
 
     dtype = resolve_precision(training_cfg.get("precision", "float64"))

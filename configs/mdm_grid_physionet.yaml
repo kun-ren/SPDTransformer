@@ -23,13 +23,13 @@ data:
   autoreject_cv: [10]
   baseline_correction: [null]
   baseline_window: "-3,0"
-  epoch_tmin: [0.0]
-  epoch_tmax: [4.0]
-  segment_duration: [4.0]
-  stride_duration: [0.5]
+  epoch_slice: [[0.0, 4.0]]
+  segment_slice: [[4.0, 0.5]]
   imaged: true
   executed: false
   task_types: unilateral_fist
+  test_size: [0.2]
+  allow_subject_overlap: [true]
 
 model:
   # Add "differentiable" to compare trainable Log-Euclidean prototypes.
@@ -41,8 +41,6 @@ model:
 
 training:
   seed: [42]
-  test_size: [0.2]
-  allow_subject_overlap: [true]
   split_file: null
   # Used only by classifier_type="differentiable".
   epochs: [150]

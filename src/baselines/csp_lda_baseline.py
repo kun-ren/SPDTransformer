@@ -72,6 +72,7 @@ def run_experiment(
         y,
         training_cfg,
         subject_labels=subject_labels,
+        data_cfg=data_cfg,
     )
     split_indices = {
         "train": train_idx,

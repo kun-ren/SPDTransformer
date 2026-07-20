@@ -34,6 +34,12 @@ from src.datasets.PhysioNetMI_preprocess import (
     segment_epochs,
 )
 from src.training.shared_split import load_or_create_split_indices
+from src.training.config_grid import (
+    expand_data_grid,
+    expand_grid,
+    normalize_data_time_config,
+    normalize_filter_bank,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -48,50 +54,8 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return config
 
 
-def normalize_filter_bank(filter_bank: Any) -> list[list[float]]:
-    if not isinstance(filter_bank, list) or not filter_bank:
-        raise ValueError("data.filter_bank must be a non-empty list.")
-
-    normalized = []
-    for band in filter_bank:
-        if not isinstance(band, (list, tuple)) or len(band) != 2:
-            raise ValueError(
-                "Each filter bank item must be [low_freq, high_freq], "
-                f"got {band!r}."
-            )
-        normalized.append([float(band[0]), float(band[1])])
-    return normalized
-
-
-def is_filter_bank_value(key: str, value: Any) -> bool:
-    if key != "filter_bank" or not isinstance(value, list):
-        return False
-    return bool(value) and all(
-        isinstance(item, (list, tuple))
-        and len(item) == 2
-        and all(isinstance(number, (int, float)) for number in item)
-        for item in value
-    )
-
-
-def grid_values(key: str, value: Any) -> list[Any]:
-    if is_filter_bank_value(key, value):
-        return [normalize_filter_bank(value)]
-    if isinstance(value, list):
-        return value
-    return [value]
-
-
-def expand_grid(section: dict[str, Any]) -> list[dict[str, Any]]:
-    if not section:
-        return [{}]
-    keys = list(section)
-    value_lists = [grid_values(key, section[key]) for key in keys]
-    return [dict(zip(keys, values)) for values in itertools.product(*value_lists)]
-
-
 def expand_data_training_experiments(config: dict[str, Any]) -> list[dict[str, Any]]:
-    data_grid = expand_grid(config.get("data", {}))
+    data_grid = expand_data_grid(config.get("data", {}))
     training_grid = expand_grid(config.get("training", {}))
     output_cfg = deepcopy(config.get("output", {}))
     experiments = []
@@ -238,16 +202,22 @@ def get_split_indices(
     y: np.ndarray,
     training_cfg: dict[str, Any],
     subject_labels: np.ndarray | None = None,
+    data_cfg: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    split_cfg = dict(training_cfg)
+    if data_cfg is not None:
+        for key in ("seed", "test_size", "val_size", "allow_subject_overlap"):
+            if key in data_cfg:
+                split_cfg[key] = data_cfg[key]
     return load_or_create_split_indices(
         y=y,
-        test_size=float(training_cfg.get("test_size", 0.15)),
-        val_size=float(training_cfg.get("val_size", 0.15)),
-        seed=int(training_cfg.get("seed", 42)),
-        split_file=resolve_split_file(training_cfg.get("split_file")),
+        test_size=float(split_cfg.get("test_size", 0.15)),
+        val_size=float(split_cfg.get("val_size", 0.15)),
+        seed=int(split_cfg.get("seed", 42)),
+        split_file=resolve_split_file(split_cfg.get("split_file")),
         subjects=subject_labels,
         allow_subject_overlap=parse_bool(
-            training_cfg.get("allow_subject_overlap", True),
+            split_cfg.get("allow_subject_overlap", True),
             default=True,
         ),
     )
@@ -256,8 +226,11 @@ def get_split_indices(
 def load_spd_like_train(
     data_cfg: dict[str, Any],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    data_cfg = normalize_data_time_config(data_cfg)
     dataset_name = normalize_dataset_name(data_cfg.get("dataset", "physionet_mi"))
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
+    epoch_tmin, epoch_tmax = data_cfg["epoch_slice"]
+    segment_duration, stride_duration = data_cfg["segment_slice"]
     subjects = parse_subjects(data_cfg.get("subjects"))
     covariance_signal_scale = resolve_covariance_signal_scale(
         data_cfg.get("covariance_signal_scale", "auto"),
@@ -275,16 +248,16 @@ def load_spd_like_train(
             estimator=str(data_cfg.get("estimator", "lwf")),
             eps=float(data_cfg.get("eps", 1e-6)),
             sfreq=float(data_cfg.get("sfreq", 160)),
-            segment_duration=float(data_cfg.get("segment_duration", 1.0)),
-            stride_duration=data_cfg.get("stride_duration", 0.5),
+            segment_duration=float(segment_duration),
+            stride_duration=stride_duration,
             imaged=parse_bool(data_cfg.get("imaged", True), default=True),
             executed=parse_bool(data_cfg.get("executed", False), default=False),
             task_types=parse_task_types(data_cfg.get("task_types")),
             reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
             baseline_correction=data_cfg.get("baseline_correction"),
             baseline_window=data_cfg.get("baseline_window"),
-            epoch_tmin=float(data_cfg.get("epoch_tmin", -2.0)),
-            epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
+            epoch_tmin=float(epoch_tmin),
+            epoch_tmax=float(epoch_tmax),
             use_ica=parse_bool(data_cfg.get("use_ica", False), default=False),
             ica_n_components=data_cfg.get("ica_n_components", 20),
             ica_random_state=int(data_cfg.get("ica_random_state", 42)),
@@ -296,6 +269,11 @@ def load_spd_like_train(
             autoreject_random_state=int(data_cfg.get("autoreject_random_state", 42)),
             autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
             autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
+            autoreject_cache_dir=data_cfg.get("autoreject_cache_dir"),
+            autoreject_force_rebuild=parse_bool(
+                data_cfg.get("autoreject_force_rebuild", False),
+                default=False,
+            ),
             return_subjects=True,
             covariance_signal_scale=covariance_signal_scale,
             replace_covariance_diagonal_with_raw_energy=parse_bool(
@@ -316,13 +294,13 @@ def load_spd_like_train(
             estimator=str(data_cfg.get("estimator", "lwf")),
             eps=float(data_cfg.get("eps", 1e-6)),
             sfreq=float(data_cfg.get("sfreq", 250)),
-            segment_duration=float(data_cfg.get("segment_duration", 1.0)),
-            stride_duration=data_cfg.get("stride_duration", 0.5),
+            segment_duration=float(segment_duration),
+            stride_duration=stride_duration,
             reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
             baseline_correction=data_cfg.get("baseline_correction"),
             baseline_window=data_cfg.get("baseline_window"),
-            epoch_tmin=float(data_cfg.get("epoch_tmin", 0.0)),
-            epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
+            epoch_tmin=float(epoch_tmin),
+            epoch_tmax=float(epoch_tmax),
             use_ica=parse_bool(data_cfg.get("use_ica", False), default=False),
             use_autoreject=parse_bool(
                 data_cfg.get("use_autoreject", False),
@@ -363,12 +341,13 @@ def load_spd_like_train(
 def load_segmented_epochs_like_train(
     data_cfg: dict[str, Any],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], list[list[float]]]:
+    data_cfg = normalize_data_time_config(data_cfg)
     dataset_name = normalize_dataset_name(data_cfg.get("dataset", "physionet_mi"))
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
+    epoch_tmin, epoch_tmax = data_cfg["epoch_slice"]
+    segment_duration, stride_duration = data_cfg["segment_slice"]
     subjects = parse_subjects(data_cfg.get("subjects"))
     sfreq = float(data_cfg.get("sfreq", 160 if dataset_name == "physionet_mi" else 250))
-    segment_duration = float(data_cfg.get("segment_duration", 1.0))
-    stride_duration = data_cfg.get("stride_duration", 0.5)
     use_ica = parse_bool(data_cfg.get("use_ica", False), default=False)
     use_autoreject = parse_bool(data_cfg.get("use_autoreject", False), default=False)
     if normalize_baseline_correction_mode(data_cfg.get("baseline_correction")) is not None:
@@ -391,8 +370,8 @@ def load_segmented_epochs_like_train(
         for low_freq, high_freq in filter_bank:
             dataset = build_dataset(
                 root_dir,
-                tmin=float(data_cfg.get("epoch_tmin", -2.0)),
-                tmax=float(data_cfg.get("epoch_tmax", 4.0)),
+                tmin=float(epoch_tmin),
+                tmax=float(epoch_tmax),
                 subjects=subjects,
                 imaged=imaged,
                 executed=executed,
@@ -409,6 +388,11 @@ def load_segmented_epochs_like_train(
                 autoreject_random_state=int(data_cfg.get("autoreject_random_state", 42)),
                 autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
                 autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
+                autoreject_cache_dir=data_cfg.get("autoreject_cache_dir"),
+                autoreject_force_rebuild=parse_bool(
+                    data_cfg.get("autoreject_force_rebuild", False),
+                    default=False,
+                ),
             )
             x_band = dataset["X"]
             if labels is None:
@@ -453,8 +437,8 @@ def load_segmented_epochs_like_train(
                 sfreq=sfreq,
                 low_freq=low_freq,
                 high_freq=high_freq,
-                epoch_tmin=float(data_cfg.get("epoch_tmin", 0.0)),
-                epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
+                epoch_tmin=float(epoch_tmin),
+                epoch_tmax=float(epoch_tmax),
                 moabb_accept_terms=accept_terms and not download_checked,
                 moabb_force_update=force_update and not download_checked,
             )
@@ -518,7 +502,9 @@ def load_segmented_epochs_like_train(
 def load_eegnet_author_data(
     data_cfg: dict[str, Any],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    data_cfg = normalize_data_time_config(data_cfg)
     dataset_name = normalize_dataset_name(data_cfg.get("dataset", "physionet_mi"))
+    epoch_tmin, epoch_tmax = data_cfg["epoch_slice"]
     subjects = parse_subjects(data_cfg.get("subjects"))
     n_ds = int(data_cfg.get("eegnet_downsample", 1))
 
@@ -532,7 +518,7 @@ def load_eegnet_author_data(
             excluded_subjects=parse_subjects(
                 data_cfg.get("eegnet_excluded_subjects", "88,92,100,104")
             ),
-            T=float(data_cfg.get("eegnet_T", data_cfg.get("epoch_tmax", 3.0))),
+            T=float(data_cfg.get("eegnet_T", epoch_tmax - epoch_tmin)),
             n_ds=n_ds,
             n_ch=int(data_cfg.get("eegnet_n_channels", 64)),
             normalization=int(data_cfg.get("eegnet_normalization", 0)),
@@ -550,10 +536,8 @@ def load_eegnet_author_data(
                 f"using the first configured band {filter_bank[0]}."
             )
         low_freq, high_freq = filter_bank[0]
-        epoch_tmin = float(data_cfg.get("epoch_tmin", 0.0))
-        epoch_tmax = float(
-            data_cfg.get("epoch_tmax", epoch_tmin + float(data_cfg.get("eegnet_T", 4.0)))
-        )
+        epoch_tmin = float(epoch_tmin)
+        epoch_tmax = float(epoch_tmax)
         dataset = load_bci_iv_2a_epochs(
             download_dir=str(data_cfg.get("root_dir", "data")),
             subjects=subjects,

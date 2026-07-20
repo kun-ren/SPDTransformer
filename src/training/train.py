@@ -32,10 +32,16 @@ from src.datasets.PhysioNetMI_preprocess import (
 )
 from src.models.MotorImageryDataset import MotorImageryDataset
 from src.models.SPDTransformerClassifier import SPDTransformerClassifier
+from src.training.config_grid import (
+    expand_data_grid,
+    expand_grid,
+    normalize_data_time_config,
+    normalize_filter_bank,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_grid.yaml"
-DATASET_CACHE_VERSION = 5
+DATASET_CACHE_VERSION = 6
 DEFAULT_DATASET_CACHE_DIR = PROJECT_ROOT / "experiments" / "cache" / "preprocessed_datasets"
 
 
@@ -75,54 +81,8 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return config
 
 
-def normalize_filter_bank(filter_bank: Any) -> list[list[float]]:
-    if not isinstance(filter_bank, list) or not filter_bank:
-        raise ValueError("data.filter_bank must be a non-empty list.")
-
-    normalized = []
-    for band in filter_bank:
-        if not isinstance(band, (list, tuple)) or len(band) != 2:
-            raise ValueError(
-                "Each filter bank item must be [low_freq, high_freq], "
-                f"got {band!r}."
-            )
-        normalized.append([float(band[0]), float(band[1])])
-    return normalized
-
-
-def is_filter_bank_value(key: str, value: Any) -> bool:
-    if key != "filter_bank" or not isinstance(value, list):
-        return False
-    return bool(value) and all(
-        isinstance(item, (list, tuple))
-        and len(item) == 2
-        and all(isinstance(number, (int, float)) for number in item)
-        for item in value
-    )
-
-
-def grid_values(key: str, value: Any) -> list[Any]:
-    if is_filter_bank_value(key, value):
-        return [normalize_filter_bank(value)]
-    if isinstance(value, list):
-        return value
-    return [value]
-
-
-def expand_grid(section: dict[str, Any]) -> list[dict[str, Any]]:
-    if not section:
-        return [{}]
-
-    keys = list(section)
-    value_lists = [grid_values(key, section[key]) for key in keys]
-    combinations = []
-    for values in itertools.product(*value_lists):
-        combinations.append(dict(zip(keys, values)))
-    return combinations
-
-
 def expand_experiments(config: dict[str, Any]) -> list[dict[str, Any]]:
-    data_grid = expand_grid(config.get("data", {}))
+    data_grid = expand_data_grid(config.get("data", {}))
     model_grid = expand_grid(config.get("model", {}))
     training_grid = expand_grid(config.get("training", {}))
 
@@ -157,7 +117,25 @@ def config_hash(config: dict[str, Any]) -> str:
 
 
 def dataset_cache_key(data_cfg: dict[str, Any]) -> str:
-    return config_hash({"data": data_cfg})
+    return config_hash({"data": dataset_preprocessing_config(data_cfg)})
+
+
+def dataset_preprocessing_config(data_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return only fields that can change the preprocessed tensors."""
+    canonical = deepcopy(data_cfg)
+    normalize_data_preprocessing_config(canonical)
+    split_only_keys = {
+        "seed",
+        "test_size",
+        "val_size",
+        "allow_subject_overlap",
+        "split_file",
+    }
+    return {
+        key: deepcopy(value)
+        for key, value in canonical.items()
+        if key not in split_only_keys
+    }
 
 
 def resolve_project_path(path_value: Any, default: Path) -> Path:
@@ -284,8 +262,13 @@ def resolve_covariance_signal_scale(value: Any, dataset_name: str) -> float:
 
 
 def normalize_data_preprocessing_config(data_cfg: dict[str, Any]) -> None:
+    canonical = normalize_data_time_config(data_cfg)
+    data_cfg.clear()
+    data_cfg.update(canonical)
     dataset_name = normalize_dataset_name(data_cfg.get("dataset", "physionet_mi"))
     data_cfg["dataset"] = dataset_name
+    if "filter_bank" in data_cfg:
+        data_cfg["filter_bank"] = normalize_filter_bank(data_cfg["filter_bank"])
     data_cfg["covariance_signal_scale"] = resolve_covariance_signal_scale(
         data_cfg.get("covariance_signal_scale", "auto"),
         dataset_name=dataset_name,
@@ -466,6 +449,7 @@ def build_model(
         debug_attention_shape=bool(model_cfg.get("debug_attention_shape", False)),
         debug_tensor_stats=bool(model_cfg.get("debug_tensor_stats", False)),
         learnable_metric_mode=str(model_cfg.get("learnable_metric_mode", "low-rank")),
+        learnable_metric_score=str(model_cfg.get("learnable_metric_score", "qgk")),
         learnable_metric_rank=model_cfg.get("learnable_metric_rank"),
         eps=float(model_cfg.get("eps", 1e-6)),
         use_position_bias=bool(model_cfg.get("use_position_bias", True)),
@@ -535,7 +519,9 @@ def split_params(model: nn.Module):
 
         # Bias and normalization layers: no weight decay
         if (
-                "norm" in name.lower() or "metric_low_rank" in name.lower()
+                "norm" in name.lower()
+                or "metric_low_rank" in name.lower()
+                or "metric_matrix" in name.lower()
         ):
             no_decay_params.append(param)
         else:
@@ -1261,8 +1247,11 @@ def train_experiment(
 def preprocess_dataset(
         data_cfg: dict[str, Any],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    normalize_data_preprocessing_config(data_cfg)
     dataset_name = normalize_dataset_name(data_cfg.get("dataset", "physionet_mi"))
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
+    epoch_tmin, epoch_tmax = data_cfg["epoch_slice"]
+    segment_duration, stride_duration = data_cfg["segment_slice"]
     subjects = parse_subjects(data_cfg.get("subjects"))
     covariance_signal_scale = resolve_covariance_signal_scale(
         data_cfg.get("covariance_signal_scale", "auto"),
@@ -1284,16 +1273,16 @@ def preprocess_dataset(
             estimator=str(data_cfg.get("estimator", "lwf")),
             sfreq=float(data_cfg.get("sfreq", 160)),
             eps=float(data_cfg.get("eps", 1e-8)),
-            segment_duration=float(data_cfg.get("segment_duration", 1.0)),
-            stride_duration=data_cfg.get("stride_duration", 0.5),
+            segment_duration=float(segment_duration),
+            stride_duration=stride_duration,
             imaged=parse_bool(data_cfg.get("imaged", True), default=True),
             executed=parse_bool(data_cfg.get("executed", False), default=False),
             task_types=task_types,
             reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
             baseline_correction=data_cfg.get("baseline_correction"),
             baseline_window=data_cfg.get("baseline_window"),
-            epoch_tmin=float(data_cfg.get("epoch_tmin", -2.0)),
-            epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
+            epoch_tmin=float(epoch_tmin),
+            epoch_tmax=float(epoch_tmax),
             use_ica=parse_bool(data_cfg.get("use_ica", False), default=False),
             ica_n_components=data_cfg.get("ica_n_components", 20),
             ica_random_state=int(data_cfg.get("ica_random_state", 42)),
@@ -1305,6 +1294,11 @@ def preprocess_dataset(
             autoreject_random_state=int(data_cfg.get("autoreject_random_state", 42)),
             autoreject_n_jobs=int(data_cfg.get("autoreject_n_jobs", 1)),
             autoreject_cv=int(data_cfg.get("autoreject_cv", 10)),
+            autoreject_cache_dir=data_cfg.get("autoreject_cache_dir"),
+            autoreject_force_rebuild=parse_bool(
+                data_cfg.get("autoreject_force_rebuild", False),
+                default=False,
+            ),
             return_subjects=True,
             covariance_signal_scale=covariance_signal_scale,
             replace_covariance_diagonal_with_raw_energy=parse_bool(
@@ -1325,13 +1319,13 @@ def preprocess_dataset(
             estimator=str(data_cfg.get("estimator", "lwf")),
             sfreq=float(data_cfg.get("sfreq", 250)),
             eps=float(data_cfg.get("eps", 1e-8)),
-            segment_duration=float(data_cfg.get("segment_duration", 1.0)),
-            stride_duration=data_cfg.get("stride_duration", 0.5),
+            segment_duration=float(segment_duration),
+            stride_duration=stride_duration,
             reject_threshold_uv=data_cfg.get("reject_threshold_uv"),
             baseline_correction=data_cfg.get("baseline_correction"),
             baseline_window=data_cfg.get("baseline_window"),
-            epoch_tmin=float(data_cfg.get("epoch_tmin", 0.0)),
-            epoch_tmax=float(data_cfg.get("epoch_tmax", 4.0)),
+            epoch_tmin=float(epoch_tmin),
+            epoch_tmax=float(epoch_tmax),
             use_ica=parse_bool(data_cfg.get("use_ica", False), default=False),
             use_autoreject=parse_bool(
                 data_cfg.get("use_autoreject", False),
@@ -1458,9 +1452,10 @@ def load_or_preprocess_dataset(
         data_cfg: dict[str, Any],
         cache_dir: Path,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    preprocessing_cfg = dataset_preprocessing_config(data_cfg)
     data_key = dataset_cache_key(data_cfg)
     cache_path = dataset_cache_path(cache_dir, data_key)
-    cached_dataset = load_cached_dataset(cache_path, data_cfg)
+    cached_dataset = load_cached_dataset(cache_path, preprocessing_cfg)
     if cached_dataset is not None:
         print(f"\nLoaded preprocessed data from cache {data_key}: {cache_path}")
         x_cached, y_cached, subjects_cached, names_cached = cached_dataset
@@ -1470,8 +1465,8 @@ def load_or_preprocess_dataset(
         )
         return cached_dataset
 
-    print(f"\nPreprocessing data config {data_key}: {data_cfg}")
-    dataset = preprocess_dataset(data_cfg)
+    print(f"\nPreprocessing data config {data_key}: {preprocessing_cfg}")
+    dataset = preprocess_dataset(preprocessing_cfg)
     x_cached, y_cached, subjects_cached, names_cached = dataset
     print(
         f"  X.shape={x_cached.shape}, y.shape={y_cached.shape}, "
@@ -1479,7 +1474,7 @@ def load_or_preprocess_dataset(
     )
     save_cached_dataset(
         cache_path,
-        data_cfg,
+        preprocessing_cfg,
         x_cached,
         y_cached,
         subjects_cached,
@@ -1511,10 +1506,8 @@ def main() -> int:
         DEFAULT_DATASET_CACHE_DIR,
     )
 
-    # Preprocess once from the first expanded data config. If you grid data
-    # preprocessing parameters, each distinct data config will be handled below.
-
-    # cache loaded dataset
+    # Cache each unique preprocessing configuration in memory. Split-only data
+    # grid values (for example allow_subject_overlap) share the same tensors.
     data_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]] = {}
     all_metrics = []
 

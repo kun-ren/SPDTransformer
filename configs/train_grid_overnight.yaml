@@ -21,10 +21,8 @@ data:
   autoreject_cv: [10]
   baseline_correction: [null]
   baseline_window: "-3,0"
-  epoch_tmin: [0.0]
-  epoch_tmax: [3.0, 4.0]
-  segment_duration: [1.0]
-  stride_duration: [0.5]
+  epoch_slice: [[0.0, 3.0], [0.0, 4.0]]
+  segment_slice: [[1.0, 0.5]]
   imaged: True
   executed: False
   task_types: unilateral_fist
@@ -54,6 +52,7 @@ model:
   debug_attention_shape: [false]
   debug_tensor_stats: [false]
   learnable_metric_mode: ["low-rank"]
+  learnable_metric_score: ["qgk"]
   learnable_metric_rank: [16]
   eps: [1.0e-6]
 

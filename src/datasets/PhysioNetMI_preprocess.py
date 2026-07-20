@@ -6,6 +6,12 @@ import mne
 
 import numpy as np
 
+from src.datasets.autoreject_cache import (
+    build_autoreject_cache_metadata,
+    installed_package_version,
+    load_or_compute_autoreject_mask,
+)
+
 
 def normalize_channel_name(name):
     return str(name).strip().rstrip(".").upper()
@@ -976,11 +982,17 @@ def load_subject(
     autoreject_random_state=42,
     autoreject_n_jobs=1,
     autoreject_cv=10,
+    autoreject_cache_dir=None,
+    autoreject_force_rebuild=False,
 ):
     imaged = normalize_bool(imaged, default=True)
     executed = normalize_bool(executed, default=False)
     use_ica = normalize_bool(use_ica, default=False)
     use_autoreject = normalize_bool(use_autoreject, default=False)
+    autoreject_force_rebuild = normalize_bool(
+        autoreject_force_rebuild,
+        default=False,
+    )
     if (low_freq is None) != (high_freq is None):
         raise ValueError("low_freq and high_freq must be provided together.")
 
@@ -989,6 +1001,7 @@ def load_subject(
     artifact_epochs_all = []
     artifact_info = None
     loaded_run_ids = []
+    loaded_edf_files = []
 
     target_run_ids = []
     if imaged:
@@ -1077,6 +1090,7 @@ def load_subject(
             y_all.extend(run_y)
             artifact_epochs_all.extend(run_artifact_epochs)
             loaded_run_ids.append(run_id)
+            loaded_edf_files.append(edf_file)
 
     if not X_all:
         return None, None, None
@@ -1086,14 +1100,52 @@ def load_subject(
     artifact_epochs_all = np.asarray(artifact_epochs_all)
 
     if use_autoreject:
-        autoreject_mask = autoreject_keep_mask(
-            artifact_epochs_all,
-            info=artifact_info,
-            tmin=tmin,
-            random_state=autoreject_random_state,
-            n_jobs=autoreject_n_jobs,
-            cv=autoreject_cv,
+        cache_metadata = build_autoreject_cache_metadata(
+            subject_dir=subject_dir,
+            source_files=loaded_edf_files,
+            labels=y_all,
+            epoch_shape=artifact_epochs_all.shape,
+            channel_names=artifact_info["ch_names"],
+            settings={
+                "artifact_pipeline_version": 1,
+                "epoch_tmin": float(tmin),
+                "epoch_tmax": float(tmax),
+                "imaged": bool(imaged),
+                "executed": bool(executed),
+                "task_types": [str(value) for value in task_types],
+                "loaded_run_ids": [int(run_id) for run_id in loaded_run_ids],
+                "channels": normalize_channels(channels),
+                "common_highpass_hz": 0.5,
+                "common_lowpass_hz": 40.0,
+                "notch_hz": 60.0,
+                "average_reference": True,
+                "use_ica": bool(use_ica),
+                "ica_n_components": ica_n_components,
+                "ica_random_state": int(ica_random_state),
+                "ica_eog_channels": normalize_channels(ica_eog_channels),
+                "autoreject_random_state": int(autoreject_random_state),
+                "autoreject_cv": int(autoreject_cv),
+                "autoreject_version": installed_package_version("autoreject"),
+                "mne_version": str(mne.__version__),
+            },
         )
+        autoreject_mask, cache_hit, cache_path = load_or_compute_autoreject_mask(
+            cache_dir=autoreject_cache_dir,
+            subject_name=Path(subject_dir).name,
+            metadata=cache_metadata,
+            force_rebuild=autoreject_force_rebuild,
+            compute_mask=lambda: autoreject_keep_mask(
+                artifact_epochs_all,
+                info=artifact_info,
+                tmin=tmin,
+                random_state=autoreject_random_state,
+                n_jobs=autoreject_n_jobs,
+                cv=autoreject_cv,
+            ),
+        )
+        if cache_path is not None:
+            action = "Loaded" if cache_hit else "Saved"
+            print(f"{action} AutoReject mask: {cache_path}")
         autoreject_rejected = int((~autoreject_mask).sum())
         if autoreject_rejected:
             runs = ",".join(f"R{run_id:02d}" for run_id in loaded_run_ids)
@@ -1147,6 +1199,8 @@ def build_dataset(
     autoreject_random_state=42,
     autoreject_n_jobs=1,
     autoreject_cv=10,
+    autoreject_cache_dir=None,
+    autoreject_force_rebuild=False,
 ):
     imaged = normalize_bool(imaged, default=True)
     executed = normalize_bool(executed, default=False)
@@ -1204,6 +1258,8 @@ def build_dataset(
             autoreject_random_state=autoreject_random_state,
             autoreject_n_jobs=autoreject_n_jobs,
             autoreject_cv=autoreject_cv,
+            autoreject_cache_dir=autoreject_cache_dir,
+            autoreject_force_rebuild=autoreject_force_rebuild,
         )
         if X is None:
             print(
@@ -1278,6 +1334,8 @@ def preprocess_spd(
     autoreject_random_state=42,
     autoreject_n_jobs=1,
     autoreject_cv=10,
+    autoreject_cache_dir=None,
+    autoreject_force_rebuild=False,
     return_subjects=False,
     covariance_signal_scale=1e6,
     replace_covariance_diagonal_with_raw_energy=False,
@@ -1290,6 +1348,10 @@ def preprocess_spd(
     executed = normalize_bool(executed, default=False)
     use_ica = normalize_bool(use_ica, default=False)
     use_autoreject = normalize_bool(use_autoreject, default=False)
+    autoreject_force_rebuild = normalize_bool(
+        autoreject_force_rebuild,
+        default=False,
+    )
     replace_covariance_diagonal_with_raw_energy = normalize_bool(
         replace_covariance_diagonal_with_raw_energy,
         default=False,
@@ -1307,7 +1369,7 @@ def preprocess_spd(
 
 
 
-    for filter in filter_bank:
+    for filter_index, filter in enumerate(filter_bank):
 
         # 1. Filter continuous Raw first, then extract epochs.
         dataset = build_dataset(
@@ -1330,6 +1392,10 @@ def preprocess_spd(
             autoreject_random_state=autoreject_random_state,
             autoreject_n_jobs=autoreject_n_jobs,
             autoreject_cv=autoreject_cv,
+            autoreject_cache_dir=autoreject_cache_dir,
+            autoreject_force_rebuild=(
+                autoreject_force_rebuild and filter_index == 0
+            ),
         )
         temp_x = dataset['X']   #[n_epochs, n_channels, n_samples_per_epoch]
         print(f"Band {filter}: raw-filtered epoch shape {temp_x.shape}")

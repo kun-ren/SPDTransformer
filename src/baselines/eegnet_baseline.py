@@ -356,11 +356,17 @@ def make_train_test_split(
     y: np.ndarray,
     subject_labels: np.ndarray,
     training_cfg: dict[str, Any],
+    data_cfg: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    seed = int(training_cfg.get("seed", 42))
-    test_size = float(training_cfg.get("test_size", 0.2))
+    split_cfg = dict(training_cfg)
+    if data_cfg is not None:
+        for key in ("seed", "test_size", "allow_subject_overlap"):
+            if key in data_cfg:
+                split_cfg[key] = data_cfg[key]
+    seed = int(split_cfg.get("seed", 42))
+    test_size = float(split_cfg.get("test_size", 0.2))
     allow_subject_overlap = parse_bool(
-        training_cfg.get("allow_subject_overlap", False),
+        split_cfg.get("allow_subject_overlap", False),
         default=False,
     )
     indices = np.arange(len(y), dtype=np.int64)
@@ -422,7 +428,7 @@ def run_experiment(
 ) -> dict[str, Any]:
     data_cfg = experiment_cfg["data"]
     training_cfg = experiment_cfg["training"]
-    seed = int(training_cfg.get("seed", 42))
+    seed = int(training_cfg.get("seed", data_cfg.get("seed", 42)))
     set_seed(seed)
 
     x, y, subject_labels, class_names = load_eegnet_author_data(data_cfg)
@@ -447,6 +453,7 @@ def run_experiment(
         y,
         subject_labels,
         training_cfg,
+        data_cfg=data_cfg,
     )
     run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(experiment_cfg)}"
     run_dir.mkdir(parents=True, exist_ok=False)

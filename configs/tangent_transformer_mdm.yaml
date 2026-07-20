@@ -26,13 +26,14 @@ data:
   autoreject_cv: [10]
   baseline_correction: [null]
   baseline_window: "-3,0"
-  epoch_tmin: [-1.0]
-  epoch_tmax: [4.0]
-  segment_duration: [1.0]
-  stride_duration: [0.5]
+  epoch_slice: [[-1.0, 4.0]]
+  segment_slice: [[1.0, 0.5]]
   imaged: true
   executed: false
   task_types: unilateral_fist
+  test_size: [0.15]
+  val_size: [0.15]
+  allow_subject_overlap: [true]
 
 model:
   # SPD(8) has 36 independent tangent coordinates. Input/output projections
@@ -52,9 +53,6 @@ model:
 training:
   precision: ["float32"]
   seed: [42]
-  test_size: [0.15]
-  val_size: [0.15]
-  allow_subject_overlap: [true]
   split_file: experiments/splits/physionet_mi_seed42.json
   epochs: [150]
   batch_size: [128]

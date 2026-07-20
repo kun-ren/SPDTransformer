@@ -20,12 +20,12 @@ data:
   autoreject_n_jobs: [2]
   autoreject_cv: [10]
   baseline_correction: [null]
-  epoch_tmin: [0.0]
-  epoch_tmax: [4.0]
-  segment_duration: [4.0]
-  stride_duration: [null]
+  epoch_slice: [[0.0, 4.0]]
+  segment_slice: [[4.0, null]]
   moabb_accept_terms: [true]
   moabb_force_update: [false]
+  test_size: [0.2]
+  allow_subject_overlap: [true]
 
 training:
   seed: [42]
@@ -41,8 +41,6 @@ training:
   eegnet_num_filters: [8]
   eegnet_reg_rate: [0.25]
   input_scale: [1.0]
-  test_size: [0.2]
-  allow_subject_overlap: [true]
   split_file: [null]
   num_workers: [0]
 

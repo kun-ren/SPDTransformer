@@ -49,13 +49,14 @@ def load_labels_like_train(
 ) -> tuple[np.ndarray, list[str], np.ndarray]:
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
     first_band = filter_bank[0]
+    epoch_tmin, epoch_tmax = data_cfg["epoch_slice"]
 
     dataset = build_dataset(
         root_dir=str(
             data_cfg.get("root_dir", "data/MNE-eegbci-data/files/eegmmidb/1.0.0")
         ),
-        tmin=-2.0,
-        tmax=4.0,
+        tmin=float(epoch_tmin),
+        tmax=float(epoch_tmax),
         subjects=parse_subjects(data_cfg.get("subjects")),
         imaged=data_cfg.get("imaged", True),
         executed=data_cfg.get("executed", False),
@@ -130,6 +131,7 @@ def main() -> int:
             y,
             training_cfg,
             subject_labels=subject_labels,
+            data_cfg=data_cfg,
         )
         split_indices = {
             "train": train_idx,

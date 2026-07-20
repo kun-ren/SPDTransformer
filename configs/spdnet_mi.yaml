@@ -24,13 +24,14 @@ data:
   autoreject_cv: [10]
   baseline_correction: [null]
   baseline_window: "-3,0"
-  epoch_tmin: [0.0]
-  epoch_tmax: [4.0]
-  segment_duration: [0.25]
-  stride_duration: [0.125]
+  epoch_slice: [[0.0, 4.0]]
+  segment_slice: [[0.25, 0.125]]
   imaged: true
   executed: false
   task_types: unilateral_fist
+  test_size: [0.15]
+  val_size: [0.15]
+  allow_subject_overlap: [true]
 
 training:
   seed: [42]
@@ -40,9 +41,6 @@ training:
   spdnet_learning_rate: [0.001]
   spdnet_weight_decay: [0.0001]
   gradient_clip_norm: [1.0]
-  test_size: [0.15]
-  val_size: [0.15]
-  allow_subject_overlap: [true]
   split_file: experiments/splits/physionet_mi_seed42.json
   num_workers: [0]
 
