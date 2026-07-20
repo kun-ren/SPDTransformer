@@ -5,6 +5,7 @@ import csv
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -14,141 +15,278 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.baselines.baseline_utils import (
     DEFAULT_CONFIG,
-    compute_metrics,
     config_hash,
     expand_data_training_experiments,
-    get_split_indices,
     load_segmented_epochs_like_train,
     load_yaml,
+    parse_bool,
     save_json,
 )
 
 
+METRIC_NAMES = ("accuracy", "macro_f1", "cohen_kappa")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="CSP + LDA baseline using the same data config as train.py."
+        description=(
+            "CSP + shrinkage LDA baseline with stratified K-fold evaluation "
+            "and no validation split."
+        )
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--n-components", type=int, default=6)
+    parser.add_argument(
+        "--n-components",
+        type=int,
+        default=None,
+        help="Override model.n_components from the YAML config.",
+    )
     parser.add_argument("--output-dir", default=None)
     return parser
 
 
-def csp_features_for_split(
-    csp_models,
-    x: np.ndarray,
-    indices: np.ndarray,
-) -> np.ndarray:
-    # x shape: (n_trials, n_segments, n_bands, n_channels, n_samples)
-    n_trials = len(indices)
-    n_segments = x.shape[1]
-    features = []
-    for band_index, csp in enumerate(csp_models):
-        band_windows = x[indices, :, band_index]
-        n_channels, n_samples = band_windows.shape[-2:]
-        flat_windows = band_windows.reshape(n_trials * n_segments, n_channels, n_samples)
-        flat_features = csp.transform(flat_windows)
-        trial_features = flat_features.reshape(n_trials, n_segments, -1).mean(axis=1)
-        features.append(trial_features)
-    return np.concatenate(features, axis=1)
+def compute_csp_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    from sklearn.metrics import accuracy_score, cohen_kappa_score, f1_score
+
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(
+            f1_score(y_true, y_pred, average="macro", zero_division=0)
+        ),
+        "cohen_kappa": float(cohen_kappa_score(y_true, y_pred)),
+    }
+
+
+def build_cv_splits(
+    y: np.ndarray,
+    subject_labels: np.ndarray,
+    n_splits: int,
+    seed: int,
+    allow_subject_overlap: bool,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Create 80/20-style folds without a separate validation dataset."""
+    from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
+
+    indices = np.arange(len(y))
+    if allow_subject_overlap:
+        splitter = StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        iterator = splitter.split(indices, y)
+    else:
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        iterator = splitter.split(indices, y, groups=subject_labels)
+    return [
+        (
+            np.asarray(train_idx, dtype=np.int64),
+            np.asarray(test_idx, dtype=np.int64),
+        )
+        for train_idx, test_idx in iterator
+    ]
+
+
+def validate_cv_config(
+    training_cfg: dict[str, Any],
+    data_cfg: dict[str, Any],
+) -> tuple[int, int, bool]:
+    n_splits = int(training_cfg.get("n_splits", 5))
+    seed = int(training_cfg.get("seed", 42))
+    test_size = float(data_cfg.get("test_size", training_cfg.get("test_size", 0.2)))
+    val_size = float(data_cfg.get("val_size", training_cfg.get("val_size", 0.0)))
+    allow_subject_overlap = parse_bool(
+        data_cfg.get(
+            "allow_subject_overlap",
+            training_cfg.get("allow_subject_overlap", True),
+        ),
+        default=True,
+    )
+
+    if n_splits < 2:
+        raise ValueError(f"training.n_splits must be at least 2, got {n_splits}.")
+    if not np.isclose(val_size, 0.0):
+        raise ValueError(
+            "CSP+LDA K-fold evaluation does not use a validation dataset; "
+            f"set val_size to 0.0, got {val_size}."
+        )
+    expected_test_size = 1.0 / n_splits
+    if not np.isclose(test_size, expected_test_size):
+        raise ValueError(
+            "For K-fold evaluation, test_size must equal 1 / n_splits; "
+            f"got test_size={test_size} and n_splits={n_splits} "
+            f"(expected {expected_test_size:.6f})."
+        )
+    return n_splits, seed, allow_subject_overlap
+
+
+def build_csp_lda_pipeline(n_components: int):
+    from mne.decoding import CSP
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    from sklearn.pipeline import Pipeline
+
+    csp = CSP(
+        n_components=n_components,
+        reg="ledoit_wolf",
+        log=True,
+        norm_trace=False,
+    )
+    lda = LinearDiscriminantAnalysis()
+    return Pipeline(
+        [
+            ("csp", csp),
+            ("lda", lda),
+        ]
+    )
+
+
+def aggregate_fold_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    aggregates: dict[str, dict[str, float]] = {}
+    for metric_name in METRIC_NAMES:
+        values = np.asarray([row[metric_name] for row in rows], dtype=float)
+        aggregates[metric_name] = {
+            "mean": float(values.mean()),
+            "max": float(values.max()),
+            "min": float(values.min()),
+        }
+    return aggregates
+
+
+def print_fold_summary(rows: list[dict[str, Any]], aggregates: dict[str, dict[str, float]]) -> None:
+    print("\nCSP + LDA five-fold test results (no validation dataset)")
+    print("fold | train | test | accuracy | macro_f1 | Cohen's kappa")
+    for row in rows:
+        print(
+            f"{row['fold']:>4} | {row['n_train']:>5} | {row['n_test']:>4} | "
+            f"{row['accuracy']:.4f} | {row['macro_f1']:.4f} | "
+            f"{row['cohen_kappa']:.4f}"
+        )
+    print("\nFive-fold aggregate (test folds)")
+    print("metric        | mean   | max    | min")
+    for metric_name, display_name in (
+        ("accuracy", "accuracy"),
+        ("macro_f1", "macro_f1"),
+        ("cohen_kappa", "Cohen's kappa"),
+    ):
+        stats = aggregates[metric_name]
+        print(
+            f"{display_name:<13} | {stats['mean']:.4f} | "
+            f"{stats['max']:.4f} | {stats['min']:.4f}"
+        )
 
 
 def run_experiment(
     run_index: int,
-    experiment_cfg: dict,
-    n_components: int,
+    experiment_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+    n_components_override: int | None,
     base_output_dir: Path,
-) -> dict:
-    from mne.decoding import CSP
-    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import StandardScaler
+) -> dict[str, Any]:
+    import mne
 
     data_cfg = experiment_cfg["data"]
     training_cfg = experiment_cfg["training"]
+    mne.set_log_level(str(model_cfg.get("mne_log_level", "WARNING")))
+    n_splits, seed, allow_subject_overlap = validate_cv_config(training_cfg, data_cfg)
 
     x, y, subject_labels, class_names, filter_bank = load_segmented_epochs_like_train(data_cfg)
-    train_idx, val_idx, test_idx = get_split_indices(
+    folds = build_cv_splits(
         y,
-        training_cfg,
-        subject_labels=subject_labels,
-        data_cfg=data_cfg,
+        subject_labels,
+        n_splits=n_splits,
+        seed=seed,
+        allow_subject_overlap=allow_subject_overlap,
     )
-    split_indices = {
-        "train": train_idx,
-        "val": val_idx,
-        "test": test_idx,
-    }
 
     n_segments = x.shape[1]
     n_bands = x.shape[2]
     n_channels = x.shape[3]
-    csp_components = min(int(n_components), n_channels)
-
-    csp_models = []
-    y_train_repeated = np.repeat(y[train_idx], n_segments)
-    for band_index in range(n_bands):
-        train_band = x[train_idx, :, band_index]
-        n_train = len(train_idx)
-        n_samples = train_band.shape[-1]
-        flat_train = train_band.reshape(n_train * n_segments, n_channels, n_samples)
-        csp = CSP(
-            n_components=csp_components,
-            reg="ledoit_wolf",
-            log=True,
-            norm_trace=False,
+    if n_segments != 1 or n_bands != 1:
+        raise ValueError(
+            "The requested CSP -> LDA Pipeline requires exactly one segment "
+            "and one frequency band per trial; got "
+            f"n_segments={n_segments}, n_bands={n_bands}."
         )
-        csp.fit(flat_train, y_train_repeated)
-        csp_models.append(csp)
-
-    x_train_features = csp_features_for_split(csp_models, x, train_idx)
-    x_val_features = csp_features_for_split(csp_models, x, val_idx)
-    x_test_features = csp_features_for_split(csp_models, x, test_idx)
-
-    classifier = make_pipeline(
-        StandardScaler(),
-        LinearDiscriminantAnalysis(),
+    trial_data = x[:, 0, 0]
+    requested_components = (
+        n_components_override
+        if n_components_override is not None
+        else int(model_cfg.get("n_components", 6))
     )
-    classifier.fit(x_train_features, y[train_idx])
+    if requested_components < 1:
+        raise ValueError(
+            f"model.n_components must be positive, got {requested_components}."
+        )
+    csp_components = min(requested_components, n_channels)
 
-    predictions = {
-        "train": classifier.predict(x_train_features),
-        "val": classifier.predict(x_val_features),
-        "test": classifier.predict(x_test_features),
-    }
-    rows = []
-    for split_name, split_idx in split_indices.items():
+    rows: list[dict[str, Any]] = []
+    for fold_index, (train_idx, test_idx) in enumerate(folds, start=1):
+        classifier = build_csp_lda_pipeline(csp_components)
+        classifier.fit(trial_data[train_idx], y[train_idx])
+        test_prediction = classifier.predict(trial_data[test_idx])
+
         row = {
-            "split": split_name,
-            "n_samples": int(len(split_idx)),
+            "fold": fold_index,
+            "n_train": int(len(train_idx)),
+            "n_test": int(len(test_idx)),
         }
-        row.update(compute_metrics(y[split_idx], predictions[split_name]))
+        row.update(compute_csp_metrics(y[test_idx], test_prediction))
         rows.append(row)
+        print(
+            f"[CSP+LDA fold {fold_index}/{n_splits}] "
+            f"accuracy={row['accuracy']:.4f} "
+            f"mf1={row['macro_f1']:.4f} "
+            f"kappa={row['cohen_kappa']:.4f}"
+        )
 
-    run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(experiment_cfg)}"
+    aggregates = aggregate_fold_metrics(rows)
+    print_fold_summary(rows, aggregates)
+
+    effective_cfg = dict(experiment_cfg)
+    effective_cfg["model"] = dict(model_cfg)
+    effective_cfg["model"]["n_components"] = csp_components
+    run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(effective_cfg)}"
     run_dir.mkdir(parents=True, exist_ok=False)
-    with (run_dir / "results.csv").open("w", encoding="utf-8", newline="") as handle:
+    with (run_dir / "fold_results.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
 
     summary = {
         "baseline": "csp_lda",
-        "config": experiment_cfg,
+        "evaluation": {
+            "strategy": (
+                "stratified_kfold"
+                if allow_subject_overlap
+                else "stratified_group_kfold"
+            ),
+            "n_splits": n_splits,
+            "test_size_per_fold": 1.0 / n_splits,
+            "validation_size": 0.0,
+            "seed": seed,
+        },
+        "config": effective_cfg,
         "class_names": class_names,
         "filter_bank": filter_bank,
         "x_shape": list(x.shape),
         "n_components": csp_components,
-        "feature_dim": int(x_train_features.shape[1]),
-        "splits": rows,
+        "feature_dim": csp_components,
+        "pipeline_steps": ["csp", "lda"],
+        "folds": rows,
+        "aggregates": aggregates,
     }
     save_json(run_dir / "summary.json", summary)
     print(f"[CSP+LDA run {run_index}] saved {run_dir}")
     return {
         "run_index": run_index,
         "run_dir": str(run_dir),
-        "test_accuracy": rows[-1]["accuracy"],
-        "test_macro_f1": rows[-1]["macro_f1"],
+        "aggregates": aggregates,
     }
 
 
@@ -156,6 +294,7 @@ def main() -> int:
     args = build_parser().parse_args()
     config = load_yaml(args.config)
     experiments = expand_data_training_experiments(config)
+    model_cfg = dict(config.get("model", {}))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = args.output_dir or config.get("output", {}).get(
         "dir",
@@ -163,7 +302,13 @@ def main() -> int:
     )
     base_output_dir = PROJECT_ROOT / output_dir / timestamp
     all_metrics = [
-        run_experiment(index, experiment, args.n_components, base_output_dir)
+        run_experiment(
+            index,
+            experiment,
+            model_cfg,
+            args.n_components,
+            base_output_dir,
+        )
         for index, experiment in enumerate(experiments, start=1)
     ]
     save_json(base_output_dir / "summary.json", all_metrics)

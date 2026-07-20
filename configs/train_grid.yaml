@@ -9,11 +9,12 @@ data:
 #    - [20, 30]
   # Multiple filter-bank candidates need one more list level, for example:
   filter_bank: [[[8, 13], [13, 20], [20, 30]]]
-  estimator: ["lwf", "oas", "mcd"]
+  #estimator: ["lwf", "oas", "mcd"]
+  estimator: ["lwf"]
   sfreq: [160]
   eps: [1.0e-6]
   covariance_signal_scale: ["auto"]
-  replace_covariance_diagonal_with_raw_energy: [true, false]
+  replace_covariance_diagonal_with_raw_energy: [true]
   brain_region_mode: ["physionet_8x8"]
   subjects: 1-87,89-109
   # BCI Competition IV-2a / MOABB BNCI2014_001 example:
@@ -70,7 +71,7 @@ model:
   depth: [1]
   classifier_type: ["mdm"]
   pooling: ["weighted"]
-  dropout: [0.2, 0.3, 0.4]
+  dropout: [0.2]
   attention_dropout: [0.0]   #   fix to 0.0 or 0.1
   #use_position_bias: [true, false] # gated bias starts as an exact no-op
   use_position_bias: [true] # gated bias starts as an exact no-op
@@ -87,6 +88,7 @@ model:
   eps: [1.0e-6]
 
 training:
+  n_splits: [5]
   precision: ["float32"]
   epochs: [150]
   batch_size: [128]

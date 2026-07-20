@@ -4,8 +4,10 @@ data:
   filter_bank:
     - [8, 30]
   sfreq: [160]
-  subjects: 1-87,89-109
-  channels: "FC5, FC3, FC1, FCz, FC2, FC4, FC6, C5, C3, C1, Cz, C2, C4, C6, CP5, CP3, CP1, CPz, CP2, CP4, CP6"
+  # S088, S092, S100, and S104 have incomplete/anomalous recordings.
+  subjects: 1-87,89-91,93-99,101-103,105-109
+  # null keeps all 64 EEG channels from EEGMMIDB.
+  channels: null
   reject_threshold_uv: [null]
   use_ica: [false]
   ica_n_components: [13]
@@ -17,18 +19,23 @@ data:
   autoreject_cv: [10]
   baseline_correction: [null]
   baseline_window: "-3,0"
-  epoch_slice: [[-1.0, 4.0]]
+  # Full post-cue motor-imagery interval used by standard CSP pipelines.
+  epoch_slice: [[0.0, 4.0]]
   segment_slice: [[4.0, null]]
   imaged: true
   executed: false
   task_types: unilateral_fist
-  test_size: [0.15]
-  val_size: [0.15]
+  test_size: [0.2]
+  val_size: [0.0]
   allow_subject_overlap: [true]
 
 training:
   seed: [42]
-  split_file: experiments/splits/physionet_mi_seed42.json
+  n_splits: [5]
+
+model:
+  n_components: 6
+  mne_log_level: WARNING
 
 output:
   dir: experiments/results/csp_lda_baseline_physionet

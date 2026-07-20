@@ -17,11 +17,17 @@ import torch
 import yaml
 from sklearn.metrics import (
     accuracy_score,
+    cohen_kappa_score,
     confusion_matrix,
     f1_score,
     precision_recall_fscore_support,
 )
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.model_selection import (
+    GroupShuffleSplit,
+    StratifiedGroupKFold,
+    StratifiedKFold,
+    train_test_split,
+)
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -43,6 +49,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_grid.yaml"
 DATASET_CACHE_VERSION = 6
 DEFAULT_DATASET_CACHE_DIR = PROJECT_ROOT / "experiments" / "cache" / "preprocessed_datasets"
+CV_METRIC_NAMES = ("accuracy", "macro_f1", "cohen_kappa")
 
 
 def parse_args() -> argparse.Namespace:
@@ -373,6 +380,91 @@ def make_train_test_split_indices(
     return train_idx.astype(np.int64), test_idx.astype(np.int64)
 
 
+def make_cross_validation_splits(
+        y: np.ndarray,
+        subjects: np.ndarray,
+        n_splits: int,
+        seed: int,
+        allow_subject_overlap: bool,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Build stratified sample-level or subject-disjoint CV folds."""
+    if n_splits < 2:
+        raise ValueError(f"training.n_splits must be at least 2, got {n_splits}.")
+
+    y = np.asarray(y, dtype=np.int64)
+    subjects = np.asarray(subjects, dtype=np.str_)
+    indices = np.arange(len(y))
+    if allow_subject_overlap:
+        splitter = StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        iterator = splitter.split(indices, y)
+    else:
+        if len(subjects) != len(y):
+            raise ValueError(
+                f"subjects length ({len(subjects)}) must match labels length "
+                f"({len(y)})."
+            )
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        iterator = splitter.split(indices, y, groups=subjects)
+
+    return [
+        (
+            np.asarray(train_idx, dtype=np.int64),
+            np.asarray(test_idx, dtype=np.int64),
+        )
+        for train_idx, test_idx in iterator
+    ]
+
+
+def aggregate_fold_metrics(
+        fold_metrics: list[dict[str, Any]],
+) -> dict[str, dict[str, float]]:
+    """Return mean, maximum, and minimum test metrics across folds."""
+    if not fold_metrics:
+        raise ValueError("fold_metrics must contain at least one fold.")
+
+    aggregates: dict[str, dict[str, float]] = {}
+    for metric_name in CV_METRIC_NAMES:
+        key = f"test_{metric_name}"
+        values = np.asarray([row[key] for row in fold_metrics], dtype=float)
+        aggregates[metric_name] = {
+            "mean": float(values.mean()),
+            "max": float(values.max()),
+            "min": float(values.min()),
+        }
+    return aggregates
+
+
+def save_fold_results_csv(
+        path: Path,
+        fold_metrics: list[dict[str, Any]],
+) -> None:
+    fieldnames = [
+        "fold",
+        "n_train",
+        "n_test",
+        "best_epoch",
+        "test_accuracy",
+        "test_macro_f1",
+        "test_cohen_kappa",
+    ]
+    rows = [
+        {field: metrics[field] for field in fieldnames}
+        for metrics in fold_metrics
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def save_split_metadata(
         path: Path,
         y: np.ndarray,
@@ -548,6 +640,7 @@ def evaluate(
         "loss": predictions["loss"],
         "accuracy": predictions["accuracy"],
         "macro_f1": predictions["macro_f1"],
+        "cohen_kappa": predictions["cohen_kappa"],
     }
 
 
@@ -593,8 +686,11 @@ def predict_loader(
     y_pred = np.asarray(y_pred, dtype=np.int64)
     return {
         "loss": total_loss / len(y_true),
-        "accuracy": accuracy_score(y_true, y_pred),
-        "macro_f1": f1_score(y_true, y_pred, average="macro", zero_division=0),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(
+            f1_score(y_true, y_pred, average="macro", zero_division=0)
+        ),
+        "cohen_kappa": float(cohen_kappa_score(y_true, y_pred)),
         "y_true": y_true,
         "y_pred": y_pred,
     }
@@ -892,14 +988,18 @@ def build_lr_schedulers(
     return scheduler_name, metric_name, euclid_scheduler, stiefel_scheduler
 
 
-def train_experiment(
+def train_fold(
         run_index: int,
+        fold_index: int,
+        n_splits: int,
         experiment_cfg: dict[str, Any],
         x: np.ndarray,
         y: np.ndarray,
         subject_labels: np.ndarray,
         class_names: list[str],
-        base_output_dir: Path,
+        run_dir: Path,
+        train_idx: np.ndarray,
+        test_idx: np.ndarray,
         device: torch.device,
 ) -> dict[str, Any]:
     training_cfg = experiment_cfg["training"]
@@ -909,12 +1009,12 @@ def train_experiment(
         training_cfg.get("precision", "float64")
     )
     training_cfg["precision"] = precision_name
-    seed, test_size, allow_subject_overlap = normalize_data_split_config(
+    seed, _test_size, allow_subject_overlap = normalize_data_split_config(
         data_cfg,
         training_cfg,
     )
     dtype = resolve_precision(precision_name)
-    set_seed(seed)
+    set_seed(seed + fold_index - 1)
     if device.type == "cuda":
         allow_tf32 = parse_bool(
             training_cfg.get("allow_tf32", False),
@@ -925,21 +1025,11 @@ def train_experiment(
         if hasattr(torch, "set_float32_matmul_precision"):
             torch.set_float32_matmul_precision("high" if allow_tf32 else "highest")
 
-    run_dir = make_run_dir(base_output_dir, run_index, experiment_cfg)
-    save_yaml(run_dir / "config.yaml", experiment_cfg)
-
     global_max = np.max(x)
     global_min = np.min(np.abs(x))
     print(f"max: {global_max}")
     print(f"min: {global_min}")
 
-    train_idx, test_idx = make_train_test_split_indices(
-        y=y,
-        test_size=test_size,
-        seed=seed,
-        subjects=subject_labels,
-        allow_subject_overlap=allow_subject_overlap,
-    )
     train_subjects = set(subject_labels[train_idx].tolist())
     test_subjects = set(subject_labels[test_idx].tolist())
     if not allow_subject_overlap:
@@ -956,7 +1046,7 @@ def train_experiment(
         train_idx=train_idx,
         test_idx=test_idx,
         seed=seed,
-        test_size=test_size,
+        test_size=1.0 / n_splits,
         allow_subject_overlap=allow_subject_overlap,
     )
 
@@ -1049,7 +1139,10 @@ def train_experiment(
         default=False,
     )
 
-    print(f"\n[Run {run_index}] {run_dir.name}")
+    print(
+        f"\n[Run {run_index} | Fold {fold_index}/{n_splits}] "
+        f"{run_dir.name}"
+    )
     print(f"  data={data_cfg}")
     print(f"  model={model_cfg}")
     print(f"  training={training_cfg}")
@@ -1215,12 +1308,14 @@ def train_experiment(
 
     metrics = {
         "run_index": run_index,
+        "fold": fold_index,
         "run_dir": str(run_dir),
         "best_epoch": best_epoch,
         "best_test_macro_f1": best_test_macro_f1,
         "test_loss": test_metrics["loss"],
         "test_accuracy": test_metrics["accuracy"],
         "test_macro_f1": test_metrics["macro_f1"],
+        "test_cohen_kappa": test_metrics["cohen_kappa"],
         "class_names": class_names,
         "precision": precision_name,
         "torch_dtype": str(dtype).replace("torch.", ""),
@@ -1236,12 +1331,105 @@ def train_experiment(
         json.dump(metrics, handle, indent=2)
 
     print(
-        f"[Run {run_index}] done | best_epoch={best_epoch} "
+        f"[Run {run_index} | Fold {fold_index}/{n_splits}] done | "
+        f"best_epoch={best_epoch} "
         f"best_test_mf1={best_test_macro_f1:.4f} "
         f"test_acc={test_metrics['accuracy']:.4f} "
-        f"test_mf1={test_metrics['macro_f1']:.4f}"
+        f"test_mf1={test_metrics['macro_f1']:.4f} "
+        f"test_kappa={test_metrics['cohen_kappa']:.4f}"
     )
     return metrics
+
+
+def train_experiment(
+        run_index: int,
+        experiment_cfg: dict[str, Any],
+        x: np.ndarray,
+        y: np.ndarray,
+        subject_labels: np.ndarray,
+        class_names: list[str],
+        base_output_dir: Path,
+        device: torch.device,
+) -> dict[str, Any]:
+    """Train and evaluate one configuration with stratified K-fold CV."""
+    training_cfg = experiment_cfg["training"]
+    data_cfg = experiment_cfg["data"]
+    seed, _test_size, allow_subject_overlap = normalize_data_split_config(
+        data_cfg,
+        training_cfg,
+    )
+    n_splits = int(training_cfg.get("n_splits", 5))
+    training_cfg["n_splits"] = n_splits
+
+    folds = make_cross_validation_splits(
+        y=y,
+        subjects=subject_labels,
+        n_splits=n_splits,
+        seed=seed,
+        allow_subject_overlap=allow_subject_overlap,
+    )
+    run_dir = make_run_dir(base_output_dir, run_index, experiment_cfg)
+    save_yaml(run_dir / "config.yaml", experiment_cfg)
+
+    fold_metrics: list[dict[str, Any]] = []
+    for fold_index, (train_idx, test_idx) in enumerate(folds, start=1):
+        fold_dir = run_dir / f"fold_{fold_index:02d}"
+        fold_dir.mkdir(parents=False, exist_ok=False)
+        metrics = train_fold(
+            run_index=run_index,
+            fold_index=fold_index,
+            n_splits=n_splits,
+            experiment_cfg=experiment_cfg,
+            x=x,
+            y=y,
+            subject_labels=subject_labels,
+            class_names=class_names,
+            run_dir=fold_dir,
+            train_idx=train_idx,
+            test_idx=test_idx,
+            device=device,
+        )
+        fold_metrics.append(metrics)
+
+    aggregates = aggregate_fold_metrics(fold_metrics)
+    summary = {
+        "run_index": run_index,
+        "run_dir": str(run_dir),
+        "evaluation": {
+            "strategy": (
+                "stratified_kfold"
+                if allow_subject_overlap
+                else "stratified_group_kfold"
+            ),
+            "n_splits": n_splits,
+            "seed": seed,
+            "test_size_per_fold": 1.0 / n_splits,
+            "allow_subject_overlap": allow_subject_overlap,
+        },
+        "folds": fold_metrics,
+        "aggregate": aggregates,
+    }
+    save_fold_results_csv(run_dir / "fold_results.csv", fold_metrics)
+    with (run_dir / "five_fold_summary.json").open(
+            "w", encoding="utf-8"
+    ) as handle:
+        json.dump(summary, handle, indent=2)
+
+    print(f"\n[Run {run_index}] {n_splits}-fold aggregate test results")
+    print("metric        | mean   | max    | min")
+    for metric_name, display_name in (
+            ("accuracy", "accuracy"),
+            ("macro_f1", "macro_f1"),
+            ("cohen_kappa", "Cohen's kappa"),
+    ):
+        stats = aggregates[metric_name]
+        print(
+            f"{display_name:<13} | {stats['mean']:.4f} | "
+            f"{stats['max']:.4f} | {stats['min']:.4f}"
+        )
+    print(f"Saved fold results: {run_dir / 'fold_results.csv'}")
+    print(f"Saved aggregate summary: {run_dir / 'five_fold_summary.json'}")
+    return summary
 
 
 def preprocess_dataset(
