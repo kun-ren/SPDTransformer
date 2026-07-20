@@ -5,7 +5,7 @@ data:
     - [8, 30]
   sfreq: [160]
   # S088, S092, S100, and S104 have incomplete/anomalous recordings.
-  subjects: 1-87,89-91,93-99,101-103,105-109
+  subjects: 1-87,89-109
   # null keeps all 64 EEG channels from EEGMMIDB.
   channels: null
   reject_threshold_uv: [null]
@@ -13,7 +13,7 @@ data:
   ica_n_components: [13]
   ica_random_state: [42]
   ica_eog_channels: ["FP1,FP2"]
-  use_autoreject: [false]
+  use_autoreject: [true]
   autoreject_random_state: [42]
   autoreject_n_jobs: [2]
   autoreject_cv: [10]

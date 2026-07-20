@@ -11,10 +11,13 @@
 python src\baselines\mdm_baseline.py --config configs\mdm_grid_bci_iv_2a.yaml
 ```
 
-The MDM baseline supports two classifiers through `model.classifier_type`:
+The MDM baseline supports three classifiers through `model.classifier_type`:
 
 - `pyriemann` (default): classical MDM with configurable centroid and distance
   metrics (`metric_mean` and `metric_distance`).
+- `fgmdm`: pyRiemann's Fisher geodesic MDM. It applies FGDA in tangent space
+  before MDM classification and supports `metric_mean`, `metric_distance`,
+  `metric_map`, `fgmdm_tsupdate`, and `n_jobs`.
 - `differentiable`: learned Log-Euclidean class prototypes with a trainable
   distance scale. With `pooling: weighted`, token weights are learned jointly.
 
@@ -32,6 +35,23 @@ training:
   epochs: [100]
   batch_size: [64]
   learning_rate: [0.01]
+```
+
+For a single 8--30 Hz covariance matrix per trial, FgMDM can be selected with:
+
+```yaml
+model:
+  classifier_type: ["fgmdm"]
+  pooling: ["original"]
+  metric_mean: ["riemann"]
+  metric_distance: ["riemann"]
+  metric_map: ["riemann"]
+  fgmdm_tsupdate: [false]
+  n_jobs: [1]
+```
+
+```powershell
+python src\baselines\mdm_baseline.py --config configs\fgmdm_bci_iv_2a.yaml
 ```
 
 ##### TangentTransformer

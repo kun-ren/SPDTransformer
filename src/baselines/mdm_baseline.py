@@ -58,6 +58,9 @@ MDM_METRIC_KEYS = {
     "distance_metric",
     "metric_distance",
     "mdm_distance_metric",
+    "map_metric",
+    "metric_map",
+    "fgmdm_map_metric",
 }
 
 
@@ -226,6 +229,8 @@ def normalize_classifier_type(value: Any) -> str:
     normalized = str(value or "pyriemann").strip().lower().replace("-", "_")
     if normalized in {"pyriemann", "classic", "classical", "mdm"}:
         return "pyriemann"
+    if normalized in {"fgmdm", "fg_mdm", "fisher_geodesic_mdm"}:
+        return "fgmdm"
     if normalized in {
         "differentiable",
         "learnable",
@@ -235,7 +240,8 @@ def normalize_classifier_type(value: Any) -> str:
     }:
         return "differentiable"
     raise ValueError(
-        "MDM classifier_type must be 'pyriemann' or 'differentiable', "
+        "MDM classifier_type must be 'pyriemann', 'fgmdm', or "
+        "'differentiable', "
         f"got {value!r}."
     )
 
@@ -444,7 +450,7 @@ def resolve_mdm_metric(
 
     if isinstance(base_metric, dict):
         metric_mean = metric_config_value(base_metric, "mean")
-        metric_distance = metric_config_value(base_metric, "distance")
+        metric_distance = metric_config_value(base_metric, "distance", "dist")
         fallback_metric = None
     else:
         metric_mean = None
@@ -492,6 +498,51 @@ def resolve_mdm_metric(
     return {
         "mean": normalize_metric_name(mean_metric),
         "distance": normalize_metric_name(distance_metric),
+    }
+
+
+def resolve_fgmdm_metric(
+    model_cfg: dict[str, Any],
+    cli_metric: Any = None,
+    cli_mean_metric: Any = None,
+    cli_distance_metric: Any = None,
+) -> str | dict[str, str]:
+    metric = resolve_mdm_metric(
+        model_cfg,
+        cli_metric=cli_metric,
+        cli_mean_metric=cli_mean_metric,
+        cli_distance_metric=cli_distance_metric,
+    )
+    configured_map = metric_config_value(
+        model_cfg,
+        "map_metric",
+        "metric_map",
+        "fgmdm_map_metric",
+    )
+    configured_metric = metric_config_value(model_cfg, "metric", "mdm_metric")
+    if _is_none_like(configured_map) and isinstance(configured_metric, dict):
+        configured_map = metric_config_value(configured_metric, "map")
+
+    if isinstance(metric, str) and _is_none_like(configured_map):
+        return metric
+
+    if isinstance(metric, str):
+        mean_metric = metric
+        distance_metric = metric
+    else:
+        mean_metric = metric["mean"]
+        distance_metric = metric["distance"]
+    map_metric = (
+        mean_metric
+        if _is_none_like(configured_map)
+        else normalize_metric_name(configured_map)
+    )
+    # pyRiemann 0.11 forwards this dict to both FGDA and MDM, requiring the
+    # union of their keys even though the FgMDM docstring says "dist".
+    return {
+        "mean": mean_metric,
+        "distance": distance_metric,
+        "map": map_metric,
     }
 
 
@@ -1122,7 +1173,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--classifier-type",
         default=None,
-        help="Override model.classifier_type: pyriemann or differentiable.",
+        help=(
+            "Override model.classifier_type: pyriemann, fgmdm, or "
+            "differentiable."
+        ),
     )
     parser.add_argument("--device", default=None)
     parser.add_argument(
@@ -1193,21 +1247,41 @@ def run_experiment(
 
     run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(experiment_cfg)}"
 
-    if classifier_type == "pyriemann":
-        from pyriemann.classification import MDM
+    if classifier_type in {"pyriemann", "fgmdm"}:
+        from pyriemann.classification import FgMDM, MDM
 
         x_trial_spd, pooling_summary = pool_spd_tokens(
             x_spd,
             model_cfg,
             eps=float(model_cfg.get("eps", data_cfg.get("eps", 1e-8))),
         )
-        metric = resolve_mdm_metric(
-            model_cfg,
-            cli_metric=cli_metric,
-            cli_mean_metric=cli_mean_metric,
-            cli_distance_metric=cli_distance_metric,
-        )
-        classifier = MDM(metric=metric)
+        if classifier_type == "fgmdm":
+            metric = resolve_fgmdm_metric(
+                model_cfg,
+                cli_metric=cli_metric,
+                cli_mean_metric=cli_mean_metric,
+                cli_distance_metric=cli_distance_metric,
+            )
+            tsupdate = parse_bool(
+                model_cfg.get("fgmdm_tsupdate", model_cfg.get("tsupdate", False)),
+                default=False,
+            )
+            n_jobs = int(model_cfg.get("n_jobs", 1))
+            classifier = FgMDM(
+                metric=metric,
+                tsupdate=tsupdate,
+                n_jobs=n_jobs,
+            )
+        else:
+            metric = resolve_mdm_metric(
+                model_cfg,
+                cli_metric=cli_metric,
+                cli_mean_metric=cli_mean_metric,
+                cli_distance_metric=cli_distance_metric,
+            )
+            tsupdate = None
+            n_jobs = int(model_cfg.get("n_jobs", 1))
+            classifier = MDM(metric=metric, n_jobs=n_jobs)
         classifier.fit(x_trial_spd[train_idx], y[train_idx])
 
         rows = []
@@ -1223,7 +1297,10 @@ def run_experiment(
             "metric": metric,
             "x_trial_spd_shape": list(x_trial_spd.shape),
             "token_pooling": pooling_summary,
+            "n_jobs": n_jobs,
         }
+        if tsupdate is not None:
+            classifier_details["tsupdate"] = tsupdate
         run_dir.mkdir(parents=True, exist_ok=False)
         save_json(run_dir / "config.json", experiment_cfg)
     else:
@@ -1233,7 +1310,7 @@ def run_experiment(
         ):
             raise ValueError(
                 "--metric, --mean-metric, and --distance-metric only apply to "
-                "classifier_type='pyriemann'."
+                "classifier_type='pyriemann' or 'fgmdm'."
             )
         run_dir.mkdir(parents=True, exist_ok=False)
         save_json(run_dir / "config.json", experiment_cfg)
