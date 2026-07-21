@@ -1,5 +1,5 @@
 data:
-  dataset: ["bnci2014_001"]
+  dataset: ["physionet_mi"]
   root_dir: ["data"]
   filter_bank:
     - [8, 30]
@@ -29,10 +29,11 @@ data:
   moabb_accept_terms: [true]
   moabb_force_update: [false]
   test_size: [0.2]
+  val_size: [0.0]
   allow_subject_overlap: [true]
 
 model:
-  classifier_type: ["fgmdm"]
+  classifier_type: ["mdm"]
   pooling: ["original"]
   metric_mean: ["riemann"]
   metric_distance: ["riemann"]
@@ -42,7 +43,8 @@ model:
 
 training:
   seed: [42]
-  split_file: experiments/splits/bnci2014_001_mdm_test20_seed42.json
+  n_splits: [5]
+  split_file: null
 
 output:
   dir: experiments/results/fgmdm_bci_iv_2a

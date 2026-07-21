@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.model_selection import (
+    GroupShuffleSplit,
+    StratifiedGroupKFold,
+    StratifiedKFold,
+    train_test_split,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -62,6 +67,7 @@ MDM_METRIC_KEYS = {
     "metric_map",
     "fgmdm_map_metric",
 }
+MDM_REPORT_METRICS = ("accuracy", "macro_f1", "cohen_kappa")
 
 
 class IncompatibleExperiment(ValueError):
@@ -78,6 +84,14 @@ def _subjects_hash(subjects: np.ndarray | None) -> str | None:
         return None
     subject_labels = np.asarray(subjects, dtype=np.str_)
     return hashlib.sha1("\n".join(subject_labels.tolist()).encode("utf-8")).hexdigest()
+
+
+def compute_mdm_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    from sklearn.metrics import cohen_kappa_score
+
+    metrics = compute_metrics(y_true, y_pred)
+    metrics["cohen_kappa"] = float(cohen_kappa_score(y_true, y_pred))
+    return metrics
 
 
 def resolve_project_path(path_value: Any, default: Path) -> Path:
@@ -780,7 +794,7 @@ def train_differentiable_epoch(
         y_true.extend(y_batch.detach().cpu().tolist())
         y_pred.extend(logits.argmax(dim=1).detach().cpu().tolist())
 
-    metrics = compute_metrics(
+    metrics = compute_mdm_metrics(
         np.asarray(y_true, dtype=np.int64),
         np.asarray(y_pred, dtype=np.int64),
     )
@@ -812,7 +826,7 @@ def evaluate_differentiable(
             y_true.extend(y_batch.cpu().tolist())
             y_pred.extend(logits.argmax(dim=1).cpu().tolist())
 
-    metrics = compute_metrics(
+    metrics = compute_mdm_metrics(
         np.asarray(y_true, dtype=np.int64),
         np.asarray(y_pred, dtype=np.int64),
     )
@@ -949,9 +963,11 @@ def run_differentiable_mdm(
                 "train_loss": train_metrics["loss"],
                 "train_accuracy": train_metrics["accuracy"],
                 "train_macro_f1": train_metrics["macro_f1"],
+                "train_cohen_kappa": train_metrics["cohen_kappa"],
                 "test_loss": test_metrics["loss"],
                 "test_accuracy": test_metrics["accuracy"],
                 "test_macro_f1": test_metrics["macro_f1"],
+                "test_cohen_kappa": test_metrics["cohen_kappa"],
             }
         )
         print(
@@ -999,6 +1015,7 @@ def run_differentiable_mdm(
                 "loss": metrics["loss"],
                 "accuracy": metrics["accuracy"],
                 "macro_f1": metrics["macro_f1"],
+                "cohen_kappa": metrics["cohen_kappa"],
             }
         )
 
@@ -1165,6 +1182,110 @@ def get_train_test_indices(
     return train_idx, test_idx
 
 
+def validate_mdm_cv_config(
+    training_cfg: dict[str, Any],
+    data_cfg: dict[str, Any],
+) -> tuple[int, int, bool]:
+    n_splits = int(training_cfg.get("n_splits", 5))
+    seed = int(data_cfg.get("seed", training_cfg.get("seed", 42)))
+    test_size = float(data_cfg.get("test_size", training_cfg.get("test_size", 0.2)))
+    val_size = float(data_cfg.get("val_size", training_cfg.get("val_size", 0.0)))
+    allow_subject_overlap = parse_bool(
+        data_cfg.get(
+            "allow_subject_overlap",
+            training_cfg.get("allow_subject_overlap", True),
+        ),
+        default=True,
+    )
+
+    if n_splits < 2:
+        raise ValueError(f"training.n_splits must be at least 2, got {n_splits}.")
+    if not np.isclose(val_size, 0.0):
+        raise ValueError(
+            "MDM K-fold evaluation does not use a validation dataset; "
+            f"set val_size to 0.0, got {val_size}."
+        )
+    expected_test_size = 1.0 / n_splits
+    if not np.isclose(test_size, expected_test_size):
+        raise ValueError(
+            "For K-fold evaluation, test_size must equal 1 / n_splits; "
+            f"got test_size={test_size} and n_splits={n_splits} "
+            f"(expected {expected_test_size:.6f})."
+        )
+    return n_splits, seed, allow_subject_overlap
+
+
+def make_mdm_cv_splits(
+    y: np.ndarray,
+    subject_labels: np.ndarray,
+    n_splits: int,
+    seed: int,
+    allow_subject_overlap: bool,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    indices = np.arange(len(y))
+    if allow_subject_overlap:
+        splitter = StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        iterator = splitter.split(indices, y)
+    else:
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        iterator = splitter.split(indices, y, groups=subject_labels)
+    return [
+        (
+            np.asarray(train_idx, dtype=np.int64),
+            np.asarray(test_idx, dtype=np.int64),
+        )
+        for train_idx, test_idx in iterator
+    ]
+
+
+def aggregate_mdm_fold_metrics(
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, float]]:
+    aggregates: dict[str, dict[str, float]] = {}
+    for metric_name in MDM_REPORT_METRICS:
+        values = np.asarray([row[metric_name] for row in rows], dtype=float)
+        aggregates[metric_name] = {
+            "mean": float(values.mean()),
+            "max": float(values.max()),
+            "min": float(values.min()),
+        }
+    return aggregates
+
+
+def print_mdm_fold_summary(
+    rows: list[dict[str, Any]],
+    aggregates: dict[str, dict[str, float]],
+) -> None:
+    print("\nMDM five-fold test results (no validation dataset)")
+    print("fold | train | test | accuracy | macro_f1 | Cohen's kappa")
+    for row in rows:
+        print(
+            f"{row['fold']:>4} | {row['n_train']:>5} | {row['n_test']:>4} | "
+            f"{row['accuracy']:.4f} | {row['macro_f1']:.4f} | "
+            f"{row['cohen_kappa']:.4f}"
+        )
+    print("\nFive-fold aggregate (test folds)")
+    print("metric        | mean   | max    | min")
+    for metric_name, display_name in (
+        ("accuracy", "accuracy"),
+        ("macro_f1", "macro_f1"),
+        ("cohen_kappa", "Cohen's kappa"),
+    ):
+        stats = aggregates[metric_name]
+        print(
+            f"{display_name:<13} | {stats['mean']:.4f} | "
+            f"{stats['max']:.4f} | {stats['min']:.4f}"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="MDM baseline using the same SPD preprocessing config as train.py."
@@ -1238,14 +1359,22 @@ def run_experiment(
         dataset_cache_dir,
         data_cache,
     )
-    train_idx, test_idx = get_train_test_indices(
-        y,
+    n_splits, seed, allow_subject_overlap = validate_mdm_cv_config(
         training_cfg,
-        subject_labels=subject_labels,
-        data_cfg=data_cfg,
+        data_cfg,
+    )
+    folds = make_mdm_cv_splits(
+        y,
+        subject_labels,
+        n_splits=n_splits,
+        seed=seed,
+        allow_subject_overlap=allow_subject_overlap,
     )
 
     run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(experiment_cfg)}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    save_json(run_dir / "config.json", experiment_cfg)
+    fold_rows: list[dict[str, Any]] = []
 
     if classifier_type in {"pyriemann", "fgmdm"}:
         from pyriemann.classification import FgMDM, MDM
@@ -1267,11 +1396,6 @@ def run_experiment(
                 default=False,
             )
             n_jobs = int(model_cfg.get("n_jobs", 1))
-            classifier = FgMDM(
-                metric=metric,
-                tsupdate=tsupdate,
-                n_jobs=n_jobs,
-            )
         else:
             metric = resolve_mdm_metric(
                 model_cfg,
@@ -1281,18 +1405,31 @@ def run_experiment(
             )
             tsupdate = None
             n_jobs = int(model_cfg.get("n_jobs", 1))
-            classifier = MDM(metric=metric, n_jobs=n_jobs)
-        classifier.fit(x_trial_spd[train_idx], y[train_idx])
-
-        rows = []
-        for split_name, split_idx in {"train": train_idx, "test": test_idx}.items():
-            prediction = classifier.predict(x_trial_spd[split_idx])
+        for fold_index, (train_idx, test_idx) in enumerate(folds, start=1):
+            if classifier_type == "fgmdm":
+                classifier = FgMDM(
+                    metric=metric,
+                    tsupdate=tsupdate,
+                    n_jobs=n_jobs,
+                )
+            else:
+                classifier = MDM(metric=metric, n_jobs=n_jobs)
+            classifier.fit(x_trial_spd[train_idx], y[train_idx])
+            prediction = classifier.predict(x_trial_spd[test_idx])
             row = {
-                "split": split_name,
-                "n_samples": int(len(split_idx)),
+                "fold": fold_index,
+                "n_train": int(len(train_idx)),
+                "n_test": int(len(test_idx)),
             }
-            row.update(compute_metrics(y[split_idx], prediction))
-            rows.append(row)
+            row.update(compute_mdm_metrics(y[test_idx], prediction))
+            fold_rows.append(row)
+            print(
+                f"[MDM fold {fold_index}/{n_splits}] "
+                f"accuracy={row['accuracy']:.4f} "
+                f"mf1={row['macro_f1']:.4f} "
+                f"kappa={row['cohen_kappa']:.4f}",
+                flush=True,
+            )
         classifier_details = {
             "metric": metric,
             "x_trial_spd_shape": list(x_trial_spd.shape),
@@ -1301,8 +1438,6 @@ def run_experiment(
         }
         if tsupdate is not None:
             classifier_details["tsupdate"] = tsupdate
-        run_dir.mkdir(parents=True, exist_ok=False)
-        save_json(run_dir / "config.json", experiment_cfg)
     else:
         if any(
             not _is_none_like(value)
@@ -1312,23 +1447,52 @@ def run_experiment(
                 "--metric, --mean-metric, and --distance-metric only apply to "
                 "classifier_type='pyriemann' or 'fgmdm'."
             )
-        run_dir.mkdir(parents=True, exist_ok=False)
-        save_json(run_dir / "config.json", experiment_cfg)
-        rows, classifier_details = run_differentiable_mdm(
-            x_spd=x_spd,
-            y=y,
-            train_idx=train_idx,
-            test_idx=test_idx,
-            class_names=class_names,
-            model_cfg=model_cfg,
-            training_cfg=training_cfg,
-            device=device,
-            precision_override=precision_override,
-            run_dir=run_dir,
-            experiment_cfg=experiment_cfg,
-        )
+        fold_details = []
+        for fold_index, (train_idx, test_idx) in enumerate(folds, start=1):
+            fold_dir = run_dir / f"fold_{fold_index:02d}"
+            fold_dir.mkdir(parents=True, exist_ok=False)
+            rows, details = run_differentiable_mdm(
+                x_spd=x_spd,
+                y=y,
+                train_idx=train_idx,
+                test_idx=test_idx,
+                class_names=class_names,
+                model_cfg=model_cfg,
+                training_cfg=training_cfg,
+                device=device,
+                precision_override=precision_override,
+                run_dir=fold_dir,
+                experiment_cfg=experiment_cfg,
+            )
+            test_row = next(row for row in rows if row["split"] == "test")
+            row = {
+                "fold": fold_index,
+                "n_train": int(len(train_idx)),
+                "n_test": int(len(test_idx)),
+                "accuracy": test_row["accuracy"],
+                "macro_f1": test_row["macro_f1"],
+                "cohen_kappa": test_row["cohen_kappa"],
+                "loss": test_row["loss"],
+            }
+            fold_rows.append(row)
+            fold_details.append({"fold": fold_index, **details})
+            write_csv(fold_dir / "results.csv", rows)
+            print(
+                f"[MDM fold {fold_index}/{n_splits}] "
+                f"accuracy={row['accuracy']:.4f} "
+                f"mf1={row['macro_f1']:.4f} "
+                f"kappa={row['cohen_kappa']:.4f}",
+                flush=True,
+            )
+        classifier_details = dict(fold_details[0])
+        classifier_details.pop("fold", None)
+        classifier_details["fold_details"] = fold_details
 
-    write_csv(run_dir / "results.csv", rows)
+    aggregates = aggregate_mdm_fold_metrics(fold_rows)
+    print_mdm_fold_summary(fold_rows, aggregates)
+    write_csv(run_dir / "fold_results.csv", fold_rows)
+    # Keep the historical filename for downstream analysis scripts.
+    write_csv(run_dir / "results.csv", fold_rows)
 
     summary = {
         "baseline": "mdm",
@@ -1336,7 +1500,19 @@ def run_experiment(
         "config": experiment_cfg,
         "class_names": class_names,
         "x_spd_shape": list(x_spd.shape),
-        "splits": rows,
+        "evaluation": {
+            "strategy": (
+                "stratified_kfold"
+                if allow_subject_overlap
+                else "stratified_group_kfold"
+            ),
+            "n_splits": n_splits,
+            "test_size_per_fold": 1.0 / n_splits,
+            "validation_size": 0.0,
+            "seed": seed,
+        },
+        "folds": fold_rows,
+        "aggregates": aggregates,
     }
     summary.update(classifier_details)
     save_json(run_dir / "summary.json", summary)
@@ -1345,8 +1521,9 @@ def run_experiment(
         "status": "completed",
         "run_index": run_index,
         "run_dir": str(run_dir),
-        "test_accuracy": rows[-1]["accuracy"],
-        "test_macro_f1": rows[-1]["macro_f1"],
+        "test_accuracy_mean": aggregates["accuracy"]["mean"],
+        "test_macro_f1_mean": aggregates["macro_f1"]["mean"],
+        "test_cohen_kappa_mean": aggregates["cohen_kappa"]["mean"],
     }
 
 

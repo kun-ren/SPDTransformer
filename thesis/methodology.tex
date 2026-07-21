@@ -1,5 +1,5 @@
 % Required packages in the main thesis preamble:
-%\usepackage{amsmath,amssymb,bm}
+%\usepackage{amsmath,amssymb,bm,graphicx}
 
 \chapter{Methodology}
 \label{chap:methodology}
@@ -7,49 +7,154 @@
 \section{Overview}
 \label{sec:methodology-overview}
 
-This work proposes an SPD Transformer for electroencephalography (EEG)
-motor-imagery classification. The central design principle is to preserve the
-geometry of symmetric positive-definite (SPD) covariance matrices throughout
-the feature-extraction backbone. Conventional Transformer models operate on
-vectors in Euclidean space and therefore do not directly respect the
-non-Euclidean structure of covariance matrices. In contrast, the proposed
-model performs projection, attention, residual aggregation, normalisation, and
-feed-forward transformation using operations that preserve positive
-definiteness.
-
-The complete processing pipeline consists of four stages:
-\begin{enumerate}
-    \item extraction of event-centred EEG trials;
-    \item construction of multi-band, multi-segment covariance matrices;
-    \item temporal and frequency-domain modelling with stacked SPD Transformer
-          encoders; and
-    \item Log-Euclidean pooling followed by a linear classification head.
-\end{enumerate}
-
-For a trial containing $T$ temporal segments, $F$ frequency bands, and $C$ EEG
-channels, each token satisfies
+The proposed model is a Transformer variant whose tokens remain symmetric
+positive-definite (SPD) covariance matrices.  Instead of flattening a trial
+into one long Euclidean sequence, it preserves the temporal, spectral, and
+anatomical axes and attends to them successively.  For a batch of trials, the
+input is
 \begin{equation}
-    \bm{X}_{t,f}\in\mathbb{S}_{++}^{C},
+    \bm{\mathcal X}
+    =\left\{\bm X_{tfr}\right\}_{t=1,f=1,r=1}^{T,F,R}
+    \in\left(\mathbb S_{++}^{d_0}\right)^{T\times F\times R},
+    \qquad
+    \operatorname{shape}(\bm{\mathcal X})
+    =B\times T\times F\times R\times d_0\times d_0,
+    \label{eq:overview-input}
 \end{equation}
-and the complete trial is represented by the grid
-\begin{equation}
-    \bm{\mathcal{X}}
-    =
-    \left\{\bm{X}_{t,f}\right\}_{t=1,f=1}^{T,F}
-    \in
-    \left(\mathbb{S}_{++}^{C}\right)^{T\times F},
-\end{equation}
-where $\mathbb{S}_{++}^{C}$ denotes the manifold of $C \times C$ SPD matrices.
-The encoder first models relationships between temporal segments independently
-within each frequency band. It subsequently models relationships between
-frequency bands independently at each temporal position. This axial
-factorisation avoids flattening the temporal and spectral dimensions and
-retains their distinct interpretation.
+where $T$, $F$, and $R$ denote the numbers of temporal segments, frequency
+bands, and brain regions, respectively.  With the main PhysioNet
+configuration, a five-second epoch is divided into $T=19$ overlapping
+$0.5\,$s windows, $F=3$ filter-bank bands and $R=8$ regions are used, and every
+region contributes an $8\times8$ covariance matrix ($d_0=8$).
 
-The experimental architecture uses one or two encoder layers, an SPD output
-dimension of $64$, and an SPD feed-forward hidden dimension of $32$. Both mean
-pooling and learned attention pooling are evaluated at the classification
-stage.
+Figure~\ref{fig:spd-transformer-overview} summarises the end-to-end data flow.
+The encoder retains the token-grid shape, produces interactions along each of
+its three semantic axes, and returns symmetric log-domain representations of
+the SPD tokens.  A
+learned positional weighting then pools all tokens into one trial
+representation, which is compared with learnable class prototypes by a
+Log-Euclidean minimum-distance-to-mean (MDM) classifier.
+
+\begin{figure}[t]
+    \centering
+    \IfFileExists{figures/spd_transformer_overview.pdf}{%
+        \includegraphics[width=\textwidth]{figures/spd_transformer_overview.pdf}%
+    }{%
+        \includegraphics[width=\textwidth]{thesis/figures/spd_transformer_overview.pdf}%
+    }
+    \caption[Overview of the proposed SPD Transformer]{Overview of the proposed
+    SPD Transformer.  The input is a temporal--frequency--region grid of SPD
+    covariance matrices.  A tri-axial encoder successively applies temporal,
+    frequency, and brain-region attention while preserving the grid.  The
+    resulting log-SPD tokens are combined by learned global token weights and
+    classified by their Log-Euclidean distances to learned MDM prototypes.
+    The overlapping blue, green, and orange tiles denote log-mapped token
+    matrices associated with the three attention axes; learned weighting fuses
+    them into one trial-level matrix before classification.}
+    \label{fig:spd-transformer-overview}
+\end{figure}
+
+Within every axis $a\in\{\mathrm{time},\mathrm{frequency},\mathrm{region}\}$,
+the other two axes are folded into the batch dimension.  Hence temporal attention processes
+$BFR$ sequences of length $T$, frequency attention processes $BTR$ sequences
+of length $F$, and region attention processes $BTF$ sequences of length $R$.
+This axial factorisation has attention complexity
+$\mathcal O(T^2FR+TF^2R+TFR^2)$ rather than
+$\mathcal O((TFR)^2)$ for attention over a flattened grid.  The attention
+computation applied to each resulting sequence is expanded in
+Figure~\ref{fig:tri-axial-spd-attention}.
+
+\begin{figure}[t]
+    \centering
+    \IfFileExists{figures/tri_axial_spd_attention.pdf}{%
+        \includegraphics[width=\textwidth]{figures/tri_axial_spd_attention.pdf}%
+    }{%
+        \includegraphics[width=\textwidth]{thesis/figures/tri_axial_spd_attention.pdf}%
+    }
+    \caption[Riemannian multi-head attention]{Riemannian multi-head attention
+    applied along one axis.  Each head has independent query, key, and value
+    BiMaps.  A Riemannian distance and an optional gated relative-position bias
+    produce row-wise attention weights; the resulting log-value barycentres are
+    fused using learned simplex-valued head weights.  In the main configuration,
+    $H=4$ and positional bias is used only on the temporal axis.}
+    \label{fig:tri-axial-spd-attention}
+\end{figure}
+
+For head $h$, the query, key, and value transformations are SPD-preserving
+bilinear maps,
+\begin{equation}
+    \bm Q_i^{(h)}=\bm W_{Q,h}\bm X_i\bm W_{Q,h}^{\top}+\varepsilon\bm I,
+    \quad
+    \bm K_i^{(h)}=\bm W_{K,h}\bm X_i\bm W_{K,h}^{\top}+\varepsilon\bm I,
+    \quad
+    \bm V_i^{(h)}=\bm W_{V,h}\bm X_i\bm W_{V,h}^{\top}+\varepsilon\bm I.
+    \label{eq:overview-qkv}
+\end{equation}
+Let $\phi(\bm S)=\operatorname{svec}(\bm S)$ vectorise the upper triangle of a
+symmetric matrix, with off-diagonal entries multiplied by $\sqrt{2}$, and let
+$\bm L_h\in\mathbb R^{d(d+1)/2\times r}$ be the learned low-rank metric factor
+for head $h$.  The implemented squared distance is
+\begin{equation}
+    d_{G_h}^{,2}(\bm Q_i,\bm K_j)
+    =\left\|\bm\Delta_{ij}^{(h)}\bm L_h\right\|_2^2
+     +\varepsilon\left\|\bm\Delta_{ij}^{(h)}\right\|_2^2,
+    \quad
+    \bm\Delta_{ij}^{(h)}
+    =\phi(\log\bm Q_i^{(h)})-\phi(\log\bm K_j^{(h)}).
+    \label{eq:overview-riemannian-distance}
+\end{equation}
+The central attention rule is therefore
+\begin{equation}
+    A_{ij}^{(a,h)}
+    =\operatorname{softmax}_{j}\!\left(
+       -\frac{d_{G_h}^{,2}(\bm Q_i,\bm K_j)}{\sqrt r}
+       +b_{|i-j|}^{(a)}
+     \right),
+    \label{eq:overview-attention}
+\end{equation}
+where $b_{|i-j|}^{(a)}$ is a gated relative-position bias.  It starts at zero
+and is enabled only for temporal attention in the main configuration; for the
+frequency and region axes, $b^{(a)}=0$.  The values are aggregated by a
+Log-Euclidean barycentre, and the $H$ heads are combined using learned
+simplex-valued weights:
+\begin{equation}
+    \bm U_i^{(a,h)}=\sum_j A_{ij}^{(a,h)}\log\bm V_j^{(h)},
+    \qquad
+    \overline{\bm U}_i^{(a)}=\sum_{h=1}^{H}\pi_h^{(a)}\bm U_i^{(a,h)},
+    \qquad
+    \bm\pi^{(a)}=\operatorname{softmax}(\bm\theta^{(a)}).
+    \label{eq:overview-head-fusion}
+\end{equation}
+
+Each attention and feed-forward sublayer is followed by sequence-level
+AddNorm.  For an axis of length $N_a$, a learned gate
+$\eta\in(0,1)$ first mixes the residual and sublayer output in the log domain;
+then a shared identity shift normalises the total trace of that sequence:
+\begin{equation}
+    \bm S_i=(1-\eta)\bm R_i+\eta\bm U_i,
+    \qquad
+    \operatorname{SeqNorm}(\bm S_i)
+    =\bm S_i+
+      \frac{N_a-\sum_{j=1}^{N_a}\operatorname{tr}(\bm S_j)}{N_a d}\bm I.
+    \label{eq:overview-sequence-norm}
+\end{equation}
+The SPD feed-forward network operates point-wise on
+$\operatorname{vech}(\bm S_i)$ using a GELU multilayer perceptron, reconstructs
+a symmetric log-matrix, and adds it through a learned gate.  Thus all residual
+updates are symmetric in the tangent space and map back to valid SPD matrices
+under the matrix exponential.
+
+Finally, learned token logits $\rho_{tfr}$ define
+$\omega_{tfr}=\operatorname{softmax}_{tfr}(\rho_{tfr})$ and
+$\overline{\bm S}=\sum_{tfr}\omega_{tfr}\bm S_{tfr}$.  For class prototype
+$\bm P_c$, the differentiable MDM head produces
+\begin{equation}
+    \ell_c=-\lambda\left\|\overline{\bm S}-\bm P_c\right\|_F^2,
+    \qquad \lambda=\operatorname{softplus}(s)+\varepsilon,
+    \label{eq:overview-mdm}
+\end{equation}
+so the complete network---BiMaps, attention metric, head mixing, token pooling,
+and MDM prototypes---is trained end to end.
 
 \section{Input Representation}
 \label{sec:input-representation}
@@ -67,6 +172,20 @@ resulting raw trial is represented as
 \end{equation}
 where $C$ is the number of EEG channels and $L$ is the number of temporal
 samples.
+
+\subsection{Automatic Artifact Rejection}
+
+To reduce the influence of transient, high-amplitude artefacts, AutoReject is
+applied independently to the trials of each subject before covariance
+estimation. The method learns channel-wise peak-to-peak amplitude thresholds
+from the data by cross-validation and identifies trials that cannot be
+reliably repaired by channel interpolation. In our pipeline, AutoReject is
+fitted with 10-fold cross-validation and a fixed random seed of 42. Its output
+is used as a trial-level rejection mask: rejected trials and their labels are
+removed, whereas the retained, originally preprocessed signals are passed to
+the subsequent filter-bank and SPD-covariance stages. The mask is cached and
+reused across experimental configurations to ensure consistent artefact
+handling and avoid repeated fitting.
 
 \subsection{Filter-Bank Decomposition}
 

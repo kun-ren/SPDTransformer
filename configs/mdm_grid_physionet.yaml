@@ -29,6 +29,7 @@ data:
   executed: false
   task_types: unilateral_fist
   test_size: [0.2]
+  val_size: [0.0]
   allow_subject_overlap: [true]
 
 model:
@@ -41,6 +42,7 @@ model:
 
 training:
   seed: [42]
+  n_splits: [5]
   split_file: null
   # Used only by classifier_type="differentiable".
   epochs: [150]
