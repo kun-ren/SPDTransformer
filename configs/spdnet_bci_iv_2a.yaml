@@ -3,7 +3,7 @@ data:
   root_dir: ["data"]
   filter_bank:
     - [8, 30]
-  estimator: ["cov"]
+  estimator: ["lwf"]
   sfreq: [250]
   eps: [1.0e-6]
   covariance_signal_scale: ["auto"]
@@ -21,22 +21,34 @@ data:
   baseline_correction: [null]
   baseline_window: "0,1"
   epoch_slice: [[0.0, 4.0]]
-  segment_slice: [[0.25, 0.125]]
+  # One covariance matrix from the complete 0--4 s trial; no temporal tokens.
+  segment_slice: [[4.0, 4.0]]
   moabb_accept_terms: [true]
   moabb_force_update: [false]
-  test_size: [0.15]
-  val_size: [0.15]
+  test_size: [0.2]
+  val_size: [0.0]
   allow_subject_overlap: [true]
+
+model:
+  # 22 input channels are prepended automatically: 22->16->8->4.
+  dims: [16, 8, 4]
+  reig_epsilon: 1.0e-4
+  log_epsilon: 1.0e-6
+  project_stiefel: true
 
 training:
   seed: [42]
-  precision: ["float32"]
-  epochs: [50]
-  batch_size: [64]
-  spdnet_learning_rate: [0.001]
-  spdnet_weight_decay: [0.0001]
-  gradient_clip_norm: [1.0]
-  split_file: experiments/splits/bnci2014_001_spdnet_seed42.json
+  precision: ["float64"]
+  n_splits: [5]
+  epochs: [200]
+  batch_size: [30]
+  spdnet_optimizer: ["sgd"]
+  spdnet_learning_rate: [0.01]
+  spdnet_momentum: [0.0]
+  spdnet_weight_decay: [0.0]
+  gradient_clip_norm: [5.0]
+  log_every: [10]
+  split_file: [null]
   num_workers: [0]
 
 output:

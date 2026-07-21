@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import csv
 import random
 from datetime import datetime
@@ -19,12 +18,14 @@ from src.baselines.baseline_utils import (
     compute_metrics,
     config_hash,
     expand_data_training_experiments,
-    get_split_indices,
     load_spd_like_train,
     load_yaml,
-    log_euclidean_token_mean,
+    parse_bool,
     save_json,
 )
+
+
+SPDNET_REPORT_METRICS = ("accuracy", "macro_f1", "cohen_kappa")
 
 
 class SPDTrialDataset(Dataset):
@@ -167,10 +168,26 @@ class SPDNetClassifier(nn.Module):
             if isinstance(module, SPDNetBiMap):
                 module.project_stiefel_()
 
+    def project_stiefel_gradients_(self) -> None:
+        """Project Euclidean BiMap gradients onto the Stiefel tangent space."""
+        with torch.no_grad():
+            for module in self.modules():
+                if not isinstance(module, SPDNetBiMap):
+                    continue
+                gradient = module.weight.grad
+                if gradient is None:
+                    continue
+                wt_gradient = module.weight.transpose(0, 1) @ gradient
+                tangent_gradient = gradient - module.weight @ symmetrize(wt_gradient)
+                gradient.copy_(tangent_gradient)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="SPDNet baseline using the same SPD preprocessing/split config."
+        description=(
+            "SPDNet baseline using one covariance matrix per trial and "
+            "stratified K-fold evaluation without a validation split."
+        )
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--device", default=None)
@@ -183,8 +200,8 @@ def build_parser() -> argparse.ArgumentParser:
             "it is prepended automatically. Example: 16,8 for 21->16->8."
         ),
     )
-    parser.add_argument("--reig-epsilon", type=float, default=1e-4)
-    parser.add_argument("--log-epsilon", type=float, default=1e-6)
+    parser.add_argument("--reig-epsilon", type=float, default=None)
+    parser.add_argument("--log-epsilon", type=float, default=None)
     parser.add_argument("--disable-stiefel-projection", action="store_true")
     return parser
 
@@ -206,15 +223,20 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def parse_dims(raw_dims: str | None, input_dim: int) -> list[int]:
+def parse_dims(raw_dims: Any, input_dim: int) -> list[int]:
     if raw_dims is None or not str(raw_dims).strip():
+        if input_dim >= 32:
+            return [input_dim, input_dim // 2, input_dim // 4, input_dim // 8]
         if input_dim >= 16:
-            return [input_dim, 16, 8]
+            return [input_dim, 16, 8, 4]
         if input_dim >= 8:
             return [input_dim, 8, 4]
         return [input_dim, max(1, input_dim // 2)]
 
-    dims = [int(part.strip()) for part in str(raw_dims).split(",") if part.strip()]
+    if isinstance(raw_dims, (list, tuple)):
+        dims = [int(part) for part in raw_dims]
+    else:
+        dims = [int(part.strip()) for part in str(raw_dims).split(",") if part.strip()]
     if not dims:
         raise ValueError("--dims did not contain any integer dimensions.")
     if dims[0] != input_dim:
@@ -244,6 +266,8 @@ def build_optimizer(
     model: SPDNetClassifier,
     learning_rate: float,
     weight_decay: float,
+    optimizer_name: str = "sgd",
+    momentum: float = 0.0,
 ) -> torch.optim.Optimizer:
     bimap_parameter_ids = {
         id(module.weight)
@@ -265,7 +289,18 @@ def build_optimizer(
         parameter_groups.append(
             {"params": euclidean_parameters, "weight_decay": weight_decay}
         )
-    return torch.optim.Adam(parameter_groups, lr=learning_rate)
+    normalized_name = str(optimizer_name).strip().lower()
+    if normalized_name == "sgd":
+        return torch.optim.SGD(
+            parameter_groups,
+            lr=learning_rate,
+            momentum=momentum,
+        )
+    if normalized_name == "adam":
+        return torch.optim.Adam(parameter_groups, lr=learning_rate)
+    raise ValueError(
+        f"Unsupported SPDNet optimizer {optimizer_name!r}; use 'sgd' or 'adam'."
+    )
 
 
 def train_one_epoch(
@@ -292,6 +327,8 @@ def train_one_epoch(
         loss.backward()
         if gradient_clip_norm is not None and gradient_clip_norm > 0:
             nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_norm)
+        if project_stiefel:
+            model.project_stiefel_gradients_()
         optimizer.step()
         if project_stiefel:
             model.project_stiefel_()
@@ -327,8 +364,134 @@ def evaluate(
         np.asarray(y_true, dtype=np.int64),
         np.asarray(y_pred, dtype=np.int64),
     )
+    from sklearn.metrics import cohen_kappa_score
+
+    metrics["cohen_kappa"] = float(cohen_kappa_score(y_true, y_pred))
     metrics["loss"] = float(total_loss / max(total_samples, 1))
     return metrics
+
+
+def single_trial_covariances(x_spd: np.ndarray) -> np.ndarray:
+    """Return one covariance matrix per trial without temporal/frequency pooling."""
+    if x_spd.ndim != 5:
+        raise ValueError(
+            "SPDNet expects preprocessed SPD data shaped "
+            "(trial, segment, frequency, channel, channel); "
+            f"got {x_spd.shape}."
+        )
+    n_segments, n_bands = int(x_spd.shape[1]), int(x_spd.shape[2])
+    if n_segments != 1 or n_bands != 1:
+        raise ValueError(
+            "Classic SPDNet uses exactly one covariance matrix per trial. "
+            "Configure one full-trial segment and one frequency band; got "
+            f"n_segments={n_segments}, n_bands={n_bands}."
+        )
+    return np.asarray(x_spd[:, 0, 0], dtype=np.float32)
+
+
+def validate_spdnet_cv_config(
+    training_cfg: dict[str, Any],
+    data_cfg: dict[str, Any],
+) -> tuple[int, int, bool]:
+    n_splits = int(training_cfg.get("n_splits", 5))
+    seed = int(training_cfg.get("seed", 42))
+    test_size = float(data_cfg.get("test_size", training_cfg.get("test_size", 0.2)))
+    val_size = float(data_cfg.get("val_size", training_cfg.get("val_size", 0.0)))
+    allow_subject_overlap = parse_bool(
+        data_cfg.get(
+            "allow_subject_overlap",
+            training_cfg.get("allow_subject_overlap", True),
+        ),
+        default=True,
+    )
+    if n_splits < 2:
+        raise ValueError(f"training.n_splits must be at least 2, got {n_splits}.")
+    if not np.isclose(val_size, 0.0):
+        raise ValueError(
+            "SPDNet K-fold evaluation does not use a validation dataset; "
+            f"set val_size to 0.0, got {val_size}."
+        )
+    expected_test_size = 1.0 / n_splits
+    if not np.isclose(test_size, expected_test_size):
+        raise ValueError(
+            "For K-fold evaluation, test_size must equal 1 / n_splits; "
+            f"got test_size={test_size} and n_splits={n_splits} "
+            f"(expected {expected_test_size:.6f})."
+        )
+    return n_splits, seed, allow_subject_overlap
+
+
+def make_spdnet_cv_splits(
+    y: np.ndarray,
+    subject_labels: np.ndarray,
+    n_splits: int,
+    seed: int,
+    allow_subject_overlap: bool,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
+
+    indices = np.arange(len(y))
+    if allow_subject_overlap:
+        splitter = StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        iterator = splitter.split(indices, y)
+    else:
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        iterator = splitter.split(indices, y, groups=subject_labels)
+    return [
+        (
+            np.asarray(train_idx, dtype=np.int64),
+            np.asarray(test_idx, dtype=np.int64),
+        )
+        for train_idx, test_idx in iterator
+    ]
+
+
+def aggregate_spdnet_fold_metrics(
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, float]]:
+    aggregates: dict[str, dict[str, float]] = {}
+    for metric_name in SPDNET_REPORT_METRICS:
+        values = np.asarray([row[metric_name] for row in rows], dtype=float)
+        aggregates[metric_name] = {
+            "mean": float(values.mean()),
+            "max": float(values.max()),
+            "min": float(values.min()),
+        }
+    return aggregates
+
+
+def print_spdnet_fold_summary(
+    rows: list[dict[str, Any]],
+    aggregates: dict[str, dict[str, float]],
+) -> None:
+    print("\nSPDNet five-fold test results (no validation dataset)")
+    print("fold | train | test | accuracy | macro_f1 | Cohen's kappa")
+    for row in rows:
+        print(
+            f"{row['fold']:>4} | {row['n_train']:>5} | {row['n_test']:>4} | "
+            f"{row['accuracy']:.4f} | {row['macro_f1']:.4f} | "
+            f"{row['cohen_kappa']:.4f}"
+        )
+    print("\nFive-fold aggregate (test folds)")
+    print("metric        | mean   | max    | min")
+    for metric_name, display_name in (
+        ("accuracy", "accuracy"),
+        ("macro_f1", "macro_f1"),
+        ("cohen_kappa", "Cohen's kappa"),
+    ):
+        stats = aggregates[metric_name]
+        print(
+            f"{display_name:<13} | {stats['mean']:.4f} | "
+            f"{stats['max']:.4f} | {stats['min']:.4f}"
+        )
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -342,89 +505,78 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def run_experiment(
     run_index: int,
     experiment_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
     args: argparse.Namespace,
     base_output_dir: Path,
     device: torch.device,
 ) -> dict[str, Any]:
     data_cfg = experiment_cfg["data"]
     training_cfg = experiment_cfg["training"]
-    seed = int(training_cfg.get("seed", 42))
-    set_seed(seed)
-
     x_spd, y, subject_labels, class_names = load_spd_like_train(data_cfg)
-    x_trial_spd = log_euclidean_token_mean(x_spd).astype(np.float32)
-    train_idx, val_idx, test_idx = get_split_indices(
-        y,
+    x_trial_spd = single_trial_covariances(x_spd)
+    n_splits, seed, allow_subject_overlap = validate_spdnet_cv_config(
         training_cfg,
-        subject_labels=subject_labels,
-        data_cfg=data_cfg,
+        data_cfg,
+    )
+    folds = make_spdnet_cv_splits(
+        y,
+        subject_labels,
+        n_splits=n_splits,
+        seed=seed,
+        allow_subject_overlap=allow_subject_overlap,
     )
 
     dtype = resolve_precision(training_cfg.get("precision", "float64"))
-    batch_size = int(training_cfg.get("batch_size", 32))
+    batch_size = int(training_cfg.get("batch_size", 30))
     num_workers = int(training_cfg.get("num_workers", 0))
-    epochs = int(training_cfg.get("epochs", 50))
+    epochs = int(training_cfg.get("epochs", 200))
     learning_rate = float(
-        training_cfg.get("spdnet_learning_rate", training_cfg.get("learning_rate", 1e-3))
+        training_cfg.get("spdnet_learning_rate", training_cfg.get("learning_rate", 1e-2))
     )
     weight_decay = float(
         training_cfg.get("spdnet_weight_decay", training_cfg.get("weight_decay", 0.0))
     )
+    optimizer_name = str(training_cfg.get("spdnet_optimizer", "sgd"))
+    momentum = float(training_cfg.get("spdnet_momentum", 0.0))
     gradient_clip_norm = training_cfg.get("gradient_clip_norm", 0.0)
     if gradient_clip_norm is not None:
         gradient_clip_norm = float(gradient_clip_norm)
+    log_every = max(1, int(training_cfg.get("log_every", 10)))
 
-    dims = parse_dims(args.dims, input_dim=x_trial_spd.shape[-1])
-    model = SPDNetClassifier(
-        dims=dims,
-        num_classes=len(class_names),
-        reig_epsilon=args.reig_epsilon,
-        log_epsilon=args.log_epsilon,
-    ).to(device=device, dtype=dtype)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = build_optimizer(model, learning_rate, weight_decay)
-    project_stiefel = not args.disable_stiefel_projection
+    raw_dims = getattr(args, "dims", None)
+    if raw_dims is None:
+        raw_dims = model_cfg.get("dims")
+    dims = parse_dims(raw_dims, input_dim=x_trial_spd.shape[-1])
+    reig_epsilon_override = getattr(args, "reig_epsilon", None)
+    log_epsilon_override = getattr(args, "log_epsilon", None)
+    reig_epsilon = float(
+        reig_epsilon_override
+        if reig_epsilon_override is not None
+        else model_cfg.get("reig_epsilon", 1e-4)
+    )
+    log_epsilon = float(
+        log_epsilon_override
+        if log_epsilon_override is not None
+        else model_cfg.get("log_epsilon", 1e-6)
+    )
+    project_stiefel = parse_bool(
+        model_cfg.get("project_stiefel", True),
+        default=True,
+    ) and not bool(getattr(args, "disable_stiefel_projection", False))
 
-    train_loader = make_loader(
-        x_trial_spd,
-        y,
-        train_idx,
-        batch_size,
-        num_workers,
-        shuffle=True,
-        dtype=dtype,
+    effective_cfg = dict(experiment_cfg)
+    effective_cfg["model"] = dict(model_cfg)
+    effective_cfg["model"].update(
+        {
+            "dims": dims,
+            "reig_epsilon": reig_epsilon,
+            "log_epsilon": log_epsilon,
+            "project_stiefel": project_stiefel,
+        }
     )
-    train_eval_loader = make_loader(
-        x_trial_spd,
-        y,
-        train_idx,
-        batch_size,
-        num_workers,
-        shuffle=False,
-        dtype=dtype,
-    )
-    val_loader = make_loader(
-        x_trial_spd,
-        y,
-        val_idx,
-        batch_size,
-        num_workers,
-        shuffle=False,
-        dtype=dtype,
-    )
-    test_loader = make_loader(
-        x_trial_spd,
-        y,
-        test_idx,
-        batch_size,
-        num_workers,
-        shuffle=False,
-        dtype=dtype,
-    )
-
-    run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(experiment_cfg)}"
+    run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(effective_cfg)}"
     run_dir.mkdir(parents=True, exist_ok=False)
-    save_json(run_dir / "config.json", experiment_cfg)
+    save_json(run_dir / "config.json", effective_cfg)
 
     print(f"\n[SPDNet run {run_index}] {run_dir.name}")
     print(
@@ -434,117 +586,177 @@ def run_experiment(
     print(
         f"  dims={dims} epochs={epochs} batch_size={batch_size} "
         f"lr={learning_rate:g} weight_decay={weight_decay:g} "
-        f"project_stiefel={project_stiefel}"
+        f"optimizer={optimizer_name} momentum={momentum:g} "
+        f"project_stiefel={project_stiefel} folds={n_splits}"
     )
 
-    best_val_macro_f1 = -1.0
-    best_epoch = 0
-    best_state_dict = None
-    history_rows = []
-    for epoch in range(1, epochs + 1):
-        train_loss = train_one_epoch(
+    fold_rows: list[dict[str, Any]] = []
+    for fold_index, (train_idx, test_idx) in enumerate(folds, start=1):
+        set_seed(seed + fold_index - 1)
+        fold_dir = run_dir / f"fold_{fold_index:02d}"
+        fold_dir.mkdir(parents=True, exist_ok=False)
+        model = SPDNetClassifier(
+            dims=dims,
+            num_classes=len(class_names),
+            reig_epsilon=reig_epsilon,
+            log_epsilon=log_epsilon,
+        ).to(device=device, dtype=dtype)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = build_optimizer(
             model,
-            train_loader,
-            criterion,
-            optimizer,
-            device,
-            gradient_clip_norm,
-            project_stiefel,
+            learning_rate,
+            weight_decay,
+            optimizer_name=optimizer_name,
+            momentum=momentum,
         )
-        train_metrics = evaluate(model, train_eval_loader, criterion, device)
-        val_metrics = evaluate(model, val_loader, criterion, device)
-        row = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "train_accuracy": train_metrics["accuracy"],
-            "train_macro_f1": train_metrics["macro_f1"],
-            "val_loss": val_metrics["loss"],
-            "val_accuracy": val_metrics["accuracy"],
-            "val_macro_f1": val_metrics["macro_f1"],
-        }
-        history_rows.append(row)
-        if val_metrics["macro_f1"] > best_val_macro_f1:
-            best_val_macro_f1 = val_metrics["macro_f1"]
-            best_epoch = epoch
-            best_state_dict = copy.deepcopy(model.state_dict())
+        train_loader = make_loader(
+            x_trial_spd,
+            y,
+            train_idx,
+            batch_size,
+            num_workers,
+            shuffle=True,
+            dtype=dtype,
+        )
+        train_eval_loader = make_loader(
+            x_trial_spd,
+            y,
+            train_idx,
+            batch_size,
+            num_workers,
+            shuffle=False,
+            dtype=dtype,
+        )
+        test_loader = make_loader(
+            x_trial_spd,
+            y,
+            test_idx,
+            batch_size,
+            num_workers,
+            shuffle=False,
+            dtype=dtype,
+        )
 
+        history_rows = []
         print(
-            f"  epoch {epoch:03d}/{epochs} | "
-            f"train loss={train_loss:.4f} "
-            f"acc={train_metrics['accuracy']:.4f} "
-            f"mf1={train_metrics['macro_f1']:.4f} | "
-            f"val loss={val_metrics['loss']:.4f} "
-            f"acc={val_metrics['accuracy']:.4f} "
-            f"mf1={val_metrics['macro_f1']:.4f}"
+            f"[SPDNet fold {fold_index}/{n_splits}] "
+            f"train={len(train_idx)} test={len(test_idx)}"
         )
+        for epoch in range(1, epochs + 1):
+            train_loss = train_one_epoch(
+                model,
+                train_loader,
+                criterion,
+                optimizer,
+                device,
+                gradient_clip_norm,
+                project_stiefel,
+            )
+            history_rows.append({"epoch": epoch, "train_loss": train_loss})
+            if epoch == 1 or epoch % log_every == 0 or epoch == epochs:
+                print(
+                    f"  fold {fold_index}/{n_splits} epoch {epoch:03d}/{epochs} | "
+                    f"train_loss={train_loss:.4f}"
+                )
 
-    if best_state_dict is None:
-        raise RuntimeError("SPDNet did not produce a best checkpoint.")
-    model.load_state_dict(best_state_dict)
-    torch.save(
-        {
-            "model_state_dict": best_state_dict,
-            "class_names": class_names,
-            "config": experiment_cfg,
-            "dims": dims,
-            "best_epoch": best_epoch,
-            "best_val_macro_f1": best_val_macro_f1,
-        },
-        run_dir / "best_model.pt",
-    )
-    write_csv(run_dir / "history.csv", history_rows)
-
-    split_loaders = {
-        "train": (train_idx, train_eval_loader),
-        "val": (val_idx, val_loader),
-        "test": (test_idx, test_loader),
-    }
-    result_rows = []
-    for split_name, (split_idx, loader) in split_loaders.items():
-        metrics = evaluate(model, loader, criterion, device)
-        result_rows.append(
+        train_metrics = evaluate(model, train_eval_loader, criterion, device)
+        test_metrics = evaluate(model, test_loader, criterion, device)
+        result_rows = []
+        for split_name, split_idx, metrics in (
+            ("train", train_idx, train_metrics),
+            ("test", test_idx, test_metrics),
+        ):
+            result_rows.append(
+                {
+                    "split": split_name,
+                    "n_samples": int(len(split_idx)),
+                    "loss": metrics["loss"],
+                    "accuracy": metrics["accuracy"],
+                    "macro_f1": metrics["macro_f1"],
+                    "cohen_kappa": metrics["cohen_kappa"],
+                }
+            )
+        write_csv(fold_dir / "history.csv", history_rows)
+        write_csv(fold_dir / "results.csv", result_rows)
+        torch.save(
             {
-                "split": split_name,
-                "n_samples": int(len(split_idx)),
-                "loss": metrics["loss"],
-                "accuracy": metrics["accuracy"],
-                "macro_f1": metrics["macro_f1"],
-            }
+                "model_state_dict": model.state_dict(),
+                "class_names": class_names,
+                "config": effective_cfg,
+                "dims": dims,
+                "fold": fold_index,
+                "epochs": epochs,
+                "train_indices": train_idx,
+                "test_indices": test_idx,
+            },
+            fold_dir / "final_model.pt",
         )
-    write_csv(run_dir / "results.csv", result_rows)
+
+        fold_row = {
+            "fold": fold_index,
+            "n_train": int(len(train_idx)),
+            "n_test": int(len(test_idx)),
+            "loss": test_metrics["loss"],
+            "accuracy": test_metrics["accuracy"],
+            "macro_f1": test_metrics["macro_f1"],
+            "cohen_kappa": test_metrics["cohen_kappa"],
+        }
+        fold_rows.append(fold_row)
+        print(
+            f"[SPDNet fold {fold_index}/{n_splits}] "
+            f"accuracy={fold_row['accuracy']:.4f} "
+            f"mf1={fold_row['macro_f1']:.4f} "
+            f"kappa={fold_row['cohen_kappa']:.4f}",
+            flush=True,
+        )
+
+    aggregates = aggregate_spdnet_fold_metrics(fold_rows)
+    print_spdnet_fold_summary(fold_rows, aggregates)
+    write_csv(run_dir / "fold_results.csv", fold_rows)
+    write_csv(run_dir / "results.csv", fold_rows)
 
     summary = {
         "baseline": "spdnet",
         "source_repository": "https://github.com/zhiwu-huang/SPDNet",
         "paper": "A Riemannian Network for SPD Matrix Learning, AAAI 2017",
         "architecture": "BiMap-ReEig blocks followed by LogEig and linear FC",
-        "token_pooling": "log_euclidean_mean_over_segment_and_frequency",
+        "input_representation": "one_full_trial_covariance_matrix",
+        "temporal_segmentation": False,
+        "token_pooling": "none",
         "dims": dims,
-        "reig_epsilon": args.reig_epsilon,
-        "log_epsilon": args.log_epsilon,
+        "reig_epsilon": reig_epsilon,
+        "log_epsilon": log_epsilon,
         "project_stiefel": project_stiefel,
         "x_spd_shape": list(x_spd.shape),
         "x_trial_spd_shape": list(x_trial_spd.shape),
         "class_names": class_names,
-        "best_epoch": best_epoch,
-        "best_val_macro_f1": best_val_macro_f1,
-        "splits": result_rows,
+        "evaluation": {
+            "strategy": (
+                "stratified_kfold"
+                if allow_subject_overlap
+                else "stratified_group_kfold"
+            ),
+            "n_splits": n_splits,
+            "test_size_per_fold": 1.0 / n_splits,
+            "validation_size": 0.0,
+            "seed": seed,
+        },
+        "folds": fold_rows,
+        "aggregates": aggregates,
     }
     save_json(run_dir / "summary.json", summary)
-    test_row = result_rows[-1]
     print(
-        f"[SPDNet run {run_index}] done | best_epoch={best_epoch} "
-        f"best_val_mf1={best_val_macro_f1:.4f} "
-        f"test_acc={test_row['accuracy']:.4f} "
-        f"test_mf1={test_row['macro_f1']:.4f}"
+        f"[SPDNet run {run_index}] saved {run_dir} | "
+        f"mean_acc={aggregates['accuracy']['mean']:.4f} "
+        f"mean_mf1={aggregates['macro_f1']['mean']:.4f} "
+        f"mean_kappa={aggregates['cohen_kappa']['mean']:.4f}"
     )
     return {
         "run_index": run_index,
         "run_dir": str(run_dir),
-        "test_accuracy": test_row["accuracy"],
-        "test_macro_f1": test_row["macro_f1"],
-        "best_epoch": best_epoch,
-        "best_val_macro_f1": best_val_macro_f1,
+        "test_accuracy_mean": aggregates["accuracy"]["mean"],
+        "test_macro_f1_mean": aggregates["macro_f1"]["mean"],
+        "test_cohen_kappa_mean": aggregates["cohen_kappa"]["mean"],
         "dims": dims,
     }
 
@@ -553,6 +765,7 @@ def main() -> int:
     args = build_parser().parse_args()
     config = load_yaml(args.config)
     experiments = expand_data_training_experiments(config)
+    model_cfg = dict(config.get("model", {}))
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = args.output_dir or config.get("output", {}).get(
@@ -561,7 +774,7 @@ def main() -> int:
     )
     base_output_dir = PROJECT_ROOT / output_dir / timestamp
     all_metrics = [
-        run_experiment(index, experiment, args, base_output_dir, device)
+        run_experiment(index, experiment, model_cfg, args, base_output_dir, device)
         for index, experiment in enumerate(experiments, start=1)
     ]
     save_json(base_output_dir / "summary.json", all_metrics)

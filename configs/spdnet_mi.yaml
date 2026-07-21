@@ -4,10 +4,11 @@ data:
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
   filter_bank:
     - [8, 30]
-  estimator: ["cov"]
+  estimator: ["lwf"]
   sfreq: [160]
   eps: [1.0e-6]
   covariance_signal_scale: ["auto"]
+  # Classic SPDNet consumes a standard covariance matrix directly.
   replace_covariance_diagonal_with_raw_energy: [false]
   subjects: 1-87,89-109
   # BCI IV-2a uses a different 22-channel montage, so use
@@ -25,24 +26,38 @@ data:
   autoreject_cv: [10]
   baseline_correction: [null]
   baseline_window: "-3,0"
+  # Use the complete 0--4 s motor-imagery trial as one covariance matrix.
+  # segment_duration=stride_duration=epoch duration creates exactly one segment.
   epoch_slice: [[0.0, 4.0]]
-  segment_slice: [[0.25, 0.125]]
+  segment_slice: [[4.0, 4.0]]
   imaged: true
   executed: false
+  # Match the CSP/MDM PhysioNet baselines: left-vs-right unilateral imagery.
   task_types: unilateral_fist
-  test_size: [0.15]
-  val_size: [0.15]
+  test_size: [0.2]
+  val_size: [0.0]
   allow_subject_overlap: [true]
+
+model:
+  # Original SPDNet-style three-stage dimensionality reduction: 64->32->16->8.
+  dims: [32, 16, 8]
+  reig_epsilon: 1.0e-4
+  log_epsilon: 1.0e-6
+  project_stiefel: true
 
 training:
   seed: [42]
-  precision: ["float32"]
-  epochs: [50]
-  batch_size: [64]
-  spdnet_learning_rate: [0.001]
-  spdnet_weight_decay: [0.0001]
-  gradient_clip_norm: [1.0]
-  split_file: experiments/splits/physionet_mi_seed42.json
+  precision: ["float64"]
+  n_splits: [5]
+  epochs: [200]
+  batch_size: [30]
+  spdnet_optimizer: ["sgd"]
+  spdnet_learning_rate: [0.01]
+  spdnet_momentum: [0.0]
+  spdnet_weight_decay: [0.0]
+  gradient_clip_norm: [5.0]
+  log_every: [10]
+  split_file: [null]
   num_workers: [0]
 
 output:
