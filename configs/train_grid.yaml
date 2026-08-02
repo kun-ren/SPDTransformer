@@ -8,7 +8,7 @@ data:
 #    - [13, 20]
 #    - [20, 30]
   # Multiple filter-bank candidates need one more list level, for example:
-  filter_bank: [[[8,30]],[[8, 13], [13, 20], [20, 30]]]
+  filter_bank: [[[8, 13], [13, 20], [20, 30]]]
   #estimator: ["lwf", "oas", "mcd"]
   estimator: ["lwf"]
   sfreq: [160]
@@ -43,7 +43,7 @@ data:
   baseline_correction: [null]
   baseline_window: "-3,0"
   # Each inner pair is one grid candidate.
-  epoch_slice: [[-1.0, 4.0], [0,4], [-2, 4.0]]
+  epoch_slice: [[-2.0, 4.0]]
   # null means non-overlapping windows (stride equals segment duration).
   #segment_slice: [[1.0, 0.5], [0.5, 0.25], [0.25, null]]  # [segment_duration, stride_duration]
   segment_slice: [[0.5, 0.25]]  # [segment_duration, stride_duration]
@@ -67,11 +67,12 @@ model:
   add_norm_type: ["sequence_add_norm"]
   ffn_hidden_spd_dim: [64]
   tau: [1.3]
-  metric: ["learnable-metric",]
+  metric: ["learnable-metric"]
   depth: [1]
+  #classifier_type: ["mdm"]
   classifier_type: ["mdm"]
   pooling: ["weighted"]
-  dropout: [0.2]
+  dropout: [0.4]
   attention_dropout: [0.0]   #   fix to 0.0 or 0.1
   #use_position_bias: [true, false] # gated bias starts as an exact no-op
   use_position_bias: [true] # gated bias starts as an exact no-op

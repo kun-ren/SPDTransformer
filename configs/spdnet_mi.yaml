@@ -20,7 +20,7 @@ data:
   ica_n_components: [13]
   ica_random_state: [42]
   ica_eog_channels: ["FP1,FP2"]
-  use_autoreject: [false]
+  use_autoreject: [true]
   autoreject_random_state: [42]
   autoreject_n_jobs: [2]
   autoreject_cv: [10]
@@ -36,7 +36,7 @@ data:
   task_types: unilateral_fist
   test_size: [0.2]
   val_size: [0.0]
-  allow_subject_overlap: [true]
+  allow_subject_overlap: [true,false]
 
 model:
   # Original SPDNet-style three-stage dimensionality reduction: 64->32->16->8.
