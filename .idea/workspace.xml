@@ -1,0 +1,750 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="72ea5fbf-1c38-4b4f-8f43-54d5879238c0" name="Changes" comment="docs">
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/configs/tangent_transformer_mdm.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/configs/train_grid_overnight.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/configs/train_grid_tangent_ablation.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/baselines/tangent_transformer_mdm_baseline.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/models/SPDTaskTagClassifier.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/models/TangentTransformerMDMClassifier.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/check_preprocess_spd_range.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_learnable_affine_log.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_tangent_transformer_mdm.py" beforeDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_BRANCH_BY_REPOSITORY">
+      <map>
+        <entry key="$PROJECT_DIR$" value="codex/region-temporal-only-eegnet" />
+      </map>
+    </option>
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+    <option name="RESET_MODE" value="SOFT" />
+    <option name="UPDATE_TYPE" value="REBASE" />
+  </component>
+  <component name="HighlightingSettingsPerFile">
+    <setting file="file://$PROJECT_DIR$/src/models/SPDAttention.py" root0="FORCE_HIGHLIGHTING" />
+  </component>
+  <component name="MarkdownSettingsMigration">
+    <option name="stateVersion" value="1" />
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 8
+}</component>
+  <component name="ProjectId" id="3E0Y0925UkiZZSB96FIaqv31Qwh" />
+  <component name="ProjectLevelVcsManager" settingsEditedManually="true" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "Python.PhysioNetMI_preprocess.executor": "Run",
+    "Python.main.executor": "Run",
+    "Python.train.executor": "Run",
+    "Python.training_loss.executor": "Run",
+    "RunOnceActivity.OpenProjectViewOnStart": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
+    "git-widget-placeholder": "region-spd-tokens",
+    "ignore.virus.scanning.warn.message": "true",
+    "last_opened_file_path": "D:/thesis",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "settings.editor.selected.configurable": "com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable",
+    "vue.rearranger.settings.migration": "true"
+  }
+}]]></component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="D:\thesis\SPDTransformer" />
+    </key>
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="D:\thesis\SPDTransformer\src\baselines" />
+      <recent name="D:\thesis\SPDTransformer\src" />
+    </key>
+  </component>
+  <component name="RunManager" selected="Python.training_loss">
+    <configuration name="PhysioNetMI_preprocess" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="SPDTransformer" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/src/datasets" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/src/datasets/PhysioNetMI_preprocess.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="main" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="true">
+      <module name="SPDTransformer" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/main.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="train" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="SPDTransformer" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/src/training" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/src/training/train.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="training_loss" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="SPDTransformer" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/script" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/script/training_loss.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <recent_temporary>
+      <list>
+        <item itemvalue="Python.training_loss" />
+        <item itemvalue="Python.train" />
+        <item itemvalue="Python.PhysioNetMI_preprocess" />
+        <item itemvalue="Python.train" />
+        <item itemvalue="Python.PhysioNetMI_preprocess" />
+      </list>
+    </recent_temporary>
+  </component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-python-sdk-c69650fc56ca-b11f5e8da5ad-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-233.15619.17" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="72ea5fbf-1c38-4b4f-8f43-54d5879238c0" name="Changes" comment="" />
+      <created>1779316727910</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1779316727910</updated>
+      <workItem from="1779316784600" duration="2282000" />
+      <workItem from="1779398635176" duration="22262000" />
+      <workItem from="1779499333502" duration="1380000" />
+      <workItem from="1779500749938" duration="871000" />
+      <workItem from="1779568940852" duration="2043000" />
+      <workItem from="1779734346088" duration="8929000" />
+      <workItem from="1779806929554" duration="15436000" />
+      <workItem from="1779981159709" duration="7527000" />
+      <workItem from="1780013687948" duration="10543000" />
+      <workItem from="1780235462528" duration="54112000" />
+      <workItem from="1780673438048" duration="663000" />
+      <workItem from="1780868957545" duration="100000" />
+      <workItem from="1780872165524" duration="24056000" />
+      <workItem from="1781293781935" duration="18003000" />
+      <workItem from="1781525275963" duration="43113000" />
+      <workItem from="1781738048129" duration="20478000" />
+      <workItem from="1781810174140" duration="8245000" />
+      <workItem from="1781870679264" duration="6552000" />
+      <workItem from="1781910002064" duration="1015000" />
+      <workItem from="1781911429346" duration="112000" />
+      <workItem from="1781913834903" duration="2957000" />
+      <workItem from="1781996079710" duration="813000" />
+      <workItem from="1781999709522" duration="38642000" />
+      <workItem from="1782240636847" duration="1583000" />
+      <workItem from="1782245512598" duration="9258000" />
+      <workItem from="1782296970408" duration="2901000" />
+      <workItem from="1782327960684" duration="358000" />
+      <workItem from="1782329160219" duration="16265000" />
+      <workItem from="1782411211503" duration="35103000" />
+      <workItem from="1782663641010" duration="44423000" />
+      <workItem from="1783033900646" duration="23451000" />
+      <workItem from="1783213301021" duration="74000" />
+      <workItem from="1783257592705" duration="62846000" />
+      <workItem from="1783724506170" duration="726000" />
+      <workItem from="1783737648470" duration="5918000" />
+      <workItem from="1783883656555" duration="23400000" />
+      <workItem from="1783980499695" duration="10881000" />
+      <workItem from="1784025360305" duration="4915000" />
+      <workItem from="1784074557267" duration="661000" />
+      <workItem from="1784141565268" duration="23496000" />
+      <workItem from="1784320389602" duration="9747000" />
+      <workItem from="1784485221099" duration="13888000" />
+      <workItem from="1784513662750" duration="704000" />
+      <workItem from="1784544976025" duration="16285000" />
+      <workItem from="1784604475093" duration="138000" />
+      <workItem from="1784631113423" duration="630000" />
+      <workItem from="1784636434712" duration="1589000" />
+      <workItem from="1784660881992" duration="5142000" />
+      <workItem from="1785270369108" duration="597000" />
+      <workItem from="1785371993155" duration="53000" />
+      <workItem from="1785692563580" duration="6932000" />
+    </task>
+    <task id="LOCAL-00065" summary="now model">
+      <option name="closed" value="true" />
+      <created>1783550342437</created>
+      <option name="number" value="00065" />
+      <option name="presentableId" value="LOCAL-00065" />
+      <option name="project" value="LOCAL" />
+      <updated>1783550342437</updated>
+    </task>
+    <task id="LOCAL-00066" summary="now model">
+      <option name="closed" value="true" />
+      <created>1783552067441</created>
+      <option name="number" value="00066" />
+      <option name="presentableId" value="LOCAL-00066" />
+      <option name="project" value="LOCAL" />
+      <updated>1783552067441</updated>
+    </task>
+    <task id="LOCAL-00067" summary="now model">
+      <option name="closed" value="true" />
+      <created>1783600589625</created>
+      <option name="number" value="00067" />
+      <option name="presentableId" value="LOCAL-00067" />
+      <option name="project" value="LOCAL" />
+      <updated>1783600589625</updated>
+    </task>
+    <task id="LOCAL-00068" summary="now model">
+      <option name="closed" value="true" />
+      <created>1783629460527</created>
+      <option name="number" value="00068" />
+      <option name="presentableId" value="LOCAL-00068" />
+      <option name="project" value="LOCAL" />
+      <updated>1783629460527</updated>
+    </task>
+    <task id="LOCAL-00069" summary="now model">
+      <option name="closed" value="true" />
+      <created>1783629486933</created>
+      <option name="number" value="00069" />
+      <option name="presentableId" value="LOCAL-00069" />
+      <option name="project" value="LOCAL" />
+      <updated>1783629486933</updated>
+    </task>
+    <task id="LOCAL-00070" summary="fix errors">
+      <option name="closed" value="true" />
+      <created>1783630115639</created>
+      <option name="number" value="00070" />
+      <option name="presentableId" value="LOCAL-00070" />
+      <option name="project" value="LOCAL" />
+      <updated>1783630115639</updated>
+    </task>
+    <task id="LOCAL-00071" summary="fix errors">
+      <option name="closed" value="true" />
+      <created>1783633809996</created>
+      <option name="number" value="00071" />
+      <option name="presentableId" value="LOCAL-00071" />
+      <option name="project" value="LOCAL" />
+      <updated>1783633809996</updated>
+    </task>
+    <task id="LOCAL-00072" summary="fix errors">
+      <option name="closed" value="true" />
+      <created>1783633921363</created>
+      <option name="number" value="00072" />
+      <option name="presentableId" value="LOCAL-00072" />
+      <option name="project" value="LOCAL" />
+      <updated>1783633921363</updated>
+    </task>
+    <task id="LOCAL-00073" summary="fix errors">
+      <option name="closed" value="true" />
+      <created>1783639551419</created>
+      <option name="number" value="00073" />
+      <option name="presentableId" value="LOCAL-00073" />
+      <option name="project" value="LOCAL" />
+      <updated>1783639551419</updated>
+    </task>
+    <task id="LOCAL-00074" summary="fix errors">
+      <option name="closed" value="true" />
+      <created>1783639886851</created>
+      <option name="number" value="00074" />
+      <option name="presentableId" value="LOCAL-00074" />
+      <option name="project" value="LOCAL" />
+      <updated>1783639886851</updated>
+    </task>
+    <task id="LOCAL-00075" summary="EEGnet style">
+      <option name="closed" value="true" />
+      <created>1783642512378</created>
+      <option name="number" value="00075" />
+      <option name="presentableId" value="LOCAL-00075" />
+      <option name="project" value="LOCAL" />
+      <updated>1783642512378</updated>
+    </task>
+    <task id="LOCAL-00076" summary="EEGnet style">
+      <option name="closed" value="true" />
+      <created>1783642526099</created>
+      <option name="number" value="00076" />
+      <option name="presentableId" value="LOCAL-00076" />
+      <option name="project" value="LOCAL" />
+      <updated>1783642526099</updated>
+    </task>
+    <task id="LOCAL-00077" summary="EEGnet style">
+      <option name="closed" value="true" />
+      <created>1783683023433</created>
+      <option name="number" value="00077" />
+      <option name="presentableId" value="LOCAL-00077" />
+      <option name="project" value="LOCAL" />
+      <updated>1783683023433</updated>
+    </task>
+    <task id="LOCAL-00078" summary="brain region">
+      <option name="closed" value="true" />
+      <created>1783685717035</created>
+      <option name="number" value="00078" />
+      <option name="presentableId" value="LOCAL-00078" />
+      <option name="project" value="LOCAL" />
+      <updated>1783685717035</updated>
+    </task>
+    <task id="LOCAL-00079" summary="brain region">
+      <option name="closed" value="true" />
+      <created>1783688043053</created>
+      <option name="number" value="00079" />
+      <option name="presentableId" value="LOCAL-00079" />
+      <option name="project" value="LOCAL" />
+      <updated>1783688043053</updated>
+    </task>
+    <task id="LOCAL-00080" summary="brain region">
+      <option name="closed" value="true" />
+      <created>1783690155250</created>
+      <option name="number" value="00080" />
+      <option name="presentableId" value="LOCAL-00080" />
+      <option name="project" value="LOCAL" />
+      <updated>1783690155250</updated>
+    </task>
+    <task id="LOCAL-00081" summary="brain region">
+      <option name="closed" value="true" />
+      <created>1783724728273</created>
+      <option name="number" value="00081" />
+      <option name="presentableId" value="LOCAL-00081" />
+      <option name="project" value="LOCAL" />
+      <updated>1783724728274</updated>
+    </task>
+    <task id="LOCAL-00082" summary="brain region">
+      <option name="closed" value="true" />
+      <created>1783738241428</created>
+      <option name="number" value="00082" />
+      <option name="presentableId" value="LOCAL-00082" />
+      <option name="project" value="LOCAL" />
+      <updated>1783738241428</updated>
+    </task>
+    <task id="LOCAL-00083" summary="brain region">
+      <option name="closed" value="true" />
+      <created>1783738507667</created>
+      <option name="number" value="00083" />
+      <option name="presentableId" value="LOCAL-00083" />
+      <option name="project" value="LOCAL" />
+      <updated>1783738507667</updated>
+    </task>
+    <task id="LOCAL-00084" summary="brain region">
+      <option name="closed" value="true" />
+      <created>1783780514951</created>
+      <option name="number" value="00084" />
+      <option name="presentableId" value="LOCAL-00084" />
+      <option name="project" value="LOCAL" />
+      <updated>1783780514951</updated>
+    </task>
+    <task id="LOCAL-00085" summary="brain region">
+      <option name="closed" value="true" />
+      <created>1783899763734</created>
+      <option name="number" value="00085" />
+      <option name="presentableId" value="LOCAL-00085" />
+      <option name="project" value="LOCAL" />
+      <updated>1783899763734</updated>
+    </task>
+    <task id="LOCAL-00086" summary="more option no improvement">
+      <option name="closed" value="true" />
+      <created>1783906818652</created>
+      <option name="number" value="00086" />
+      <option name="presentableId" value="LOCAL-00086" />
+      <option name="project" value="LOCAL" />
+      <updated>1783906818652</updated>
+    </task>
+    <task id="LOCAL-00087" summary="more option no improvement">
+      <option name="closed" value="true" />
+      <created>1783906831266</created>
+      <option name="number" value="00087" />
+      <option name="presentableId" value="LOCAL-00087" />
+      <option name="project" value="LOCAL" />
+      <updated>1783906831266</updated>
+    </task>
+    <task id="LOCAL-00088" summary="more option no improvement">
+      <option name="closed" value="true" />
+      <created>1783906954619</created>
+      <option name="number" value="00088" />
+      <option name="presentableId" value="LOCAL-00088" />
+      <option name="project" value="LOCAL" />
+      <updated>1783906954619</updated>
+    </task>
+    <task id="LOCAL-00089" summary="optim">
+      <option name="closed" value="true" />
+      <created>1783909680043</created>
+      <option name="number" value="00089" />
+      <option name="presentableId" value="LOCAL-00089" />
+      <option name="project" value="LOCAL" />
+      <updated>1783909680043</updated>
+    </task>
+    <task id="LOCAL-00090" summary="optim">
+      <option name="closed" value="true" />
+      <created>1783910247214</created>
+      <option name="number" value="00090" />
+      <option name="presentableId" value="LOCAL-00090" />
+      <option name="project" value="LOCAL" />
+      <updated>1783910247214</updated>
+    </task>
+    <task id="LOCAL-00091" summary="optim">
+      <option name="closed" value="true" />
+      <created>1783910257098</created>
+      <option name="number" value="00091" />
+      <option name="presentableId" value="LOCAL-00091" />
+      <option name="project" value="LOCAL" />
+      <updated>1783910257098</updated>
+    </task>
+    <task id="LOCAL-00092" summary="optim">
+      <option name="closed" value="true" />
+      <created>1783910457855</created>
+      <option name="number" value="00092" />
+      <option name="presentableId" value="LOCAL-00092" />
+      <option name="project" value="LOCAL" />
+      <updated>1783910457855</updated>
+    </task>
+    <task id="LOCAL-00093" summary="tangentspaceablation">
+      <option name="closed" value="true" />
+      <created>1783981201557</created>
+      <option name="number" value="00093" />
+      <option name="presentableId" value="LOCAL-00093" />
+      <option name="project" value="LOCAL" />
+      <updated>1783981201557</updated>
+    </task>
+    <task id="LOCAL-00094" summary="mdm baseline">
+      <option name="closed" value="true" />
+      <created>1783986130159</created>
+      <option name="number" value="00094" />
+      <option name="presentableId" value="LOCAL-00094" />
+      <option name="project" value="LOCAL" />
+      <updated>1783986130159</updated>
+    </task>
+    <task id="LOCAL-00095" summary="mdm baseline">
+      <option name="closed" value="true" />
+      <created>1783989387938</created>
+      <option name="number" value="00095" />
+      <option name="presentableId" value="LOCAL-00095" />
+      <option name="project" value="LOCAL" />
+      <updated>1783989387939</updated>
+    </task>
+    <task id="LOCAL-00096" summary="eegnet style">
+      <option name="closed" value="true" />
+      <created>1783989427468</created>
+      <option name="number" value="00096" />
+      <option name="presentableId" value="LOCAL-00096" />
+      <option name="project" value="LOCAL" />
+      <updated>1783989427468</updated>
+    </task>
+    <task id="LOCAL-00097" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1783992881729</created>
+      <option name="number" value="00097" />
+      <option name="presentableId" value="LOCAL-00097" />
+      <option name="project" value="LOCAL" />
+      <updated>1783992881729</updated>
+    </task>
+    <task id="LOCAL-00098" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1783992923081</created>
+      <option name="number" value="00098" />
+      <option name="presentableId" value="LOCAL-00098" />
+      <option name="project" value="LOCAL" />
+      <updated>1783992923081</updated>
+    </task>
+    <task id="LOCAL-00099" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1783992955417</created>
+      <option name="number" value="00099" />
+      <option name="presentableId" value="LOCAL-00099" />
+      <option name="project" value="LOCAL" />
+      <updated>1783992955417</updated>
+    </task>
+    <task id="LOCAL-00100" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1784031825995</created>
+      <option name="number" value="00100" />
+      <option name="presentableId" value="LOCAL-00100" />
+      <option name="project" value="LOCAL" />
+      <updated>1784031825996</updated>
+    </task>
+    <task id="LOCAL-00101" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1784032169140</created>
+      <option name="number" value="00101" />
+      <option name="presentableId" value="LOCAL-00101" />
+      <option name="project" value="LOCAL" />
+      <updated>1784032169140</updated>
+    </task>
+    <task id="LOCAL-00102" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1784141975678</created>
+      <option name="number" value="00102" />
+      <option name="presentableId" value="LOCAL-00102" />
+      <option name="project" value="LOCAL" />
+      <updated>1784141975679</updated>
+    </task>
+    <task id="LOCAL-00103" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1784144225039</created>
+      <option name="number" value="00103" />
+      <option name="presentableId" value="LOCAL-00103" />
+      <option name="project" value="LOCAL" />
+      <updated>1784144225039</updated>
+    </task>
+    <task id="LOCAL-00104" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1784144722913</created>
+      <option name="number" value="00104" />
+      <option name="presentableId" value="LOCAL-00104" />
+      <option name="project" value="LOCAL" />
+      <updated>1784144722913</updated>
+    </task>
+    <task id="LOCAL-00105" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1784149667716</created>
+      <option name="number" value="00105" />
+      <option name="presentableId" value="LOCAL-00105" />
+      <option name="project" value="LOCAL" />
+      <updated>1784149667716</updated>
+    </task>
+    <task id="LOCAL-00106" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1784322666530</created>
+      <option name="number" value="00106" />
+      <option name="presentableId" value="LOCAL-00106" />
+      <option name="project" value="LOCAL" />
+      <updated>1784322666530</updated>
+    </task>
+    <task id="LOCAL-00107" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1784573859182</created>
+      <option name="number" value="00107" />
+      <option name="presentableId" value="LOCAL-00107" />
+      <option name="project" value="LOCAL" />
+      <updated>1784573859182</updated>
+    </task>
+    <task id="LOCAL-00108" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1784582464278</created>
+      <option name="number" value="00108" />
+      <option name="presentableId" value="LOCAL-00108" />
+      <option name="project" value="LOCAL" />
+      <updated>1784582464278</updated>
+    </task>
+    <task id="LOCAL-00109" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1784590627884</created>
+      <option name="number" value="00109" />
+      <option name="presentableId" value="LOCAL-00109" />
+      <option name="project" value="LOCAL" />
+      <updated>1784590627884</updated>
+    </task>
+    <task id="LOCAL-00110" summary="mdm grid">
+      <option name="closed" value="true" />
+      <created>1784601559962</created>
+      <option name="number" value="00110" />
+      <option name="presentableId" value="LOCAL-00110" />
+      <option name="project" value="LOCAL" />
+      <updated>1784601559962</updated>
+    </task>
+    <task id="LOCAL-00111" summary="spdnet">
+      <option name="closed" value="true" />
+      <created>1784642422744</created>
+      <option name="number" value="00111" />
+      <option name="presentableId" value="LOCAL-00111" />
+      <option name="project" value="LOCAL" />
+      <updated>1784642422746</updated>
+    </task>
+    <task id="LOCAL-00112" summary="train loss">
+      <option name="closed" value="true" />
+      <created>1785694842374</created>
+      <option name="number" value="00112" />
+      <option name="presentableId" value="LOCAL-00112" />
+      <option name="project" value="LOCAL" />
+      <updated>1785694842375</updated>
+    </task>
+    <task id="LOCAL-00113" summary="docs">
+      <option name="closed" value="true" />
+      <created>1785699063686</created>
+      <option name="number" value="00113" />
+      <option name="presentableId" value="LOCAL-00113" />
+      <option name="project" value="LOCAL" />
+      <updated>1785699063686</updated>
+    </task>
+    <option name="localTasksCounter" value="114" />
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="RECENT_FILTERS">
+      <map>
+        <entry key="Branch">
+          <value>
+            <list>
+              <RecentGroup>
+                <option name="FILTER_VALUES">
+                  <option value="origin/main" />
+                </option>
+              </RecentGroup>
+              <RecentGroup>
+                <option name="FILTER_VALUES">
+                  <option value="codex/region-spd-tokens" />
+                </option>
+              </RecentGroup>
+              <RecentGroup>
+                <option name="FILTER_VALUES">
+                  <option value="codex/eegnet-spd-filterbank" />
+                </option>
+              </RecentGroup>
+              <RecentGroup>
+                <option name="FILTER_VALUES">
+                  <option value="model_optimization" />
+                </option>
+              </RecentGroup>
+              <RecentGroup>
+                <option name="FILTER_VALUES">
+                  <option value="dev" />
+                </option>
+              </RecentGroup>
+              <RecentGroup>
+                <option name="FILTER_VALUES">
+                  <option value="cache-spd-log" />
+                </option>
+              </RecentGroup>
+            </list>
+          </value>
+        </entry>
+      </map>
+    </option>
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State>
+              <option name="FILTERS">
+                <map>
+                  <entry key="branch">
+                    <value>
+                      <list>
+                        <option value="origin/main" />
+                      </list>
+                    </value>
+                  </entry>
+                </map>
+              </option>
+            </State>
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="nn" />
+    <MESSAGE value="preprocessing" />
+    <MESSAGE value="train" />
+    <MESSAGE value="env" />
+    <MESSAGE value="fix eigvalues" />
+    <MESSAGE value="config" />
+    <MESSAGE value="similarity attention" />
+    <MESSAGE value="cross-subject" />
+    <MESSAGE value="attention gen" />
+    <MESSAGE value="band mean" />
+    <MESSAGE value="signal unit" />
+    <MESSAGE value="now model" />
+    <MESSAGE value="fix errors" />
+    <MESSAGE value="EEGnet style" />
+    <MESSAGE value="brain region" />
+    <MESSAGE value="more option no improvement" />
+    <MESSAGE value="optim" />
+    <MESSAGE value="tangentspaceablation" />
+    <MESSAGE value="mdm baseline" />
+    <MESSAGE value="eegnet style" />
+    <MESSAGE value="mdm grid" />
+    <MESSAGE value="spdnet" />
+    <MESSAGE value="train loss" />
+    <MESSAGE value="docs" />
+    <option name="LAST_COMMIT_MESSAGE" value="docs" />
+  </component>
+  <component name="com.intellij.coverage.CoverageDataManagerImpl">
+    <SUITE FILE_PATH="coverage/SPDTransformer$main.coverage" NAME="main Coverage Results" MODIFIED="1779318068080" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/SPDTransformer$PhysioNetMI_preprocess.coverage" NAME="PhysioNetMI_preprocess Coverage Results" MODIFIED="1780445843920" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/src/datasets" />
+    <SUITE FILE_PATH="coverage/SPDTransformer$train.coverage" NAME="train Coverage Results" MODIFIED="1781740186083" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/src/training" />
+    <SUITE FILE_PATH="coverage/SPDTransformer$training_loss.coverage" NAME="training_loss Coverage Results" MODIFIED="1784665497048" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/script" />
+  </component>
+</project>
