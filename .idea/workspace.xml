@@ -4,18 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="72ea5fbf-1c38-4b4f-8f43-54d5879238c0" name="Changes" comment="docs">
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/configs/tangent_transformer_mdm.yaml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/configs/train_grid_overnight.yaml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/configs/train_grid_tangent_ablation.yaml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/baselines/tangent_transformer_mdm_baseline.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/models/SPDTaskTagClassifier.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/models/TangentTransformerMDMClassifier.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/check_preprocess_spd_range.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_learnable_affine_log.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_tangent_transformer_mdm.py" beforeDir="false" />
-    </list>
+    <list default="true" id="72ea5fbf-1c38-4b4f-8f43-54d5879238c0" name="Changes" comment="docs" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -251,15 +240,7 @@
       <workItem from="1784660881992" duration="5142000" />
       <workItem from="1785270369108" duration="597000" />
       <workItem from="1785371993155" duration="53000" />
-      <workItem from="1785692563580" duration="6932000" />
-    </task>
-    <task id="LOCAL-00065" summary="now model">
-      <option name="closed" value="true" />
-      <created>1783550342437</created>
-      <option name="number" value="00065" />
-      <option name="presentableId" value="LOCAL-00065" />
-      <option name="project" value="LOCAL" />
-      <updated>1783550342437</updated>
+      <workItem from="1785692563580" duration="7456000" />
     </task>
     <task id="LOCAL-00066" summary="now model">
       <option name="closed" value="true" />
@@ -645,7 +626,15 @@
       <option name="project" value="LOCAL" />
       <updated>1785699063686</updated>
     </task>
-    <option name="localTasksCounter" value="114" />
+    <task id="LOCAL-00114" summary="docs">
+      <option name="closed" value="true" />
+      <created>1785768503639</created>
+      <option name="number" value="00114" />
+      <option name="presentableId" value="LOCAL-00114" />
+      <option name="project" value="LOCAL" />
+      <updated>1785768503639</updated>
+    </task>
+    <option name="localTasksCounter" value="115" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
