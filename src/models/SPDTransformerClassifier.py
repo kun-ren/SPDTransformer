@@ -5,10 +5,7 @@ from torch import nn
 
 from src.models.SPDMDMClassifier import SPDMDMClassifier
 from src.models.SPDPoolingClassifier import SPDPoolingClassifier
-from src.models.SPDTaskTagClassifier import SPDTaskTagClassifier
-from src.models.TangentTransformerMDMClassifier import (
-    TangentTransformerMDMClassifier,
-)
+
 
 
 ClassifierType = Literal["pooling", "task", "mdm"]
@@ -120,30 +117,7 @@ class SPDTransformerClassifier(nn.Module):
             if tangent_use_position_embedding is None:
                 tangent_use_position_embedding = use_position_bias
 
-            self.model = TangentTransformerMDMClassifier(
-                spd_dim=spd_in_dim,
-                output_spd_dim=transformer_out_dim,
-                num_classes=num_classes,
-                token_shape=(
-                    int(time_sequence_length),
-                    int(frequency_sequence_length),
-                    int(brain_region_sequence_length),
-                ),
-                d_model=int(tangent_d_model),
-                nhead=int(tangent_nhead),
-                num_layers=int(tangent_num_layers),
-                dim_feedforward=(
-                    None
-                    if tangent_dim_feedforward is None
-                    else int(tangent_dim_feedforward)
-                ),
-                dropout=dropout,
-                activation=tangent_activation,
-                norm_first=tangent_norm_first,
-                pooling=pooling,
-                use_position_embedding=bool(tangent_use_position_embedding),
-                eps=eps,
-            )
+            self.model = None
         elif classifier_type == "pooling":
             self.model = SPDPoolingClassifier(
                 num_heads=num_heads,
@@ -203,34 +177,7 @@ class SPDTransformerClassifier(nn.Module):
                 add_norm_type=add_norm_type,
             )
         else:
-            self.model = SPDTaskTagClassifier(
-                num_heads=num_heads,
-                spd_in_dim=spd_in_dim,
-                attention_dim=attention_dim,
-                num_classes=num_classes,
-                stage_transition=stage_transition,
-                time_sequence_length=time_sequence_length,
-                frequency_sequence_length=frequency_sequence_length,
-                brain_region_sequence_length=brain_region_sequence_length,
-                tau=tau,
-                ffn_hidden_spd_dim=ffn_hidden_spd_dim,
-                metric=metric,
-                depth=depth,
-                pooling=pooling,
-                dropout=dropout,
-                attention_dropout=attention_dropout,
-                debug_attention_dropout=debug_attention_dropout,
-                debug_attention_shape=debug_attention_shape,
-                debug_tensor_stats=debug_tensor_stats,
-                learnable_metric_mode=learnable_metric_mode,
-                learnable_metric_score=learnable_metric_score,
-                learnable_metric_rank=learnable_metric_rank,
-                eps=eps,
-                use_position_bias=use_position_bias,
-                layer_norm_affine=layer_norm_affine,
-                stage_projection_init=stage_projection_init,
-                add_norm_type=add_norm_type,
-            )
+            self.model = None
 
     def forward(
             self,
