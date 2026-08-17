@@ -8,7 +8,7 @@ cd ./SPDTransformer
 
 ##### Set Env Path
 
-Choose a script file corresponding to your operating system to set enironment path in the begin
+Choose a script file corresponding to your operating system to set environment path in the beginning
 
 ```powershell
 .\script\setup_pythonpath.ps1
@@ -24,9 +24,15 @@ script\setup_pythonpath.cmd
 
 #### Prepare dataset
 
-To download and unzip dataset:  
+To download BCI Competition IV Dataset 2b (all nine subjects) into `data`:
 
-`python script/load_moabb_datasets.py`
+```powershell
+python script/download_bci_competition_iv_2b.py
+```
+
+MOABB stores Dataset 2b as ready-to-use `.mat` files, so no manual unzip step
+is required. To download only selected subjects, use a list or range such as
+`--subjects 1-3,5`.
 
 
 #### Training
@@ -42,7 +48,7 @@ python src\training\train.py --config configs/train_grid.yaml --device cuda:0
 ```
 #### SPDNet
 ```bash
-python src/baselines/spdnet_baseline.py --config configs/spdnet_mi.yaml --device cuda
+python src/baselines/spdnet_baseline.py --config configs/spdnet_physionet.yaml --device cuda
 ```
 #### CSP
 ```bash
@@ -61,6 +67,18 @@ python script/visualize_task_signals.py --subjects 1-10
 By default, filter-bank rows show the amplitude envelope so that oscillations
 do not cancel when trials are averaged. Use `--band-view waveform` to plot
 signed band-pass waveforms, or `--show-trials 5` to overlay individual trials.
+
+##### Four-class result tables
+
+Rerun the main and ablation tables with left hand, right hand, both hands, and
+both feet, then export both tables as CSV:
+
+```powershell
+python script/run_four_class_experiments.py --device cuda:0
+```
+
+Use `--dry-run` to generate and inspect the exact configs without training.
+Completed campaigns are stored under `experiments/results/four_class`.
 
 
 ##### Result
