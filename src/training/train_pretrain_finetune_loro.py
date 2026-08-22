@@ -1,13 +1,14 @@
-"""Cross-subject pretraining followed by target-subject LORO fine-tuning.
+"""Cross-subject pretraining followed by target-subject run adaptation.
 
 For each requested target subject:
 1. train a fresh model on every trial from all *other* subjects;
 2. restore that identical pretrained state for every target EDF run;
 3. fine-tune on the target subject's remaining runs;
-4. evaluate the held-out run exactly once after the final fine-tuning epoch.
+4. split that run evenly into validation/test trials;
+5. use validation for scheduling/early stopping and test the best checkpoint once.
 
-There is deliberately no validation set, test-driven scheduler, early stopping,
-or checkpoint selection in this protocol.
+Other-subject pretraining independently uses stratified train/validation/test
+partitions (70/15/15 by default).
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import torch
 import torch.nn as nn
 import yaml
 from sklearn.metrics import confusion_matrix, f1_score
+from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Subset
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -42,8 +44,11 @@ from src.datasets.PhysioNetMI_pretrain_finetune_preprocess import (  # noqa: E40
 )
 from src.models.MotorImageryDataset import MotorImageryDataset  # noqa: E402
 from src.training.train import (  # noqa: E402
+    build_lr_schedulers,
     build_model,
+    evaluate,
     normalize_precision_name,
+    optimizer_lr_values,
     parse_bool,
     predict_loader,
     resolve_precision,
@@ -157,31 +162,45 @@ def make_optimizers(
     return optimizer, optimizer_stiefel
 
 
-def train_fixed_epochs(
+def train_with_early_stopping(
     model: nn.Module,
-    loader: DataLoader,
+    train_loader: DataLoader,
+    validation_loader: DataLoader,
     cfg: dict[str, Any],
     *,
     device: torch.device,
     history_path: Path,
     stage_name: str,
-) -> list[dict[str, Any]]:
-    """Train for a fixed epoch count using training data only."""
+) -> tuple[dict[str, torch.Tensor], int, float]:
+    """Match ``train.py`` optimization while selecting on validation only."""
 
     epochs = int(cfg.get("epochs", 1))
     if epochs < 1:
         raise ValueError(f"{stage_name}.epochs must be at least 1.")
     optimizer, optimizer_stiefel = make_optimizers(model, cfg)
+    (
+        scheduler_name,
+        scheduler_metric,
+        scheduler,
+        stiefel_scheduler,
+    ) = build_lr_schedulers(cfg, optimizer, optimizer_stiefel)
     criterion = nn.CrossEntropyLoss()
     gradient_clip_norm = cfg.get("gradient_clip_norm", 1.0)
     if gradient_clip_norm is not None:
         gradient_clip_norm = float(gradient_clip_norm)
     condition_weight = float(cfg.get("condition_regularization_weight", 0.0))
+    patience = int(cfg.get("early_stopping_patience", 10))
+    min_delta = float(cfg.get("early_stopping_min_delta", 0.0))
+    if patience < 1:
+        raise ValueError(f"{stage_name}.early_stopping_patience must be positive.")
+    best_validation_macro_f1 = -np.inf
+    best_epoch = 0
+    best_state: dict[str, torch.Tensor] | None = None
     history: list[dict[str, Any]] = []
     for epoch in range(1, epochs + 1):
         metrics = train_one_epoch(
             model,
-            loader,
+            train_loader,
             criterion,
             optimizer,
             optimizer_stiefel,
@@ -189,21 +208,125 @@ def train_fixed_epochs(
             gradient_clip_norm=gradient_clip_norm,
             condition_regularization_weight=condition_weight,
         )
+        validation_metrics = evaluate(
+            model,
+            validation_loader,
+            criterion,
+            device,
+            condition_regularization_weight=condition_weight,
+        )
+        if scheduler_name is not None:
+            metric_name = str(scheduler_metric or "validation_macro_f1")
+            scheduler_values = {
+                "validation_loss": float(validation_metrics["loss"]),
+                "validation_accuracy": float(validation_metrics["accuracy"]),
+                "validation_macro_f1": float(validation_metrics["macro_f1"]),
+            }
+            if metric_name not in scheduler_values:
+                raise ValueError(
+                    f"{stage_name}.lr_scheduler_metric must be one of "
+                    f"{sorted(scheduler_values)}, got {metric_name!r}."
+                )
+            scheduler_value = scheduler_values[metric_name]
+            scheduler.step(scheduler_value)
+            if stiefel_scheduler is not None:
+                stiefel_scheduler.step(scheduler_value)
         row = {
             "epoch": epoch,
             "train_loss": float(metrics["loss"]),
             "train_accuracy": float(metrics["accuracy"]),
             "train_macro_f1": float(metrics["macro_f1"]),
+            "validation_loss": float(validation_metrics["loss"]),
+            "validation_accuracy": float(validation_metrics["accuracy"]),
+            "validation_macro_f1": float(validation_metrics["macro_f1"]),
+            "euclid_lr": optimizer_lr_values(optimizer)[0],
+            "stiefel_lr": (
+                optimizer_lr_values(optimizer_stiefel)[0]
+                if optimizer_stiefel is not None
+                else None
+            ),
         }
         history.append(row)
+        if validation_metrics["macro_f1"] > best_validation_macro_f1 + min_delta:
+            best_validation_macro_f1 = float(validation_metrics["macro_f1"])
+            best_epoch = epoch
+            best_state = _cpu_state_dict(model)
         if epoch == 1 or epoch == epochs or epoch % max(1, epochs // 10) == 0:
             print(
                 f"    {stage_name} epoch {epoch:03d}/{epochs}: "
                 f"loss={row['train_loss']:.4f}, "
-                f"accuracy={row['train_accuracy']:.4f}"
+                f"accuracy={row['train_accuracy']:.4f}, "
+                f"validation_mf1={row['validation_macro_f1']:.4f}"
             )
+        if epoch - best_epoch >= patience:
+            print(
+                f"    {stage_name} early stopping at epoch {epoch}; "
+                f"best epoch={best_epoch}, validation_mf1={best_validation_macro_f1:.4f}."
+            )
+            break
     _write_csv(history_path, history)
-    return history
+    if best_state is None:
+        raise RuntimeError(f"{stage_name} did not produce a validation checkpoint.")
+    model.load_state_dict(best_state)
+    return best_state, best_epoch, best_validation_macro_f1
+
+
+def make_pretrain_split(
+    indices: np.ndarray,
+    y: np.ndarray,
+    *,
+    validation_size: float,
+    test_size: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Stratified 70/15/15-style split of the other-subject trial pool."""
+
+    if not 0.0 < validation_size < 1.0 or not 0.0 < test_size < 1.0:
+        raise ValueError("Pretrain validation_size and test_size must be in (0, 1).")
+    if validation_size + test_size >= 1.0:
+        raise ValueError("Pretrain validation_size + test_size must be below 1.")
+    train_val_idx, test_idx = train_test_split(
+        np.asarray(indices, dtype=np.int64),
+        test_size=test_size,
+        random_state=seed,
+        shuffle=True,
+        stratify=y[indices],
+    )
+    validation_fraction_of_remainder = validation_size / (1.0 - test_size)
+    train_idx, validation_idx = train_test_split(
+        train_val_idx,
+        test_size=validation_fraction_of_remainder,
+        random_state=seed + 1,
+        shuffle=True,
+        stratify=y[train_val_idx],
+    )
+    return (
+        np.asarray(train_idx, dtype=np.int64),
+        np.asarray(validation_idx, dtype=np.int64),
+        np.asarray(test_idx, dtype=np.int64),
+    )
+
+
+def split_run_validation_test(
+    run_indices: np.ndarray,
+    y: np.ndarray,
+    *,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stratify one held-out run as evenly as its odd trial count permits."""
+
+    run_indices = np.asarray(run_indices, dtype=np.int64)
+    validation_idx, test_idx = train_test_split(
+        run_indices,
+        test_size=0.5,
+        random_state=seed,
+        shuffle=True,
+        stratify=y[run_indices],
+    )
+    return (
+        np.asarray(validation_idx, dtype=np.int64),
+        np.asarray(test_idx, dtype=np.int64),
+    )
 
 
 def validate_protocol(
@@ -233,13 +356,23 @@ def validate_protocol(
             raise ValueError(f"{target} needs at least two retained runs for LORO.")
         for test_run in target_runs:
             fine_tune_mask = target_mask & (run_labels != test_run)
-            test_mask = target_mask & (run_labels == test_run)
-            if not fine_tune_mask.any() or not test_mask.any():
+            held_out_run_mask = target_mask & (run_labels == test_run)
+            if not fine_tune_mask.any() or not held_out_run_mask.any():
                 raise RuntimeError(f"Empty LORO split for {target} R{test_run:02d}.")
             if set(np.unique(y[fine_tune_mask]).tolist()) != set(range(num_classes)):
                 raise ValueError(
                     f"Fine-tuning data for {target} excluding R{test_run:02d} "
                     "does not contain every class."
+                )
+            held_out_counts = np.bincount(
+                y[held_out_run_mask], minlength=num_classes
+            )
+            present_counts = held_out_counts[held_out_counts > 0]
+            if len(present_counts) == 0 or int(present_counts.min()) < 2:
+                raise ValueError(
+                    f"{target} R{test_run:02d} cannot be stratified into "
+                    "validation/test halves; class counts are "
+                    f"{held_out_counts.tolist()}."
                 )
         run_map[target] = target_runs
     return run_map
@@ -369,8 +502,11 @@ def main(argv: list[str] | None = None) -> int:
         executed=bool(data_cfg["executed"]),
         task_types=tuple(data_cfg["task_types"]),
     )
-    print("Protocol: other-subject pretraining -> target-subject leave-one-run-out.")
-    print("Validation set: none. Test runs are evaluated only after fixed-epoch training.")
+    print("Protocol: other-subject pretraining -> target-subject run adaptation.")
+    print(
+        "Pretrain split=train/validation/test with configured 0.70/0.15/0.15; "
+        "each target run is split evenly into validation/test."
+    )
     print(
         f"Targets={','.join(f'S{value:03d}' for value in target_subjects)}, "
         f"expected runs={expected_runs}, pretrain epochs={pretrain_cfg['epochs']}, "
@@ -445,11 +581,24 @@ def main(argv: list[str] | None = None) -> int:
         target_dir = run_dir / target
         target_dir.mkdir()
         target_mask = subject_labels == target
-        pretrain_indices = np.flatnonzero(~target_mask)
-        pretrain_subject_count = len(set(subject_labels[pretrain_indices].tolist()))
+        pretrain_all_indices = np.flatnonzero(~target_mask)
+        pretrain_subject_count = len(
+            set(subject_labels[pretrain_all_indices].tolist())
+        )
+        pretrain_train_idx, pretrain_validation_idx, pretrain_test_idx = (
+            make_pretrain_split(
+                pretrain_all_indices,
+                y,
+                validation_size=float(pretrain_cfg.get("validation_size", 0.15)),
+                test_size=float(pretrain_cfg.get("test_size", 0.15)),
+                seed=seed + target_number,
+            )
+        )
         print(
             f"\n[{target_position}/{len(target_subjects)}] {target}: pretraining on "
-            f"{len(pretrain_indices)} shuffled trials from {pretrain_subject_count} other subjects."
+            f"{len(pretrain_all_indices)} trials from {pretrain_subject_count} other subjects "
+            f"(train/validation/test={len(pretrain_train_idx)}/"
+            f"{len(pretrain_validation_idx)}/{len(pretrain_test_idx)})."
         )
         set_seed(seed + target_number)
         base_model = make_model(
@@ -461,21 +610,75 @@ def main(argv: list[str] | None = None) -> int:
         )
         pretrain_loader = make_loader(
             full_dataset,
-            pretrain_indices,
+            pretrain_train_idx,
             batch_size=int(pretrain_cfg.get("batch_size", 128)),
             shuffle=True,
             num_workers=num_workers,
             pin_memory=pin_memory,
         )
-        train_fixed_epochs(
-            base_model,
-            pretrain_loader,
-            pretrain_cfg,
-            device=device,
-            history_path=target_dir / "pretrain_history.csv",
-            stage_name="pretrain",
+        pretrain_validation_loader = make_loader(
+            full_dataset,
+            pretrain_validation_idx,
+            batch_size=int(pretrain_cfg.get("batch_size", 128)),
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
         )
-        pretrained_state = _cpu_state_dict(base_model)
+        pretrained_state, pretrain_best_epoch, pretrain_best_validation_mf1 = (
+            train_with_early_stopping(
+                base_model,
+                pretrain_loader,
+                pretrain_validation_loader,
+                pretrain_cfg,
+                device=device,
+                history_path=target_dir / "pretrain_history.csv",
+                stage_name="pretrain",
+            )
+        )
+        pretrain_test_loader = make_loader(
+            full_dataset,
+            pretrain_test_idx,
+            batch_size=int(pretrain_cfg.get("batch_size", 128)),
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+        pretrain_test_predictions = predict_loader(
+            base_model,
+            pretrain_test_loader,
+            nn.CrossEntropyLoss(),
+            device,
+            condition_regularization_weight=float(
+                pretrain_cfg.get("condition_regularization_weight", 0.0)
+            ),
+        )
+        save_per_class_metrics(
+            target_dir / "pretrain_test_per_class_metrics.csv",
+            {"test": pretrain_test_predictions},
+            class_names,
+        )
+        save_confusion_matrices(
+            target_dir / "pretrain_test_confusion_matrix.csv",
+            {"test": pretrain_test_predictions},
+            class_names,
+        )
+        with (target_dir / "pretrain_split.json").open(
+            "w", encoding="utf-8"
+        ) as handle:
+            json.dump(
+                {
+                    "excluded_target_subject": target,
+                    "train_indices": pretrain_train_idx.astype(int).tolist(),
+                    "validation_indices": pretrain_validation_idx.astype(int).tolist(),
+                    "test_indices": pretrain_test_idx.astype(int).tolist(),
+                    "best_epoch": pretrain_best_epoch,
+                    "best_validation_macro_f1": pretrain_best_validation_mf1,
+                    "test_accuracy": float(pretrain_test_predictions["accuracy"]),
+                    "test_macro_f1": float(pretrain_test_predictions["macro_f1"]),
+                },
+                handle,
+                indent=2,
+            )
         if parse_bool(
             output_cfg.get("save_pretrained_checkpoints", True), default=True
         ):
@@ -484,13 +687,20 @@ def main(argv: list[str] | None = None) -> int:
                     "model_state_dict": pretrained_state,
                     "excluded_target_subject": target,
                     "class_names": class_names,
+                    "best_epoch": pretrain_best_epoch,
+                    "best_validation_macro_f1": pretrain_best_validation_mf1,
                     "pretrain_subjects": sorted(
-                        set(subject_labels[pretrain_indices].tolist())
+                        set(subject_labels[pretrain_all_indices].tolist())
                     ),
                 },
                 target_dir / "pretrained_other_subjects.pt",
             )
-        del base_model, pretrain_loader
+        del (
+            base_model,
+            pretrain_loader,
+            pretrain_validation_loader,
+            pretrain_test_loader,
+        )
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
@@ -498,12 +708,27 @@ def main(argv: list[str] | None = None) -> int:
             fold_dir = target_dir / f"test_R{test_run:02d}"
             fold_dir.mkdir()
             fine_tune_indices = np.flatnonzero(target_mask & (run_labels != test_run))
-            test_indices = np.flatnonzero(target_mask & (run_labels == test_run))
-            if set(fine_tune_indices.tolist()) & set(test_indices.tolist()):
-                raise RuntimeError(f"Train/test overlap for {target} R{test_run:02d}.")
+            held_out_run_indices = np.flatnonzero(
+                target_mask & (run_labels == test_run)
+            )
+            validation_indices, test_indices = split_run_validation_test(
+                held_out_run_indices,
+                y,
+                seed=seed + target_number * 100 + test_run,
+            )
+            split_sets = [
+                set(fine_tune_indices.tolist()),
+                set(validation_indices.tolist()),
+                set(test_indices.tolist()),
+            ]
+            if any(split_sets[i] & split_sets[j] for i in range(3) for j in range(i + 1, 3)):
+                raise RuntimeError(
+                    f"Fine-tune/validation/test overlap for {target} R{test_run:02d}."
+                )
             print(
                 f"  [{fold_position}/{len(run_map[target])}] test R{test_run:02d}: "
-                f"fine-tune={len(fine_tune_indices)} trials, test={len(test_indices)} trials."
+                f"fine-tune={len(fine_tune_indices)}, "
+                f"validation={len(validation_indices)}, test={len(test_indices)} trials."
             )
             set_seed(seed + target_number * 100 + test_run)
             model = make_model(
@@ -525,9 +750,21 @@ def main(argv: list[str] | None = None) -> int:
                     default=pin_memory,
                 ),
             )
-            train_fixed_epochs(
+            validation_loader = make_loader(
+                full_dataset,
+                validation_indices,
+                batch_size=int(fine_tune_cfg.get("batch_size", 32)),
+                shuffle=False,
+                num_workers=int(fine_tune_cfg.get("num_workers", num_workers)),
+                pin_memory=parse_bool(
+                    fine_tune_cfg.get("pin_memory", pin_memory),
+                    default=pin_memory,
+                ),
+            )
+            _, best_epoch, best_validation_mf1 = train_with_early_stopping(
                 model,
                 fine_tune_loader,
+                validation_loader,
                 fine_tune_cfg,
                 device=device,
                 history_path=fold_dir / "fine_tune_history.csv",
@@ -553,6 +790,15 @@ def main(argv: list[str] | None = None) -> int:
                     fine_tune_cfg.get("condition_regularization_weight", 0.0)
                 ),
             )
+            validation_predictions = predict_loader(
+                model,
+                validation_loader,
+                nn.CrossEntropyLoss(),
+                device,
+                condition_regularization_weight=float(
+                    fine_tune_cfg.get("condition_regularization_weight", 0.0)
+                ),
+            )
             metrics = _run_metrics(predictions, num_classes=num_classes)
             present_names = [
                 class_names[int(value)]
@@ -565,9 +811,13 @@ def main(argv: list[str] | None = None) -> int:
                     str(value)
                     for value in sorted(np.unique(run_labels[fine_tune_indices]))
                 ),
-                "n_pretrain_trials": int(len(pretrain_indices)),
+                "n_pretrain_trials": int(len(pretrain_all_indices)),
                 "n_fine_tune_trials": int(len(fine_tune_indices)),
+                "n_validation_trials": int(len(validation_indices)),
                 "n_test_trials": int(len(test_indices)),
+                "best_epoch": int(best_epoch),
+                "best_validation_macro_f1": float(best_validation_mf1),
+                "validation_accuracy": float(validation_predictions["accuracy"]),
                 "test_present_classes": ",".join(present_names),
                 **metrics,
                 "_y_true": predictions["y_true"],
@@ -576,12 +826,12 @@ def main(argv: list[str] | None = None) -> int:
             run_rows.append(row)
             save_per_class_metrics(
                 fold_dir / "per_class_metrics.csv",
-                {"test": predictions},
+                {"validation": validation_predictions, "test": predictions},
                 class_names,
             )
             save_confusion_matrices(
                 fold_dir / "confusion_matrix.csv",
-                {"test": predictions},
+                {"validation": validation_predictions, "test": predictions},
                 class_names,
             )
             with (fold_dir / "split.json").open("w", encoding="utf-8") as handle:
@@ -594,10 +844,13 @@ def main(argv: list[str] | None = None) -> int:
                             for value in np.unique(run_labels[fine_tune_indices])
                         ),
                         "pretrain_subjects": sorted(
-                            set(subject_labels[pretrain_indices].tolist())
+                            set(subject_labels[pretrain_all_indices].tolist())
                         ),
                         "fine_tune_indices": fine_tune_indices.astype(int).tolist(),
+                        "validation_indices": validation_indices.astype(int).tolist(),
                         "test_indices": test_indices.astype(int).tolist(),
+                        "best_epoch": int(best_epoch),
+                        "best_validation_macro_f1": float(best_validation_mf1),
                     },
                     handle,
                     indent=2,
@@ -618,7 +871,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"    test accuracy={row['test_accuracy']:.4f}, "
                 f"present-class macro-F1={row['test_macro_f1_present_classes']:.4f}"
             )
-            del model, fine_tune_loader, test_loader
+            del model, fine_tune_loader, validation_loader, test_loader
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
@@ -633,8 +886,12 @@ def main(argv: list[str] | None = None) -> int:
     pooled_pred = np.concatenate([row["_y_pred"] for row in run_rows])
     subject_mean_accuracies = [float(row["mean_run_accuracy"]) for row in subject_rows]
     overall = {
-        "protocol": "other-subject pretraining plus target-subject leave-one-run-out fine-tuning",
-        "validation_set": None,
+        "protocol": "other-subject 70/15/15 pretraining plus target-run validation/test adaptation",
+        "pretrain_validation_fraction": float(
+            pretrain_cfg.get("validation_size", 0.15)
+        ),
+        "pretrain_test_fraction": float(pretrain_cfg.get("test_size", 0.15)),
+        "target_run_validation_test_split": "stratified approximately 50/50",
         "n_target_subjects": len(subject_rows),
         "class_names": class_names,
         "chance_accuracy": 1.0 / num_classes,
@@ -677,7 +934,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     _write_csv(run_dir / "pooled_confusion_matrix.csv", confusion_rows)
     print(
-        "\nPer-subject LORO accuracy: "
+        "\nPer-subject run-adaptation accuracy: "
         f"{overall['mean_of_subject_mean_run_accuracies'] * 100:.2f} +/- "
         f"{overall['between_subject_accuracy_sd'] * 100:.2f}% "
         "(mean +/- between-subject SD)"

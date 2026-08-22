@@ -978,6 +978,7 @@ def load_subject(
     autoreject_cv=10,
     autoreject_cache_dir=None,
     autoreject_force_rebuild=False,
+    return_runs=False,
 ):
     imaged = normalize_bool(imaged, default=True)
     executed = normalize_bool(executed, default=False)
@@ -993,6 +994,7 @@ def load_subject(
     X_all = []
     y_all = []
     artifact_epochs_all = []
+    trial_run_ids_all = []
     artifact_info = None
     loaded_run_ids = []
     loaded_edf_files = []
@@ -1083,15 +1085,19 @@ def load_subject(
             X_all.extend(run_X)
             y_all.extend(run_y)
             artifact_epochs_all.extend(run_artifact_epochs)
+            trial_run_ids_all.extend([run_id] * len(run_y))
             loaded_run_ids.append(run_id)
             loaded_edf_files.append(edf_file)
 
     if not X_all:
+        if return_runs:
+            return None, None, None, None
         return None, None, None
 
     X_all = np.asarray(X_all)
     y_all = np.asarray(y_all)
     artifact_epochs_all = np.asarray(artifact_epochs_all)
+    trial_run_ids_all = np.asarray(trial_run_ids_all, dtype=np.int16)
 
     if use_autoreject:
         cache_metadata = build_autoreject_cache_metadata(
@@ -1150,7 +1156,10 @@ def load_subject(
         X_all = X_all[autoreject_mask]
         y_all = y_all[autoreject_mask]
         artifact_epochs_all = artifact_epochs_all[autoreject_mask]
+        trial_run_ids_all = trial_run_ids_all[autoreject_mask]
         if len(X_all) == 0:
+            if return_runs:
+                return None, None, None, None
             return None, None, None
 
     _, y_all, keep_mask = reject_bad_epochs(
@@ -1170,7 +1179,10 @@ def load_subject(
             f"max={np.max(ptp_uv):.1f})."
         )
     X_all = X_all[keep_mask]
+    trial_run_ids_all = trial_run_ids_all[keep_mask]
 
+    if return_runs:
+        return X_all, y_all, list(artifact_info["ch_names"]), trial_run_ids_all
     return X_all, y_all, list(artifact_info["ch_names"])
 
 def build_dataset(
@@ -1195,6 +1207,7 @@ def build_dataset(
     autoreject_cv=10,
     autoreject_cache_dir=None,
     autoreject_force_rebuild=False,
+    return_runs=False,
 ):
     imaged = normalize_bool(imaged, default=True)
     executed = normalize_bool(executed, default=False)
@@ -1203,6 +1216,7 @@ def build_dataset(
     X_all = []
     y_all = []
     subject_labels = []
+    run_labels = []
     channel_names = None
 
     subject_dirs = sorted(Path(root_dir).glob("S*"))
@@ -1233,7 +1247,7 @@ def build_dataset(
 
     for subject_dir in subject_dirs:
 
-        X, y, ch_names = load_subject(
+        loaded = load_subject(
             subject_dir,
             tmin,
             tmax,
@@ -1254,7 +1268,13 @@ def build_dataset(
             autoreject_cv=autoreject_cv,
             autoreject_cache_dir=autoreject_cache_dir,
             autoreject_force_rebuild=autoreject_force_rebuild,
+            return_runs=return_runs,
         )
+        if return_runs:
+            X, y, ch_names, subject_run_labels = loaded
+        else:
+            X, y, ch_names = loaded
+            subject_run_labels = None
         if X is None:
             print(
                 f"Subject {subject_dir}: no epochs kept "
@@ -1280,6 +1300,8 @@ def build_dataset(
         subject_labels.extend(
             [subject_dir.name] * len(y)
         )
+        if return_runs:
+            run_labels.extend(np.asarray(subject_run_labels, dtype=np.int16).tolist())
 
     if not X_all:
         task_type_text = ",".join(task_types) if task_types is not None else "None"
@@ -1294,12 +1316,15 @@ def build_dataset(
             "300, or 500 first, then inspect the rejection counts."
         )
 
-    return {
+    result = {
         "X": np.concatenate(X_all),
         "y": np.concatenate(y_all),
         "subject": np.array(subject_labels),
         "ch_names": channel_names,
     }
+    if return_runs:
+        result["run"] = np.asarray(run_labels, dtype=np.int16)
+    return result
 
 
 def preprocess_spd(
@@ -1331,6 +1356,7 @@ def preprocess_spd(
     autoreject_cache_dir=None,
     autoreject_force_rebuild=False,
     return_subjects=False,
+    return_runs=False,
     covariance_signal_scale=1e6,
     replace_covariance_diagonal_with_raw_energy=False,
     brain_region_mode=None,
@@ -1356,6 +1382,7 @@ def preprocess_spd(
     frequencies = []
     labels = None
     subject_labels = None
+    run_labels = None
     channel_names = None
     brain_region_names = None
     brain_region_indices = None
@@ -1390,6 +1417,7 @@ def preprocess_spd(
             autoreject_force_rebuild=(
                 autoreject_force_rebuild and filter_index == 0
             ),
+            return_runs=return_runs,
         )
         temp_x = dataset['X']   #[n_epochs, n_channels, n_samples_per_epoch]
         print(f"Band {filter}: raw-filtered epoch shape {temp_x.shape}")
@@ -1414,6 +1442,8 @@ def preprocess_spd(
         if labels is None:
             labels = dataset['y']
             subject_labels = dataset['subject']
+            if return_runs:
+                run_labels = dataset['run']
         else:
             if not np.array_equal(labels, dataset['y']):
                 raise RuntimeError(
@@ -1423,6 +1453,11 @@ def preprocess_spd(
             if not np.array_equal(subject_labels, dataset['subject']):
                 raise RuntimeError(
                     "Subject order changed across frequency bands. "
+                    "Check raw filtering and epoch extraction settings."
+                )
+            if return_runs and not np.array_equal(run_labels, dataset['run']):
+                raise RuntimeError(
+                    "Run order changed across frequency bands. "
                     "Check raw filtering and epoch extraction settings."
                 )
 
@@ -1533,7 +1568,17 @@ def preprocess_spd(
     #   brain-region mode: (n_trials, segment, frequency, region, channels, channels)
     X_spd = np.stack(frequencies, axis=2)
 
+    if return_subjects and return_runs:
+        return (
+            X_spd,
+            y,
+            class_names,
+            np.asarray(subject_labels),
+            np.asarray(run_labels, dtype=np.int16),
+        )
     if return_subjects:
         return X_spd, y, class_names, np.asarray(subject_labels)
+    if return_runs:
+        return X_spd, y, class_names, np.asarray(run_labels, dtype=np.int16)
 
     return X_spd, y, class_names

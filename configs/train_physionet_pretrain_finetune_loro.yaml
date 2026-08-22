@@ -76,14 +76,28 @@ model:
   eps: 1.0e-6
 
 pretrain:
-  # Fixed epochs only: there is no validation set and no test-based scheduler.
+  # Other-subject trials are stratified into 70% train, 15% validation,
+  # and 15% test. Only validation controls scheduling and early stopping.
+  validation_size: 0.15
+  test_size: 0.15
   epochs: 60
   batch_size: 128
   precision: float32
   learning_rate: 0.0022
   stiefel_learning_rate: 0.0003
+  lr_scheduler: plateau
+  lr_scheduler_metric: validation_macro_f1
+  lr_scheduler_mode: max
+  lr_scheduler_factor: 0.5
+  lr_scheduler_patience: 8
+  lr_scheduler_threshold: 0.0008
+  lr_scheduler_threshold_mode: abs
+  lr_scheduler_min_lr: 1.0e-5
+  stiefel_lr_scheduler_min_lr: 1.0e-6
   weight_decay: 0.01
   gradient_clip_norm: 0.8
+  early_stopping_patience: 11
+  early_stopping_min_delta: 0.0008
   condition_regularization_weight: 0.0
   seed: 42
   num_workers: 0
@@ -91,14 +105,26 @@ pretrain:
 
 fine_tune:
   # Start from the target-specific pretrained state and update all parameters.
-  # The lower learning rates reduce catastrophic forgetting on the small target set.
+  # One selected run is split approximately 50/50 into validation/test; all
+  # other target runs are shuffled for fine-tuning.
   epochs: 25
   batch_size: 32
   precision: float32
   learning_rate: 0.0002
   stiefel_learning_rate: 0.00005
+  lr_scheduler: plateau
+  lr_scheduler_metric: validation_macro_f1
+  lr_scheduler_mode: max
+  lr_scheduler_factor: 0.5
+  lr_scheduler_patience: 5
+  lr_scheduler_threshold: 0.0008
+  lr_scheduler_threshold_mode: abs
+  lr_scheduler_min_lr: 1.0e-5
+  stiefel_lr_scheduler_min_lr: 1.0e-6
   weight_decay: 0.001
   gradient_clip_norm: 0.8
+  early_stopping_patience: 8
+  early_stopping_min_delta: 0.0008
   condition_regularization_weight: 0.0
   num_workers: 0
   pin_memory: true
