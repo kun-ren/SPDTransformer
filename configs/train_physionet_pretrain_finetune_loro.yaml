@@ -1,0 +1,110 @@
+# Other-subject pretraining + target-subject Leave-One-Run-Out fine-tuning.
+# CLI examples:
+#   --target-subjects 1
+#   --target-subjects 1-10
+
+# Targets can also be overridden from the command line.
+target_subjects: 1
+
+data:
+  dataset: physionet_mi
+  root_dir: data/MNE-eegbci-data/files/eegmmidb/1.0.0
+  # Full available cohort used to construct each target-specific pretraining set.
+  # S088 is excluded because its sampling rate differs from the 160 Hz cohort.
+  subjects: 1-87,89-109
+  filter_bank:
+    - [8, 13]
+    - [13, 20]
+    - [20, 30]
+  estimator: lwf
+  sfreq: 160
+  eps: 1.0e-6
+  covariance_signal_scale: auto
+  replace_covariance_diagonal_with_raw_energy: true
+  brain_region_mode: physionet_8x8
+  covariance_output_dtype: float32
+  channels: null
+
+  # Four pure imagined-movement classes:
+  # left hand, right hand, both hands, and feet.
+  imaged: true
+  executed: false
+  task_types: [unilateral_fist, both]
+
+  # Post-cue motor-imagery interval. All windows from one trial stay together.
+  epoch_slice: [0.0, 4.0]
+  segment_slice: [0.5, 0.25]
+
+  # Keep learned preprocessing disabled so the held-out run is not used to fit
+  # ICA/AutoReject. Filtering, per-trial covariance, and fixed normalization
+  # are still applied independently to every trial.
+  reject_threshold_uv: null
+  use_ica: false
+  ica_n_components: 20
+  ica_random_state: 42
+  ica_eog_channels: null
+  use_autoreject: false
+  autoreject_random_state: 42
+  autoreject_n_jobs: 1
+  autoreject_cv: 10
+  baseline_correction: null
+  baseline_window: null
+
+model:
+  head_nums: 4
+  attention_dim: "8"
+  stage_transition: true
+  stage_projection_init: random
+  add_norm_type: sequence_add_norm
+  ffn_hidden_spd_dim: 64
+  tau: 1.3
+  metric: learnable-metric
+  depth: 1
+  classifier_type: mdm
+  pooling: weighted
+  dropout: 0.4
+  attention_dropout: 0.0
+  use_position_bias: true
+  position_bias_axes: time
+  position_bias_max: 0.5
+  attention_score_target_rms: 1.0
+  attention_score_clip: 5.0
+  layer_norm_affine: false
+  learnable_metric_mode: low-rank
+  learnable_metric_score: distance
+  learnable_metric_rank: 4
+  eps: 1.0e-6
+
+pretrain:
+  # Fixed epochs only: there is no validation set and no test-based scheduler.
+  epochs: 60
+  batch_size: 128
+  precision: float32
+  learning_rate: 0.0022
+  stiefel_learning_rate: 0.0003
+  weight_decay: 0.01
+  gradient_clip_norm: 0.8
+  condition_regularization_weight: 0.0
+  seed: 42
+  num_workers: 0
+  pin_memory: true
+
+fine_tune:
+  # Start from the target-specific pretrained state and update all parameters.
+  # The lower learning rates reduce catastrophic forgetting on the small target set.
+  epochs: 25
+  batch_size: 32
+  precision: float32
+  learning_rate: 0.0002
+  stiefel_learning_rate: 0.00005
+  weight_decay: 0.001
+  gradient_clip_norm: 0.8
+  condition_regularization_weight: 0.0
+  num_workers: 0
+  pin_memory: true
+
+output:
+  dir: experiments/results/physionet_pretrain_finetune_loro
+  dataset_cache_dir: experiments/cache/preprocessed_datasets
+  save_pretrained_checkpoints: true
+  save_fine_tuned_checkpoints: false
