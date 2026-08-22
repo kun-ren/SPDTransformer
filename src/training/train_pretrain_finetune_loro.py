@@ -43,6 +43,7 @@ from src.datasets.PhysioNetMI_pretrain_finetune_preprocess import (  # noqa: E40
     selected_run_ids,
 )
 from src.models.MotorImageryDataset import MotorImageryDataset  # noqa: E402
+from src.training.config_grid import expand_data_grid, expand_grid  # noqa: E402
 from src.training.train import (  # noqa: E402
     build_lr_schedulers,
     build_model,
@@ -72,6 +73,34 @@ def load_config(path: Path) -> dict[str, Any]:
         if not isinstance(config.get(section), dict):
             raise ValueError(f"Missing mapping section {section!r} in {path}.")
     return config
+
+
+def resolve_single_grid_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Accept the same singleton-list syntax used by ``train_grid.yaml``."""
+
+    expanded_sections = {
+        "data": expand_data_grid(config["data"]),
+        "model": expand_grid(config["model"]),
+        "pretrain": expand_grid(config["pretrain"]),
+        "fine_tune": expand_grid(config["fine_tune"]),
+    }
+    multiple = {
+        name: len(values)
+        for name, values in expanded_sections.items()
+        if len(values) != 1
+    }
+    if multiple:
+        raise ValueError(
+            "This target-subject runner accepts train_grid-style singleton "
+            f"values but not hyperparameter grids; expanded counts: {multiple}."
+        )
+    return {
+        "data": expanded_sections["data"][0],
+        "model": expanded_sections["model"][0],
+        "pretrain": expanded_sections["pretrain"][0],
+        "fine_tune": expanded_sections["fine_tune"][0],
+        "output": copy.deepcopy(config["output"]),
+    }
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -452,7 +481,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--data-subjects",
-        help="Optional dataset-cohort override, mainly for a small smoke test.",
+        help="Override data.pretrain_subjects, mainly for a small smoke test.",
     )
     parser.add_argument("--device", help="Device override, for example cuda:0 or cpu.")
     parser.add_argument("--pretrain-epochs", type=int, help="Smoke-test override.")
@@ -468,17 +497,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config_path = args.config.resolve()
-    config = load_config(config_path)
-    data_cfg = normalize_data_config(config["data"])
-    if args.data_subjects is not None:
-        data_cfg["subjects"] = parse_subjects(args.data_subjects)
+    config = resolve_single_grid_config(load_config(config_path))
+    configured_target_subjects = config["data"].get("subjects")
+    configured_pretrain_subjects = config["data"].get("pretrain_subjects")
+    preprocessing_data_cfg = copy.deepcopy(config["data"])
+    preprocessing_data_cfg.pop("pretrain_subjects", None)
+    preprocessing_data_cfg["subjects"] = (
+        args.data_subjects
+        if args.data_subjects is not None
+        else configured_pretrain_subjects
+    )
+    data_cfg = normalize_data_config(preprocessing_data_cfg)
     target_subjects = parse_subjects(
         args.target_subjects
         if args.target_subjects is not None
-        else config.get("target_subjects")
+        else configured_target_subjects
     )
     if not target_subjects:
-        raise ValueError("Specify target_subjects in the config or CLI.")
+        raise ValueError("Specify data.subjects in the config or --target-subjects.")
     dataset_subjects = data_cfg.get("subjects")
     if dataset_subjects is not None:
         missing_targets = sorted(set(target_subjects) - set(dataset_subjects))
@@ -532,8 +568,11 @@ def main(argv: list[str] | None = None) -> int:
         yaml.safe_dump(
             {
                 **config,
-                "data": data_cfg,
-                "target_subjects": target_subjects,
+                "data": {
+                    **data_cfg,
+                    "subjects": target_subjects,
+                    "pretrain_subjects": data_cfg.get("subjects"),
+                },
                 "pretrain": pretrain_cfg,
                 "fine_tune": fine_tune_cfg,
             },
