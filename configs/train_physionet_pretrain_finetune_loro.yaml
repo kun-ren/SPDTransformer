@@ -27,7 +27,7 @@ data:
   imaged: [true]
   executed: [false]
   # Nested because both task types belong to the same four-class experiment.
-  task_types: [[unilateral_fist, both]]
+  task_types: [[unilateral_fist]]
 
   # Paired time fields follow train_grid.yaml's grid syntax.
   epoch_slice: [[0.0, 4.0]]
@@ -76,7 +76,7 @@ pretrain:
   # Other-subject trials: 70% train, 15% validation, 15% test.
   validation_size: [0.15]
   test_size: [0.15]
-  epochs: [60]
+  epochs: [100]
   batch_size: [128]
   precision: ["float32"]
   learning_rate: [0.0022]
