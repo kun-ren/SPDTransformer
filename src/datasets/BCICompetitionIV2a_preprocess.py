@@ -7,11 +7,13 @@ import numpy as np
 
 from src.datasets.PhysioNetMI_preprocess import (
     baseline_correct_covariances,
+    batch_spd_diagonal_mean_normalize,
     normalize_baseline_correction_mode,
     normalize_bool,
     normalize_float_dtype,
     regularize_spd,
     replace_covariance_diagonal_with_segment_energy,
+    resolve_brain_region_indices,
     segment_epochs,
     trace_normalize,
 )
@@ -43,6 +45,19 @@ BCI_IV_2A_CHANNELS = (
     "P2",
     "POz",
 )
+
+
+# The same left/central/right seven-channel motor-cortex organization as the
+# PhysioNet ``motor_7`` preset, adapted to Dataset 2a's 22-channel montage.
+# As in the PhysioNet preset, adjacent regions intentionally overlap around
+# the central motor cortex.
+BCI_IV_2A_BRAIN_REGION_PRESETS = {
+    "motor_7": {
+        "left_motor": ["FC3", "FC1", "C5", "C3", "C1", "CP3", "CP1"],
+        "central_motor": ["FC1", "FCz", "FC2", "C1", "Cz", "C2", "CPz"],
+        "right_motor": ["FC2", "FC4", "C2", "C4", "C6", "CP2", "CP4"],
+    },
+}
 
 
 def _split_names(value: Any) -> list[str] | None:
@@ -248,6 +263,10 @@ def load_bci_iv_2a_epochs(
 
     event_names = normalize_bci_iv_2a_events(events)
     channel_names = normalize_bci_iv_2a_channels(channels)
+    if channel_names is None:
+        # Explicitly request all EEG channels so MOABB preserves this known
+        # order and the brain-region indices remain deterministic.
+        channel_names = list(BCI_IV_2A_CHANNELS)
 
     dataset = BNCI2014_001()
     _download_dataset(
@@ -287,6 +306,7 @@ def load_bci_iv_2a_epochs(
         "subject": subject_labels,
         "metadata": metadata,
         "events": event_names,
+        "ch_names": channel_names,
     }
 
 
@@ -334,6 +354,7 @@ def preprocess_bci_iv_2a_spd(
     return_subjects=False,
     covariance_signal_scale=1.0,
     replace_covariance_diagonal_with_raw_energy=False,
+    brain_region_mode=None,
     output_dtype="float32",
     moabb_accept_terms=True,
     moabb_force_update=False,
@@ -357,6 +378,16 @@ def preprocess_bci_iv_2a_spd(
         default=False,
     )
     output_dtype = normalize_float_dtype(output_dtype, default="float32")
+    brain_region_mode = str(brain_region_mode or "").strip()
+    if brain_region_mode.lower() in {
+        "",
+        "none",
+        "null",
+        "false",
+        "off",
+        "full",
+    }:
+        brain_region_mode = None
     baseline_correction = normalize_baseline_correction_mode(baseline_correction)
     threshold_uv = _optional_positive_float(reject_threshold_uv)
 
@@ -365,6 +396,9 @@ def preprocess_bci_iv_2a_spd(
     labels = None
     subject_labels = None
     keep_mask = None
+    channel_names = None
+    brain_region_names = None
+    brain_region_indices = None
     download_checked = False
     accept_terms = normalize_bool(moabb_accept_terms, default=True)
     force_update = normalize_bool(moabb_force_update, default=False)
@@ -389,6 +423,24 @@ def preprocess_bci_iv_2a_spd(
         current_labels = np.asarray(dataset["y"], dtype=np.str_)
         current_subject_labels = np.asarray(dataset["subject"], dtype=np.str_)
         print(f"BCI IV-2a band {filter_band}: MOABB epoch shape {temp_x.shape}")
+
+        if channel_names is None:
+            channel_names = list(dataset["ch_names"])
+            brain_region_names, brain_region_indices = resolve_brain_region_indices(
+                channel_names,
+                brain_region_mode,
+                presets=BCI_IV_2A_BRAIN_REGION_PRESETS,
+            )
+            if brain_region_indices is not None:
+                print(
+                    "Using BCI IV-2a brain-region SPD tokens: "
+                    f"mode={brain_region_mode}, regions={brain_region_names}, "
+                    f"region_size={brain_region_indices.shape[1]}"
+                )
+        elif list(dataset["ch_names"]) != channel_names:
+            raise RuntimeError(
+                "Channel order changed across BCI IV-2a frequency bands."
+            )
 
         if threshold_uv is not None:
             if keep_mask is None:
@@ -436,19 +488,39 @@ def preprocess_bci_iv_2a_spd(
         )
 
         covariance_input = temp_x * float(covariance_signal_scale)
-        cov_x = Covariances(estimator=estimator).fit_transform(
-            covariance_input.reshape(
-                n_epochs * n_segments,
-                n_channels,
-                segment_samples,
+        if brain_region_indices is None:
+            cov_x = Covariances(estimator=estimator).fit_transform(
+                covariance_input.reshape(
+                    n_epochs * n_segments,
+                    n_channels,
+                    segment_samples,
+                )
             )
-        )
-        cov_x = cov_x.reshape(n_epochs, n_segments, n_channels, n_channels)
+            cov_x = cov_x.reshape(n_epochs, n_segments, n_channels, n_channels)
+            covariance_input_for_energy = covariance_input
+        else:
+            n_regions, region_size = brain_region_indices.shape
+            covariance_input = covariance_input[:, :, brain_region_indices, :]
+            cov_x = Covariances(estimator=estimator).fit_transform(
+                covariance_input.reshape(
+                    n_epochs * n_segments * n_regions,
+                    region_size,
+                    segment_samples,
+                )
+            )
+            cov_x = cov_x.reshape(
+                n_epochs,
+                n_segments,
+                n_regions,
+                region_size,
+                region_size,
+            )
+            covariance_input_for_energy = covariance_input
 
         if replace_covariance_diagonal_with_raw_energy:
             cov_x = replace_covariance_diagonal_with_segment_energy(
                 cov_x,
-                covariance_input,
+                covariance_input_for_energy,
             )
             print(
                 "Replaced covariance diagonal with per-channel segment raw "
@@ -466,6 +538,12 @@ def preprocess_bci_iv_2a_spd(
             "cond p99:",
             np.percentile(eigvals[..., -1] / np.maximum(eigvals[..., 0], eps), 99),
         )
+
+        # Match PhysioNet preprocessing: normalize every trial using the mean
+        # diagonal over its segment/region SPD tokens in this frequency band.
+        cov_x = batch_spd_diagonal_mean_normalize(cov_x, eps=eps)
+        print(f"norm matrix min: {np.min(np.abs(cov_x))}")
+        print(f"norm matrix max: {np.max(cov_x)}")
 
         cov_x = regularize_spd(cov_x, eps=eps)
 

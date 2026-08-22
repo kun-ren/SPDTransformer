@@ -315,6 +315,7 @@ def load_spd_like_train(
                 data_cfg.get("replace_covariance_diagonal_with_raw_energy", False),
                 default=False,
             ),
+            brain_region_mode=data_cfg.get("brain_region_mode"),
             output_dtype=data_cfg.get("covariance_output_dtype", "float32"),
             moabb_accept_terms=parse_bool(
                 data_cfg.get("moabb_accept_terms", True),

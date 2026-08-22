@@ -1,6 +1,7 @@
 data:
   dataset: ["bnci2014_001"]
   root_dir: ["data"]
+  # Classical MDM uses one full-trial covariance matrix per trial.
   filter_bank:
     - [8, 30]
   estimator: ["lwf"]
@@ -9,6 +10,7 @@ data:
   covariance_signal_scale: ["auto"]
   replace_covariance_diagonal_with_raw_energy: [false]
   brain_region_mode: [null]
+
   subjects: 1-9
   events: "left_hand,right_hand,feet,tongue"
   sessions: "all"
@@ -16,41 +18,39 @@ data:
   reject_threshold_uv: [null]
   use_ica: [false]
   use_autoreject: [false]
-  autoreject_random_state: [42]
-  autoreject_n_jobs: [2]
-  autoreject_cv: [10]
   baseline_correction: [null]
   baseline_window: "0,1"
   epoch_slice: [[0.0, 4.0]]
-  # One covariance matrix from the complete 0--4 s trial; no temporal tokens.
   segment_slice: [[4.0, 4.0]]
   moabb_accept_terms: [true]
   moabb_force_update: [false]
+
   test_size: [0.2]
   val_size: [0.0]
   allow_subject_overlap: [true, false]
 
 model:
-  # 22 input channels are prepended automatically: 22->16->8->4.
-  dims: [16, 8, 4]
-  reig_epsilon: 1.0e-4
-  log_epsilon: 1.0e-6
-  project_stiefel: true
+  classifier_type: ["pyriemann"]
+  pooling: ["original"]
+  token_weight_logits: null
+  metric_mean: ["riemann"]
+  metric_distance: ["riemann"]
+  n_jobs: [1]
 
 training:
   seed: [42]
-  precision: ["float64"]
   n_splits: [5]
-  epochs: [200]
-  batch_size: [30]
-  spdnet_optimizer: ["sgd"]
-  spdnet_learning_rate: [0.01]
-  spdnet_momentum: [0.0]
-  spdnet_weight_decay: [0.0]
-  gradient_clip_norm: [5.0]
-  log_every: [10]
-  split_file: [null]
+  split_file: null
+  # These values apply only if classifier_type is changed to differentiable.
+  epochs: [100]
+  batch_size: [64]
+  learning_rate: [0.01]
+  weight_decay: [0.0]
+  gradient_clip_norm: [1.0]
+  precision: ["float32"]
   num_workers: [0]
+  pin_memory: [true]
 
 output:
-  dir: experiments/results/spdnet_baseline_bci_iv_2a
+  dir: experiments/results/mdm_baseline_bci_iv_2a
+  dataset_cache_dir: experiments/cache/mdm_preprocessed_datasets

@@ -7,7 +7,7 @@ data:
   subjects: 1-9
   events: "left_hand,right_hand,feet,tongue"
   sessions: "all"
-  channels:
+  channels: null
   reject_threshold_uv: [null]
   use_ica: [false]
   use_autoreject: [false]
@@ -19,13 +19,17 @@ data:
   segment_slice: [[4.0, null]]
   moabb_accept_terms: [true]
   moabb_force_update: [false]
-  test_size: [0.15]
-  val_size: [0.15]
-  allow_subject_overlap: [true]
+  test_size: [0.2]
+  val_size: [0.0]
+  allow_subject_overlap: [true, false]
+
+model:
+  n_components: 6
+  mne_log_level: WARNING
 
 training:
   seed: [42]
-  split_file: experiments/splits/bnci2014_001_csp_lda_seed42.json
+  n_splits: [5]
 
 output:
   dir: experiments/results/csp_lda_baseline_bci_iv_2a

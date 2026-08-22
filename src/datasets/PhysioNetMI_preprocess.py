@@ -72,22 +72,24 @@ PHYSIONET_BRAIN_REGION_PRESETS = {
 }
 
 
-def normalize_brain_region_mode(mode):
+def normalize_brain_region_mode(mode, presets=None):
+    presets = PHYSIONET_BRAIN_REGION_PRESETS if presets is None else presets
     if mode is None:
         return None
     normalized = str(mode).strip().lower().replace("-", "_")
     if normalized in {"", "none", "null", "false", "off", "full"}:
         return None
-    if normalized not in PHYSIONET_BRAIN_REGION_PRESETS:
-        valid = ", ".join(sorted(PHYSIONET_BRAIN_REGION_PRESETS))
+    if normalized not in presets:
+        valid = ", ".join(sorted(presets))
         raise ValueError(
             f"Unknown brain_region_mode {mode!r}. Valid presets: {valid}."
         )
     return normalized
 
 
-def resolve_brain_region_indices(channel_names, mode):
-    mode = normalize_brain_region_mode(mode)
+def resolve_brain_region_indices(channel_names, mode, presets=None):
+    presets = PHYSIONET_BRAIN_REGION_PRESETS if presets is None else presets
+    mode = normalize_brain_region_mode(mode, presets=presets)
     if mode is None:
         return None, None
 
@@ -95,11 +97,10 @@ def resolve_brain_region_indices(channel_names, mode):
         normalize_channel_name(channel_name): index
         for index, channel_name in enumerate(channel_names)
     }
-    regions = PHYSIONET_BRAIN_REGION_PRESETS[mode]
+    regions = presets[mode]
     region_names = []
     region_indices = []
     region_size = None
-    seen_channels = set()
     for region_name, region_channels in regions.items():
         normalized_channels = [
             normalize_channel_name(channel)
@@ -120,13 +121,6 @@ def resolve_brain_region_indices(channel_names, mode):
         indices = [normalized_to_index[channel] for channel in normalized_channels]
         if len(set(indices)) != len(indices):
             raise ValueError(f"Brain region {region_name!r} has duplicate channels.")
-        duplicate_channels = seen_channels & set(normalized_channels)
-        if duplicate_channels:
-            raise ValueError(
-                f"Brain region preset {mode!r} assigns channel(s) to more "
-                f"than one region: {', '.join(sorted(duplicate_channels))}."
-            )
-        seen_channels.update(normalized_channels)
         if region_size is None:
             region_size = len(indices)
         elif len(indices) != region_size:
