@@ -33,12 +33,14 @@ data:
   allow_subject_overlap: [true]
 
 model:
-  # Change to "differentiable" for trainable Log-Euclidean prototypes.
+  # Baseline AIRM-MDM is deliberately used: on large PhysioNet experiments it
+  # was more reliable than FgMDM variants. LWF stabilizes 64x64 covariances.
   classifier_type: ["pyriemann"]
   pooling: ["original"]
   token_weight_logits: null
   metric_mean: ["riemann"]
   metric_distance: ["riemann"]
+  n_jobs: [1]
 
 training:
   seed: [42]

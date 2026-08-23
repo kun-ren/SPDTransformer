@@ -16,13 +16,13 @@ data:
   ica_eog_channels: ["FP1,FP2"]
   use_autoreject: [true]
   autoreject_random_state: [42]
-  autoreject_n_jobs: [2]
+  autoreject_n_jobs: [8]
   autoreject_cv: [10]
   baseline_correction: [null]
   baseline_window: "-3,0"
-  # Full post-cue motor-imagery interval used by standard CSP pipelines.
-  epoch_slice: [[0.0, 4.0]]
-  segment_slice: [[4.0, null]]
+  # Ignore the cue transient and classify the established 0.5--4.0 s MI window.
+  epoch_slice: [[0.5, 4.0]]
+  segment_slice: [[3.5, null]]
   imaged: true
   executed: false
   task_types: unilateral_fist
@@ -40,7 +40,15 @@ training:
   subject_specific: [true]
 
 model:
+  # Six filters is the established PhysioNet CSP setting. Ledoit-Wolf
+  # regularization is applied both to CSP covariance estimation and LDA,
+  # which is more stable for the small number of trials in each subject/run.
   n_components: 6
+  csp_reg: ledoit_wolf
+  csp_log: true
+  csp_norm_trace: false
+  lda_solver: lsqr
+  lda_shrinkage: auto
   mne_log_level: WARNING
 
 output:

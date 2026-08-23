@@ -134,18 +134,44 @@ def validate_cv_config(
     return n_splits, seed, allow_subject_overlap, held_out_run_validation_size
 
 
-def build_csp_lda_pipeline(n_components: int):
+def build_csp_lda_pipeline(
+    n_components: int,
+    model_cfg: dict[str, Any] | None = None,
+):
     from mne.decoding import CSP
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
     from sklearn.pipeline import Pipeline
 
+    model_cfg = model_cfg or {}
+    csp_reg = model_cfg.get("csp_reg", "ledoit_wolf")
+    if isinstance(csp_reg, str) and csp_reg.strip().lower() in {
+        "",
+        "none",
+        "null",
+    }:
+        csp_reg = None
+    lda_solver = str(model_cfg.get("lda_solver", "svd")).strip().lower()
+    lda_shrinkage = model_cfg.get("lda_shrinkage")
+    if isinstance(lda_shrinkage, str) and lda_shrinkage.strip().lower() in {
+        "",
+        "none",
+        "null",
+    }:
+        lda_shrinkage = None
+    if lda_solver == "svd" and lda_shrinkage is not None:
+        raise ValueError("LDA solver='svd' does not support shrinkage.")
     csp = CSP(
         n_components=n_components,
-        reg="ledoit_wolf",
-        log=True,
-        norm_trace=False,
+        reg=csp_reg,
+        log=parse_bool(model_cfg.get("csp_log", True), default=True),
+        norm_trace=parse_bool(
+            model_cfg.get("csp_norm_trace", False), default=False
+        ),
     )
-    lda = LinearDiscriminantAnalysis()
+    lda = LinearDiscriminantAnalysis(
+        solver=lda_solver,
+        shrinkage=lda_shrinkage,
+    )
     return Pipeline(
         [
             ("csp", csp),
@@ -286,7 +312,7 @@ def run_experiment(
                 "test_indices": test_idx.astype(int).tolist(),
             }
         )
-        classifier = build_csp_lda_pipeline(csp_components)
+        classifier = build_csp_lda_pipeline(csp_components, model_cfg)
         classifier.fit(trial_data[train_idx], y[train_idx])
         validation_prediction = (
             classifier.predict(trial_data[validation_idx])
@@ -317,9 +343,9 @@ def run_experiment(
                 }
             )
         row.update(compute_csp_metrics(y[test_idx], test_prediction))
-        if subject_specific:
-            row["_y_true"] = y[test_idx].astype(int).tolist()
-            row["_y_pred"] = np.asarray(test_prediction, dtype=int).tolist()
+        row["_y_true"] = y[test_idx].astype(int).tolist()
+        row["_y_pred"] = np.asarray(test_prediction, dtype=int).tolist()
+        row["_subject_labels"] = subject_labels[test_idx].astype(str).tolist()
         rows.append(row)
         print(
             f"[CSP+LDA {'subject ' + subject + ' ' if subject_specific else ''}"
@@ -340,18 +366,14 @@ def run_experiment(
         )
 
     aggregates = aggregate_fold_metrics(rows)
-    subject_rows = (
-        summarize_subject_fold_metrics(
-            rows,
-            (
-                "validation_accuracy",
-                "validation_macro_f1",
-                "validation_cohen_kappa",
-                *METRIC_NAMES,
-            ),
-        )
-        if subject_specific
-        else []
+    subject_rows = summarize_subject_fold_metrics(
+        rows,
+        (
+            "validation_accuracy",
+            "validation_macro_f1",
+            "validation_cohen_kappa",
+            *METRIC_NAMES,
+        ),
     )
     if subject_specific:
         print("\nCSP+LDA pooled subject-specific test results")
@@ -388,13 +410,12 @@ def run_experiment(
             writer = csv.DictWriter(handle, fieldnames=list(public_rows[0]))
             writer.writeheader()
             writer.writerows(public_rows)
-    if subject_rows:
-        with (run_dir / "per_subject_summary.csv").open(
-            "w", encoding="utf-8", newline=""
-        ) as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(subject_rows[0]))
-            writer.writeheader()
-            writer.writerows(subject_rows)
+    with (run_dir / "per_subject_summary.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(subject_rows[0]))
+        writer.writeheader()
+        writer.writerows(subject_rows)
     save_json(run_dir / "splits.json", split_rows)
 
     summary = {

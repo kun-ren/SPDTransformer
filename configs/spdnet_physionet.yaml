@@ -55,15 +55,18 @@ training:
   # validation/test. All other runs from the same subject are training data.
   held_out_run_validation_size: [0.5]
   precision: ["float64"]
-  epochs: [200]
+  # Official SPDNet optimization uses 500 epochs, batch size 30, SGD with
+  # learning rate 0.01 and weight decay 5e-4. Validation-based early stopping
+  # normally terminates earlier on these small subject-specific folds.
+  epochs: [500]
   batch_size: [30]
   spdnet_optimizer: ["sgd"]
   spdnet_learning_rate: [0.01]
   spdnet_momentum: [0.0]
-  spdnet_weight_decay: [0.0]
+  spdnet_weight_decay: [0.0005]
   gradient_clip_norm: [5.0]
-  early_stopping_patience: [20]
-  early_stopping_min_delta: [0.0008]
+  early_stopping_patience: [30]
+  early_stopping_min_delta: [0.0001]
   log_every: [10]
   split_file: [null]
   num_workers: [0]

@@ -269,6 +269,35 @@ def summarize_subject_fold_metrics(
     """
 
     del metric_names
+    y_true_parts = []
+    y_pred_parts = []
+    subject_parts = []
+    for row in rows:
+        y_true = np.asarray(row["_y_true"], dtype=np.int64)
+        y_pred = np.asarray(row["_y_pred"], dtype=np.int64)
+        subject_values = row.get("_subject_labels")
+        if subject_values is None:
+            subject_values = [str(row["subject"])] * len(y_true)
+        subjects = np.asarray(subject_values, dtype=np.str_)
+        if not (len(y_true) == len(y_pred) == len(subjects)):
+            raise ValueError("Prediction and subject-label lengths do not match.")
+        y_true_parts.append(y_true)
+        y_pred_parts.append(y_pred)
+        subject_parts.append(subjects)
+    return summarize_subject_predictions(
+        np.concatenate(y_true_parts),
+        np.concatenate(y_pred_parts),
+        np.concatenate(subject_parts),
+    )
+
+
+def summarize_subject_predictions(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    subject_labels: np.ndarray,
+) -> list[dict[str, Any]]:
+    """Return pooled metrics for each subject in out-of-fold predictions."""
+
     from sklearn.metrics import (
         accuracy_score,
         balanced_accuracy_score,
@@ -276,32 +305,37 @@ def summarize_subject_fold_metrics(
         f1_score,
     )
 
+    y_true = np.asarray(y_true, dtype=np.int64)
+    y_pred = np.asarray(y_pred, dtype=np.int64)
+    subject_labels = np.asarray(subject_labels, dtype=np.str_)
+    if not (len(y_true) == len(y_pred) == len(subject_labels)):
+        raise ValueError("Prediction and subject-label lengths do not match.")
     summaries: list[dict[str, Any]] = []
-    for subject in sorted({str(row["subject"]) for row in rows}):
-        subject_rows = [row for row in rows if str(row["subject"]) == subject]
-        if not all("_y_true" in row and "_y_pred" in row for row in subject_rows):
-            raise ValueError(
-                "Per-subject publication metrics require _y_true/_y_pred for "
-                f"every held-out run of {subject}."
-            )
-        y_true = np.concatenate(
-            [np.asarray(row["_y_true"], dtype=np.int64) for row in subject_rows]
-        )
-        y_pred = np.concatenate(
-            [np.asarray(row["_y_pred"], dtype=np.int64) for row in subject_rows]
-        )
+    for subject in sorted(np.unique(subject_labels).tolist()):
+        mask = subject_labels == subject
+        subject_true = y_true[mask]
+        subject_pred = y_pred[mask]
         summaries.append(
             {
                 "Subject": subject,
-                "Trials": int(y_true.size),
-                "Accuracy (%)": float(accuracy_score(y_true, y_pred) * 100.0),
+                "Trials": int(subject_true.size),
+                "Accuracy (%)": float(
+                    accuracy_score(subject_true, subject_pred) * 100.0
+                ),
                 "Balanced Accuracy (%)": float(
-                    balanced_accuracy_score(y_true, y_pred) * 100.0
+                    balanced_accuracy_score(subject_true, subject_pred) * 100.0
                 ),
                 "Macro-F1": float(
-                    f1_score(y_true, y_pred, average="macro", zero_division=0)
+                    f1_score(
+                        subject_true,
+                        subject_pred,
+                        average="macro",
+                        zero_division=0,
+                    )
                 ),
-                "Cohen’s κ": float(cohen_kappa_score(y_true, y_pred)),
+                "Cohen’s κ": float(
+                    cohen_kappa_score(subject_true, subject_pred)
+                ),
             }
         )
     return summaries

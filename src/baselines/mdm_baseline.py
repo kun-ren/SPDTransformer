@@ -1573,9 +1573,9 @@ def run_experiment(
                     }
                 )
             row.update(compute_mdm_metrics(y[test_idx], prediction))
-            if subject_specific:
-                row["_y_true"] = y[test_idx].astype(int).tolist()
-                row["_y_pred"] = np.asarray(prediction, dtype=int).tolist()
+            row["_y_true"] = y[test_idx].astype(int).tolist()
+            row["_y_pred"] = np.asarray(prediction, dtype=int).tolist()
+            row["_subject_labels"] = subject_labels[test_idx].astype(str).tolist()
             fold_rows.append(row)
             print(
                 f"[MDM {'subject ' + subject + ' ' if subject_specific else ''}"
@@ -1659,12 +1659,12 @@ def run_experiment(
                 "cohen_kappa": test_row["cohen_kappa"],
                 "loss": test_row["loss"],
             }
-            if subject_specific:
-                test_predictions = details.pop("test_predictions")
-                if not test_predictions:
-                    raise RuntimeError("Differentiable MDM omitted test predictions.")
-                row["_y_true"] = test_predictions["y_true"]
-                row["_y_pred"] = test_predictions["y_pred"]
+            test_predictions = details.pop("test_predictions")
+            if not test_predictions:
+                raise RuntimeError("Differentiable MDM omitted test predictions.")
+            row["_y_true"] = test_predictions["y_true"]
+            row["_y_pred"] = test_predictions["y_pred"]
+            row["_subject_labels"] = subject_labels[test_idx].astype(str).tolist()
             fold_rows.append(row)
             fold_details.append(
                 {
@@ -1699,18 +1699,14 @@ def run_experiment(
         classifier_details["fold_details"] = fold_details
 
     aggregates = aggregate_mdm_fold_metrics(fold_rows)
-    subject_rows = (
-        summarize_subject_fold_metrics(
-            fold_rows,
-            (
-                "validation_accuracy",
-                "validation_macro_f1",
-                "validation_cohen_kappa",
-                *MDM_REPORT_METRICS,
-            ),
-        )
-        if subject_specific
-        else []
+    subject_rows = summarize_subject_fold_metrics(
+        fold_rows,
+        (
+            "validation_accuracy",
+            "validation_macro_f1",
+            "validation_cohen_kappa",
+            *MDM_REPORT_METRICS,
+        ),
     )
     if subject_specific:
         print("\nMDM pooled subject-specific test results")
@@ -1733,8 +1729,7 @@ def run_experiment(
     write_csv(run_dir / "results.csv", public_fold_rows)
     if subject_specific:
         write_csv(run_dir / "per_run_results.csv", public_fold_rows)
-    if subject_rows:
-        write_csv(run_dir / "per_subject_summary.csv", subject_rows)
+    write_csv(run_dir / "per_subject_summary.csv", subject_rows)
 
     summary = {
         "baseline": "mdm",

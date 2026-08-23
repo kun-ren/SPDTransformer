@@ -927,9 +927,9 @@ def run_experiment(
             "macro_f1": test_metrics["macro_f1"],
             "cohen_kappa": test_metrics["cohen_kappa"],
         }
-        if subject_specific:
-            fold_row["_y_true"] = test_metrics["y_true"].astype(int).tolist()
-            fold_row["_y_pred"] = test_metrics["y_pred"].astype(int).tolist()
+        fold_row["_y_true"] = test_metrics["y_true"].astype(int).tolist()
+        fold_row["_y_pred"] = test_metrics["y_pred"].astype(int).tolist()
+        fold_row["_subject_labels"] = subject_labels[test_idx].astype(str).tolist()
         fold_rows.append(fold_row)
         print(
             f"[SPDNet {'subject ' + subject + ' ' if subject_specific else ''}"
@@ -951,18 +951,14 @@ def run_experiment(
         )
 
     aggregates = aggregate_spdnet_fold_metrics(fold_rows)
-    subject_rows = (
-        summarize_subject_fold_metrics(
-            fold_rows,
-            (
-                "validation_accuracy",
-                "validation_macro_f1",
-                "validation_cohen_kappa",
-                *SPDNET_REPORT_METRICS,
-            ),
-        )
-        if subject_specific
-        else []
+    subject_rows = summarize_subject_fold_metrics(
+        fold_rows,
+        (
+            "validation_accuracy",
+            "validation_macro_f1",
+            "validation_cohen_kappa",
+            *SPDNET_REPORT_METRICS,
+        ),
     )
     if subject_specific:
         print("\nSPDNet pooled subject-specific test results")
@@ -984,8 +980,7 @@ def run_experiment(
     write_csv(run_dir / "results.csv", public_fold_rows)
     if subject_specific:
         write_csv(run_dir / "per_run_results.csv", public_fold_rows)
-    if subject_rows:
-        write_csv(run_dir / "per_subject_summary.csv", subject_rows)
+    write_csv(run_dir / "per_subject_summary.csv", subject_rows)
 
     summary = {
         "baseline": "spdnet",
