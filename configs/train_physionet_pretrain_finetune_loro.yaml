@@ -26,7 +26,7 @@ data:
 
   imaged: [true]
   executed: [false]
-  # Nested because both task types belong to the same four-class experiment.
+  # Use [[unilateral_fist]] for two classes, or the setting below for four.
   task_types: [[unilateral_fist]]
 
   # Paired time fields follow train_grid.yaml's grid syntax.

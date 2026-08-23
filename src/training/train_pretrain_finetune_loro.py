@@ -440,7 +440,11 @@ def _run_metrics(
     }
 
 
-def summarize_subjects(run_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def summarize_subjects(
+    run_rows: list[dict[str, Any]],
+    *,
+    num_classes: int,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for subject_id in sorted({str(row["target_subject"]) for row in run_rows}):
         subject_runs = [row for row in run_rows if row["target_subject"] == subject_id]
@@ -458,11 +462,11 @@ def summarize_subjects(run_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "min_run_accuracy": min(accuracies),
                 "max_run_accuracy": max(accuracies),
                 "pooled_trial_accuracy": float((pooled_true == pooled_pred).mean()),
-                "pooled_four_class_macro_f1": float(
+                "pooled_macro_f1": float(
                     f1_score(
                         pooled_true,
                         pooled_pred,
-                        labels=np.arange(4),
+                        labels=np.arange(num_classes),
                         average="macro",
                         zero_division=0,
                     )
@@ -584,9 +588,10 @@ def main(argv: list[str] | None = None) -> int:
         load_or_preprocess_spd_with_runs(data_cfg, cache_dir)
     )
     num_classes = len(class_names)
-    if num_classes != 4:
+    if num_classes < 2:
         raise ValueError(
-            f"This experiment expects four classes, got {num_classes}: {class_names}."
+            f"This experiment needs at least two classes, got "
+            f"{num_classes}: {class_names}."
         )
     run_map = validate_protocol(
         y,
@@ -919,7 +924,7 @@ def main(argv: list[str] | None = None) -> int:
         for row in run_rows
     ]
     _write_csv(run_dir / "per_run_results.csv", public_run_rows)
-    subject_rows = summarize_subjects(run_rows)
+    subject_rows = summarize_subjects(run_rows, num_classes=num_classes)
     _write_csv(run_dir / "per_subject_summary.csv", subject_rows)
     pooled_true = np.concatenate([row["_y_true"] for row in run_rows])
     pooled_pred = np.concatenate([row["_y_pred"] for row in run_rows])
@@ -943,7 +948,7 @@ def main(argv: list[str] | None = None) -> int:
             else 0.0
         ),
         "pooled_trial_accuracy": float((pooled_true == pooled_pred).mean()),
-        "pooled_four_class_macro_f1": float(
+        "pooled_macro_f1": float(
             f1_score(
                 pooled_true,
                 pooled_pred,
