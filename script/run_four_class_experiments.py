@@ -1,4 +1,4 @@
-"""Run subject-specific four-class PhysioNet baselines and ablations.
+"""Run subject-specific PhysioNet baselines and ablations.
 
 Every model is evaluated on the same target subjects. A target run is held
 out once, split approximately 50/50 into validation and test, and its test
@@ -32,8 +32,17 @@ MDM_CONFIG = PROJECT_ROOT / "configs" / "mdm_physionet.yaml"
 SPDNET_CONFIG = PROJECT_ROOT / "configs" / "spdnet_physionet.yaml"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "experiments" / "results" / "four_class"
 
-TASK_TYPES_GRID = [["unilateral_fist", "both"]]
-EXPECTED_CLASSES = {"left_hand", "right_hand", "hands", "feet"}
+DEFAULT_TASK_TYPES = ("unilateral_fist", "both")
+TASK_CLASS_NAMES = {
+    ("unilateral_fist", "both"): {
+        "left_hand",
+        "right_hand",
+        "hands",
+        "feet",
+    },
+    ("unilateral_fist",): {"left_hand", "right_hand"},
+    ("both",): {"hands", "feet"},
+}
 SUBJECT_COLUMNS = (
     "Subject",
     "Trials",
@@ -98,11 +107,38 @@ def read_subject_table(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def parse_task_types(value: Any) -> tuple[str, ...]:
+    """Accept a short CLI form or the equivalent train-grid YAML form."""
+
+    if isinstance(value, tuple):
+        parsed = list(value)
+    elif isinstance(value, list):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            raise argparse.ArgumentTypeError("task types cannot be empty")
+        loaded = yaml.safe_load(text)
+        parsed = loaded if isinstance(loaded, list) else text.split(",")
+    if len(parsed) == 1 and isinstance(parsed[0], list):
+        parsed = parsed[0]
+    normalized = tuple(str(item).strip() for item in parsed if str(item).strip())
+    if normalized not in TASK_CLASS_NAMES:
+        choices = "unilateral_fist,both; unilateral_fist; or both"
+        raise argparse.ArgumentTypeError(
+            f"unsupported task types {normalized!r}; choose {choices}"
+        )
+    return normalized
+
+
 def make_four_class_config(
-    base: dict[str, Any], output_dir: Path, subjects: str | None
+    base: dict[str, Any],
+    output_dir: Path,
+    subjects: str | None,
+    task_types: tuple[str, ...],
 ) -> dict[str, Any]:
     config = deepcopy(base)
-    config.setdefault("data", {})["task_types"] = deepcopy(TASK_TYPES_GRID)
+    config.setdefault("data", {})["task_types"] = [list(task_types)]
     if subjects is not None:
         config["data"]["subjects"] = subjects
     config.setdefault("output", {})["dir"] = str(output_dir.resolve())
@@ -113,13 +149,14 @@ def make_transformer_config(
     base: dict[str, Any],
     output_dir: Path,
     subjects: str | None,
+    task_types: tuple[str, ...],
     *,
     resting_length: float,
     metric: str = "learnable-metric",
     classifier_type: str = "mdm",
     single_band: bool = False,
 ) -> dict[str, Any]:
-    config = make_four_class_config(base, output_dir, subjects)
+    config = make_four_class_config(base, output_dir, subjects, task_types)
     config["data"]["epoch_slice"] = [[-float(resting_length), 4.0]]
     if single_band:
         config["data"]["filter_bank"] = [[[8, 30]]]
@@ -129,8 +166,11 @@ def make_transformer_config(
 
 
 def build_configs(
-    campaign_dir: Path, subjects: str | None
+    campaign_dir: Path,
+    subjects: str | None,
+    task_types: tuple[str, ...] = DEFAULT_TASK_TYPES,
 ) -> dict[str, tuple[Path, Path, bool]]:
+    task_types = parse_task_types(task_types)
     transformer_base = load_yaml(TRANSFORMER_CONFIG)
     if subjects is None and transformer_base.get("data", {}).get("subjects") in {
         None,
@@ -155,6 +195,7 @@ def build_configs(
                 transformer_base,
                 raw_dir / name,
                 subjects,
+                task_types,
                 resting_length=rest,
             ),
             transformer_runner,
@@ -166,6 +207,7 @@ def build_configs(
                 transformer_base,
                 raw_dir / single_name,
                 subjects,
+                task_types,
                 resting_length=rest,
                 single_band=True,
             ),
@@ -178,6 +220,7 @@ def build_configs(
             transformer_base,
             raw_dir / "spd_transformer_fixed_log_euclidean",
             subjects,
+            task_types,
             resting_length=1.0,
             metric="log-euclidean",
         ),
@@ -189,6 +232,7 @@ def build_configs(
             transformer_base,
             raw_dir / "spd_transformer_linear_head",
             subjects,
+            task_types,
             resting_length=1.0,
             classifier_type="pooling",
         ),
@@ -202,7 +246,9 @@ def build_configs(
         "spdnet": (SPDNET_CONFIG, "spdnet_baseline.py", True),
     }
     for name, (base_path, filename, uses_device) in baseline_specs.items():
-        config = make_four_class_config(load_yaml(base_path), raw_dir / name, subjects)
+        config = make_four_class_config(
+            load_yaml(base_path), raw_dir / name, subjects, task_types
+        )
         config.setdefault("training", {})["subject_specific"] = [True]
         config["training"]["held_out_run_validation_size"] = [0.5]
         specs[name] = (
@@ -214,8 +260,8 @@ def build_configs(
     commands: dict[str, tuple[Path, Path, bool]] = {}
     manifest: dict[str, Any] = {
         "protocol": "subject-specific leave-one-run-out; held-out run split 50/50 validation/test",
-        "task_types": TASK_TYPES_GRID[0],
-        "expected_classes": sorted(EXPECTED_CLASSES),
+        "task_types": list(task_types),
+        "expected_classes": sorted(TASK_CLASS_NAMES[task_types]),
         "subject_aggregation": "pooled held-out test-trial predictions",
         "p_value": "two-sided paired Wilcoxon signed-rank test on subject accuracies",
         "runs": {},
@@ -276,10 +322,10 @@ def load_baseline_record(root: Path) -> RunRecord:
     )
 
 
-def validate_record(record: RunRecord) -> None:
-    if set(record.class_names) != EXPECTED_CLASSES:
+def validate_record(record: RunRecord, expected_classes: set[str]) -> None:
+    if set(record.class_names) != expected_classes:
         raise ValueError(
-            f"Expected {sorted(EXPECTED_CLASSES)} in {record.source}, got "
+            f"Expected {sorted(expected_classes)} in {record.source}, got "
             f"{record.class_names}."
         )
     identifiers = [row["Subject"] for row in record.subjects]
@@ -365,6 +411,9 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def summarize_campaign(campaign_dir: Path) -> tuple[Path, Path, Path]:
+    manifest = read_json(campaign_dir / "manifest.json")
+    task_types = parse_task_types(manifest.get("task_types", DEFAULT_TASK_TYPES))
+    expected_classes = TASK_CLASS_NAMES[task_types]
     raw = campaign_dir / "raw"
     complete = {
         rest: load_transformer_record(
@@ -385,7 +434,7 @@ def summarize_campaign(campaign_dir: Path) -> tuple[Path, Path, Path]:
     spdnet = load_baseline_record(raw / "spdnet")
     records = [*complete.values(), *single.values(), fixed, linear, csp, mdm, spdnet]
     for record in records:
-        validate_record(record)
+        validate_record(record, expected_classes)
 
     proposed = complete[1.0]
     baseline_rows = [
@@ -444,6 +493,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--subjects",
         help="Target subjects, e.g. 1 or 1-10; overrides each generated config.",
     )
+    parser.add_argument(
+        "--task-types",
+        type=parse_task_types,
+        default=DEFAULT_TASK_TYPES,
+        metavar="TASKS",
+        help=(
+            "PhysioNet task selection: unilateral_fist,both (four classes), "
+            "unilateral_fist (left/right), or both (hands/feet)."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--summarize-only", type=Path, metavar="CAMPAIGN_DIR")
@@ -463,8 +522,11 @@ def main(argv: list[str] | None = None) -> int:
         / datetime.now().strftime("%Y%m%d_%H%M%S")
     )
     campaign_dir.mkdir(parents=True, exist_ok=False)
-    commands = build_configs(campaign_dir, args.subjects)
-    print(f"Four-class subject-specific campaign: {campaign_dir}")
+    commands = build_configs(campaign_dir, args.subjects, args.task_types)
+    print(
+        "Subject-specific campaign "
+        f"({','.join(args.task_types)}): {campaign_dir}"
+    )
     for config_path, runner, uses_device in commands.values():
         command = [sys.executable, str(runner), "--config", str(config_path)]
         if args.device and uses_device:
