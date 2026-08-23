@@ -28,7 +28,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import yaml
-from sklearn.metrics import confusion_matrix, f1_score
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    cohen_kappa_score,
+    confusion_matrix,
+    f1_score,
+)
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Subset
 
@@ -459,21 +464,17 @@ def summarize_subjects(
     rows: list[dict[str, Any]] = []
     for subject_id in sorted({str(row["target_subject"]) for row in run_rows}):
         subject_runs = [row for row in run_rows if row["target_subject"] == subject_id]
-        accuracies = [float(row["test_accuracy"]) for row in subject_runs]
         pooled_true = np.concatenate([row["_y_true"] for row in subject_runs])
         pooled_pred = np.concatenate([row["_y_pred"] for row in subject_runs])
         rows.append(
             {
-                "target_subject": subject_id,
-                "n_test_runs": len(subject_runs),
-                "mean_run_accuracy": statistics.fmean(accuracies),
-                "std_run_accuracy": (
-                    statistics.stdev(accuracies) if len(accuracies) > 1 else 0.0
+                "Subject": subject_id,
+                "Trials": int(pooled_true.size),
+                "Accuracy (%)": float((pooled_true == pooled_pred).mean() * 100.0),
+                "Balanced Accuracy (%)": float(
+                    balanced_accuracy_score(pooled_true, pooled_pred) * 100.0
                 ),
-                "min_run_accuracy": min(accuracies),
-                "max_run_accuracy": max(accuracies),
-                "pooled_trial_accuracy": float((pooled_true == pooled_pred).mean()),
-                "pooled_macro_f1": float(
+                "Macro-F1": float(
                     f1_score(
                         pooled_true,
                         pooled_pred,
@@ -482,6 +483,7 @@ def summarize_subjects(
                         zero_division=0,
                     )
                 ),
+                "Cohen’s κ": float(cohen_kappa_score(pooled_true, pooled_pred)),
             }
         )
     return rows
@@ -990,7 +992,7 @@ def main(argv: list[str] | None = None) -> int:
     _write_csv(run_dir / "per_subject_summary.csv", subject_rows)
     pooled_true = np.concatenate([row["_y_true"] for row in run_rows])
     pooled_pred = np.concatenate([row["_y_pred"] for row in run_rows])
-    subject_mean_accuracies = [float(row["mean_run_accuracy"]) for row in subject_rows]
+    subject_accuracies = [float(row["Accuracy (%)"]) / 100.0 for row in subject_rows]
     overall = {
         "protocol": "other-subject 70/15/15 pretraining plus target-run validation/test adaptation",
         "pretrain_validation_fraction": float(
@@ -1001,15 +1003,16 @@ def main(argv: list[str] | None = None) -> int:
         "n_target_subjects": len(subject_rows),
         "class_names": class_names,
         "chance_accuracy": 1.0 / num_classes,
-        "mean_of_subject_mean_run_accuracies": statistics.fmean(
-            subject_mean_accuracies
-        ),
+        "mean_subject_accuracy": statistics.fmean(subject_accuracies),
         "between_subject_accuracy_sd": (
-            statistics.stdev(subject_mean_accuracies)
-            if len(subject_mean_accuracies) > 1
+            statistics.stdev(subject_accuracies)
+            if len(subject_accuracies) > 1
             else 0.0
         ),
         "pooled_trial_accuracy": float((pooled_true == pooled_pred).mean()),
+        "pooled_balanced_accuracy": float(
+            balanced_accuracy_score(pooled_true, pooled_pred)
+        ),
         "pooled_macro_f1": float(
             f1_score(
                 pooled_true,
@@ -1019,6 +1022,7 @@ def main(argv: list[str] | None = None) -> int:
                 zero_division=0,
             )
         ),
+        "pooled_cohen_kappa": float(cohen_kappa_score(pooled_true, pooled_pred)),
     }
     with (run_dir / "overall_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(overall, handle, indent=2)
@@ -1041,7 +1045,7 @@ def main(argv: list[str] | None = None) -> int:
     _write_csv(run_dir / "pooled_confusion_matrix.csv", confusion_rows)
     print(
         "\nPer-subject run-adaptation accuracy: "
-        f"{overall['mean_of_subject_mean_run_accuracies'] * 100:.2f} +/- "
+        f"{overall['mean_subject_accuracy'] * 100:.2f} +/- "
         f"{overall['between_subject_accuracy_sd'] * 100:.2f}% "
         "(mean +/- between-subject SD)"
     )

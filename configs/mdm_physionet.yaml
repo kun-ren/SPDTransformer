@@ -9,6 +9,8 @@ data:
   covariance_signal_scale: ["auto"]
   replace_covariance_diagonal_with_raw_energy: [false]
   brain_region_mode: [null]
+  # Subjects evaluated independently: use 1 for one target or 1-10 for a batch.
+  # S088 is omitted because it uses a different sampling rate.
   subjects: 1-87,89-109
   #channels: "FC5, FC3, FC1, FCz, FC2, FC4, FC6, C5, C3, C1, Cz, C2, C4, C6, CP5, CP3, CP1, CPz, CP2, CP4, CP6"
   channels:
@@ -28,8 +30,6 @@ data:
   imaged: true
   executed: false
   task_types: unilateral_fist
-  test_size: [0.2]
-  val_size: [0.0]
   allow_subject_overlap: [true]
 
 model:
@@ -42,7 +42,11 @@ model:
 
 training:
   seed: [42]
-  n_splits: [5]
+  # Each run is held out once and split approximately 50/50 into
+  # validation/test. All other runs from the same subject are training data.
+  held_out_run_validation_size: [0.5]
+  # Fit class prototypes independently for every subject.
+  subject_specific: [true]
   split_file: null
   # Used only by classifier_type="differentiable".
   epochs: [100]
@@ -50,10 +54,12 @@ training:
   learning_rate: [0.01]
   weight_decay: [0.0]
   gradient_clip_norm: [1.0]
+  early_stopping_patience: [12]
+  early_stopping_min_delta: [0.0008]
   precision: ["float32"]
   num_workers: [0]
   pin_memory: [true]
 
 output:
-  dir: experiments/results/mdm_baseline_physionet
+  dir: experiments/results/mdm_subject_specific_physionet
   dataset_cache_dir: experiments/cache/mdm_preprocessed_datasets

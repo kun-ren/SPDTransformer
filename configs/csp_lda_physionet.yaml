@@ -4,7 +4,8 @@ data:
   filter_bank:
     - [8, 30]
   sfreq: [160]
-  # S088, S092, S100, and S104 have incomplete/anomalous recordings.
+  # Subjects evaluated independently. Set to 1 for one target or 1-10 for a
+  # batch. S088 is omitted because it uses a different sampling rate.
   subjects: 1-87,89-109
   # null keeps all 64 EEG channels from EEGMMIDB.
   channels: null
@@ -25,17 +26,22 @@ data:
   imaged: true
   executed: false
   task_types: unilateral_fist
-  test_size: [0.2]
-  val_size: [0.0]
-  allow_subject_overlap: [true,false]
+  # Subject-specific mode below enforces one subject in every run split; this
+  # legacy option is retained as a singleton for grid compatibility.
+  allow_subject_overlap: [true]
 
 training:
   seed: [42]
-  n_splits: [5]
+  # Each run is held out once and split approximately 50/50 into
+  # validation/test. All other runs from the same subject are training data.
+  held_out_run_validation_size: [0.5]
+  # Fit a separate CSP+LDA model inside each subject. No trial from another
+  # subject can enter that subject's train, validation, or test split.
+  subject_specific: [true]
 
 model:
   n_components: 6
   mne_log_level: WARNING
 
 output:
-  dir: experiments/results/csp_lda_baseline_physionet
+  dir: experiments/results/csp_lda_subject_specific_physionet

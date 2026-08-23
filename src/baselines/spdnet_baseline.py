@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import random
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,10 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.baselines.baseline_utils import (
     DEFAULT_CONFIG,
     PROJECT_ROOT,
@@ -20,8 +25,10 @@ from src.baselines.baseline_utils import (
     expand_data_training_experiments,
     load_spd_like_train,
     load_yaml,
+    make_subject_specific_loro_splits,
     parse_bool,
     save_json,
+    summarize_subject_fold_metrics,
 )
 
 
@@ -186,7 +193,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "SPDNet baseline using one covariance matrix per trial and "
-            "stratified K-fold evaluation without a validation split."
+            "optional subject-specific leave-one-run-out "
+            "train/validation/test evaluation."
         )
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -343,7 +351,7 @@ def evaluate(
     loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     model.eval()
     total_loss = 0.0
     total_samples = 0
@@ -368,6 +376,8 @@ def evaluate(
 
     metrics["cohen_kappa"] = float(cohen_kappa_score(y_true, y_pred))
     metrics["loss"] = float(total_loss / max(total_samples, 1))
+    metrics["y_true"] = np.asarray(y_true, dtype=np.int64)
+    metrics["y_pred"] = np.asarray(y_pred, dtype=np.int64)
     return metrics
 
 
@@ -392,7 +402,7 @@ def single_trial_covariances(x_spd: np.ndarray) -> np.ndarray:
 def validate_spdnet_cv_config(
     training_cfg: dict[str, Any],
     data_cfg: dict[str, Any],
-) -> tuple[int, int, bool]:
+) -> tuple[int, int, bool, float]:
     n_splits = int(training_cfg.get("n_splits", 5))
     seed = int(training_cfg.get("seed", 42))
     test_size = float(data_cfg.get("test_size", training_cfg.get("test_size", 0.2)))
@@ -406,19 +416,27 @@ def validate_spdnet_cv_config(
     )
     if n_splits < 2:
         raise ValueError(f"training.n_splits must be at least 2, got {n_splits}.")
-    if not np.isclose(val_size, 0.0):
+    subject_specific = parse_bool(
+        training_cfg.get("subject_specific", False), default=False
+    )
+    held_out_run_validation_size = float(
+        training_cfg.get("held_out_run_validation_size", 0.5)
+    )
+    if subject_specific and not 0.0 < held_out_run_validation_size < 1.0:
+        raise ValueError("held_out_run_validation_size must be between 0 and 1.")
+    if not subject_specific and not np.isclose(val_size, 0.0):
         raise ValueError(
             "SPDNet K-fold evaluation does not use a validation dataset; "
             f"set val_size to 0.0, got {val_size}."
         )
     expected_test_size = 1.0 / n_splits
-    if not np.isclose(test_size, expected_test_size):
+    if not subject_specific and not np.isclose(test_size, expected_test_size):
         raise ValueError(
             "For K-fold evaluation, test_size must equal 1 / n_splits; "
             f"got test_size={test_size} and n_splits={n_splits} "
             f"(expected {expected_test_size:.6f})."
         )
-    return n_splits, seed, allow_subject_overlap
+    return n_splits, seed, allow_subject_overlap, held_out_run_validation_size
 
 
 def make_spdnet_cv_splits(
@@ -512,19 +530,49 @@ def run_experiment(
 ) -> dict[str, Any]:
     data_cfg = experiment_cfg["data"]
     training_cfg = experiment_cfg["training"]
-    x_spd, y, subject_labels, class_names = load_spd_like_train(data_cfg)
+    (
+        n_splits,
+        seed,
+        allow_subject_overlap,
+        held_out_run_validation_size,
+    ) = validate_spdnet_cv_config(training_cfg, data_cfg)
+    subject_specific = parse_bool(
+        training_cfg.get("subject_specific", False), default=False
+    )
+    if subject_specific:
+        x_spd, y, subject_labels, run_labels, class_names = load_spd_like_train(
+            data_cfg, return_runs=True
+        )
+        fold_specs = make_subject_specific_loro_splits(
+            y,
+            subject_labels,
+            run_labels,
+            held_out_run_validation_size=held_out_run_validation_size,
+            seed=seed,
+        )
+    else:
+        x_spd, y, subject_labels, class_names = load_spd_like_train(data_cfg)
+        run_labels = None
+        fold_specs = [
+            (
+                "all",
+                fold_index,
+                train_idx,
+                np.empty(0, dtype=np.int64),
+                test_idx,
+            )
+            for fold_index, (train_idx, test_idx) in enumerate(
+                make_spdnet_cv_splits(
+                    y,
+                    subject_labels,
+                    n_splits=n_splits,
+                    seed=seed,
+                    allow_subject_overlap=allow_subject_overlap,
+                ),
+                start=1,
+            )
+        ]
     x_trial_spd = single_trial_covariances(x_spd)
-    n_splits, seed, allow_subject_overlap = validate_spdnet_cv_config(
-        training_cfg,
-        data_cfg,
-    )
-    folds = make_spdnet_cv_splits(
-        y,
-        subject_labels,
-        n_splits=n_splits,
-        seed=seed,
-        allow_subject_overlap=allow_subject_overlap,
-    )
 
     dtype = resolve_precision(training_cfg.get("precision", "float64"))
     batch_size = int(training_cfg.get("batch_size", 30))
@@ -542,6 +590,14 @@ def run_experiment(
     if gradient_clip_norm is not None:
         gradient_clip_norm = float(gradient_clip_norm)
     log_every = max(1, int(training_cfg.get("log_every", 10)))
+    early_stopping_patience = int(
+        training_cfg.get("early_stopping_patience", 20)
+    )
+    early_stopping_min_delta = float(
+        training_cfg.get("early_stopping_min_delta", 0.0)
+    )
+    if subject_specific and early_stopping_patience < 1:
+        raise ValueError("early_stopping_patience must be positive.")
 
     raw_dims = getattr(args, "dims", None)
     if raw_dims is None:
@@ -577,6 +633,20 @@ def run_experiment(
     run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(effective_cfg)}"
     run_dir.mkdir(parents=True, exist_ok=False)
     save_json(run_dir / "config.json", effective_cfg)
+    save_json(
+        run_dir / "splits.json",
+        [
+            {
+                "subject": subject if subject_specific else None,
+                "test_run": int(fold_index) if subject_specific else None,
+                "fold": None if subject_specific else fold_index,
+                "train_indices": train_idx.astype(int).tolist(),
+                "validation_indices": validation_idx.astype(int).tolist(),
+                "test_indices": test_idx.astype(int).tolist(),
+            }
+            for subject, fold_index, train_idx, validation_idx, test_idx in fold_specs
+        ],
+    )
 
     print(f"\n[SPDNet run {run_index}] {run_dir.name}")
     print(
@@ -587,13 +657,31 @@ def run_experiment(
         f"  dims={dims} epochs={epochs} batch_size={batch_size} "
         f"lr={learning_rate:g} weight_decay={weight_decay:g} "
         f"optimizer={optimizer_name} momentum={momentum:g} "
-        f"project_stiefel={project_stiefel} folds={n_splits}"
+        f"project_stiefel={project_stiefel} "
+        + (
+            f"run_splits={len(fold_specs)}"
+            if subject_specific
+            else f"folds={n_splits}"
+        )
     )
 
     fold_rows: list[dict[str, Any]] = []
-    for fold_index, (train_idx, test_idx) in enumerate(folds, start=1):
-        set_seed(seed + fold_index - 1)
-        fold_dir = run_dir / f"fold_{fold_index:02d}"
+    for spec_position, (
+        subject,
+        held_out_run,
+        train_idx,
+        validation_idx,
+        test_idx,
+    ) in enumerate(
+        fold_specs,
+        start=1,
+    ):
+        set_seed(seed + spec_position - 1)
+        fold_dir = (
+            run_dir / subject / f"test_R{int(held_out_run):02d}"
+            if subject_specific
+            else run_dir / f"fold_{held_out_run:02d}"
+        )
         fold_dir.mkdir(parents=True, exist_ok=False)
         model = SPDNetClassifier(
             dims=dims,
@@ -627,6 +715,19 @@ def run_experiment(
             shuffle=False,
             dtype=dtype,
         )
+        validation_loader = (
+            make_loader(
+                x_trial_spd,
+                y,
+                validation_idx,
+                batch_size,
+                num_workers,
+                shuffle=False,
+                dtype=dtype,
+            )
+            if subject_specific
+            else None
+        )
         test_loader = make_loader(
             x_trial_spd,
             y,
@@ -638,9 +739,18 @@ def run_experiment(
         )
 
         history_rows = []
+        best_validation_macro_f1 = -np.inf
+        best_epoch = 0
+        best_state: dict[str, torch.Tensor] | None = None
         print(
-            f"[SPDNet fold {fold_index}/{n_splits}] "
-            f"train={len(train_idx)} test={len(test_idx)}"
+            f"[SPDNet {'subject ' + subject + ' ' if subject_specific else ''}"
+            + (
+                f"test run R{int(held_out_run):02d}] "
+                if subject_specific
+                else f"fold {held_out_run}/{n_splits}] "
+            )
+            + f"train={len(train_idx)} validation={len(validation_idx)} "
+            f"test={len(test_idx)}"
         )
         for epoch in range(1, epochs + 1):
             train_loss = train_one_epoch(
@@ -652,20 +762,101 @@ def run_experiment(
                 gradient_clip_norm,
                 project_stiefel,
             )
-            history_rows.append({"epoch": epoch, "train_loss": train_loss})
+            history_row: dict[str, Any] = {
+                "epoch": epoch,
+                "train_loss": train_loss,
+            }
+            improved = False
+            if subject_specific:
+                train_epoch_metrics = evaluate(
+                    model, train_eval_loader, criterion, device
+                )
+                if validation_loader is None:
+                    raise RuntimeError("Subject-specific validation loader is missing.")
+                validation_metrics = evaluate(
+                    model, validation_loader, criterion, device
+                )
+                history_row.update(
+                    {
+                        "train_accuracy": train_epoch_metrics["accuracy"],
+                        "train_macro_f1": train_epoch_metrics["macro_f1"],
+                        "validation_loss": validation_metrics["loss"],
+                        "validation_accuracy": validation_metrics["accuracy"],
+                        "validation_macro_f1": validation_metrics["macro_f1"],
+                        "validation_cohen_kappa": validation_metrics[
+                            "cohen_kappa"
+                        ],
+                    }
+                )
+                improved = (
+                    validation_metrics["macro_f1"]
+                    > best_validation_macro_f1 + early_stopping_min_delta
+                )
+                if improved:
+                    best_validation_macro_f1 = float(
+                        validation_metrics["macro_f1"]
+                    )
+                    best_epoch = epoch
+                    best_state = {
+                        name: tensor.detach().cpu().clone()
+                        for name, tensor in model.state_dict().items()
+                    }
+            history_rows.append(history_row)
             if epoch == 1 or epoch % log_every == 0 or epoch == epochs:
-                print(
-                    f"  fold {fold_index}/{n_splits} epoch {epoch:03d}/{epochs} | "
+                message = (
+                    f"  {'subject ' + subject + ' ' if subject_specific else ''}"
+                    + (
+                        f"test run R{int(held_out_run):02d} "
+                        if subject_specific
+                        else f"fold {held_out_run}/{n_splits} "
+                    )
+                    + f"epoch {epoch:03d}/{epochs} | "
                     f"train_loss={train_loss:.4f}"
                 )
+                if subject_specific:
+                    message += (
+                        f" train_accuracy={history_row['train_accuracy']:.4f} "
+                        f"train_mf1={history_row['train_macro_f1']:.4f} | "
+                        f"validation_loss={history_row['validation_loss']:.4f} "
+                        f"validation_accuracy="
+                        f"{history_row['validation_accuracy']:.4f} "
+                        f"validation_mf1="
+                        f"{history_row['validation_macro_f1']:.4f}"
+                        f"{' [best]' if improved else ''}"
+                    )
+                print(message)
+            if (
+                subject_specific
+                and epoch - best_epoch >= early_stopping_patience
+            ):
+                print(
+                    f"  early stopping at epoch {epoch}; best epoch={best_epoch}, "
+                    f"validation_mf1={best_validation_macro_f1:.4f}."
+                )
+                break
+
+        if subject_specific:
+            if best_state is None:
+                raise RuntimeError("SPDNet did not produce a validation checkpoint.")
+            model.load_state_dict(best_state)
 
         train_metrics = evaluate(model, train_eval_loader, criterion, device)
+        validation_metrics = (
+            evaluate(model, validation_loader, criterion, device)
+            if validation_loader is not None
+            else None
+        )
         test_metrics = evaluate(model, test_loader, criterion, device)
         result_rows = []
-        for split_name, split_idx, metrics in (
+        result_specs = [
             ("train", train_idx, train_metrics),
-            ("test", test_idx, test_metrics),
-        ):
+        ]
+        if validation_metrics is not None:
+            result_specs.append(
+                ("validation", validation_idx, validation_metrics)
+            )
+        result_specs.append(("test", test_idx, test_metrics))
+        for split_name, split_idx, metrics in result_specs:
             result_rows.append(
                 {
                     "split": split_name,
@@ -684,36 +875,117 @@ def run_experiment(
                 "class_names": class_names,
                 "config": effective_cfg,
                 "dims": dims,
-                "fold": fold_index,
-                "epochs": epochs,
+                "subject": subject if subject_specific else None,
+                "test_run": int(held_out_run) if subject_specific else None,
+                "fold": None if subject_specific else held_out_run,
+                "epochs_requested": epochs,
+                "epochs_completed": len(history_rows),
+                "best_epoch": best_epoch if subject_specific else epochs,
+                "best_validation_macro_f1": (
+                    best_validation_macro_f1 if subject_specific else None
+                ),
                 "train_indices": train_idx,
+                "validation_indices": validation_idx,
                 "test_indices": test_idx,
             },
             fold_dir / "final_model.pt",
         )
 
         fold_row = {
-            "fold": fold_index,
+            **({"subject": subject} if subject_specific else {}),
+            **(
+                {"test_run": int(held_out_run)}
+                if subject_specific
+                else {"fold": held_out_run}
+            ),
             "n_train": int(len(train_idx)),
+            "n_validation": int(len(validation_idx)),
             "n_test": int(len(test_idx)),
+            "best_epoch": best_epoch if subject_specific else epochs,
+            "validation_loss": (
+                validation_metrics["loss"]
+                if validation_metrics is not None
+                else None
+            ),
+            "validation_accuracy": (
+                validation_metrics["accuracy"]
+                if validation_metrics is not None
+                else None
+            ),
+            "validation_macro_f1": (
+                validation_metrics["macro_f1"]
+                if validation_metrics is not None
+                else None
+            ),
+            "validation_cohen_kappa": (
+                validation_metrics["cohen_kappa"]
+                if validation_metrics is not None
+                else None
+            ),
             "loss": test_metrics["loss"],
             "accuracy": test_metrics["accuracy"],
             "macro_f1": test_metrics["macro_f1"],
             "cohen_kappa": test_metrics["cohen_kappa"],
         }
+        if subject_specific:
+            fold_row["_y_true"] = test_metrics["y_true"].astype(int).tolist()
+            fold_row["_y_pred"] = test_metrics["y_pred"].astype(int).tolist()
         fold_rows.append(fold_row)
         print(
-            f"[SPDNet fold {fold_index}/{n_splits}] "
-            f"accuracy={fold_row['accuracy']:.4f} "
-            f"mf1={fold_row['macro_f1']:.4f} "
-            f"kappa={fold_row['cohen_kappa']:.4f}",
+            f"[SPDNet {'subject ' + subject + ' ' if subject_specific else ''}"
+            + (
+                f"test run R{int(held_out_run):02d}] "
+                if subject_specific
+                else f"fold {held_out_run}/{n_splits}] "
+            )
+            + (
+                f"validation_accuracy={fold_row['validation_accuracy']:.4f} "
+                f"validation_mf1={fold_row['validation_macro_f1']:.4f} | "
+                if subject_specific
+                else ""
+            )
+            + f"test_accuracy={fold_row['accuracy']:.4f} "
+            f"test_mf1={fold_row['macro_f1']:.4f} "
+            f"test_kappa={fold_row['cohen_kappa']:.4f}",
             flush=True,
         )
 
     aggregates = aggregate_spdnet_fold_metrics(fold_rows)
-    print_spdnet_fold_summary(fold_rows, aggregates)
-    write_csv(run_dir / "fold_results.csv", fold_rows)
-    write_csv(run_dir / "results.csv", fold_rows)
+    subject_rows = (
+        summarize_subject_fold_metrics(
+            fold_rows,
+            (
+                "validation_accuracy",
+                "validation_macro_f1",
+                "validation_cohen_kappa",
+                *SPDNET_REPORT_METRICS,
+            ),
+        )
+        if subject_specific
+        else []
+    )
+    if subject_specific:
+        print("\nSPDNet pooled subject-specific test results")
+        for row in subject_rows:
+            print(
+                f"  {row['Subject']}: trials={row['Trials']} "
+                f"accuracy={row['Accuracy (%)'] / 100.0:.4f} "
+                f"balanced_accuracy={row['Balanced Accuracy (%)'] / 100.0:.4f} "
+                f"macro_f1={row['Macro-F1']:.4f} "
+                f"kappa={row['Cohen’s κ']:.4f}"
+            )
+    else:
+        print_spdnet_fold_summary(fold_rows, aggregates)
+    public_fold_rows = [
+        {key: value for key, value in row.items() if not key.startswith("_")}
+        for row in fold_rows
+    ]
+    write_csv(run_dir / "fold_results.csv", public_fold_rows)
+    write_csv(run_dir / "results.csv", public_fold_rows)
+    if subject_specific:
+        write_csv(run_dir / "per_run_results.csv", public_fold_rows)
+    if subject_rows:
+        write_csv(run_dir / "per_subject_summary.csv", subject_rows)
 
     summary = {
         "baseline": "spdnet",
@@ -732,16 +1004,25 @@ def run_experiment(
         "class_names": class_names,
         "evaluation": {
             "strategy": (
-                "stratified_kfold"
-                if allow_subject_overlap
-                else "stratified_group_kfold"
+                "subject_specific_leave_one_run_out"
+                if subject_specific
+                else (
+                    "stratified_kfold"
+                    if allow_subject_overlap
+                    else "stratified_group_kfold"
+                )
             ),
-            "n_splits": n_splits,
-            "test_size_per_fold": 1.0 / n_splits,
-            "validation_size": 0.0,
+            "n_splits": None if subject_specific else n_splits,
+            "test_size_per_fold": None if subject_specific else 1.0 / n_splits,
+            "held_out_run_validation_size": (
+                held_out_run_validation_size if subject_specific else None
+            ),
             "seed": seed,
         },
-        "folds": fold_rows,
+        "folds": public_fold_rows,
+        "runs": public_fold_rows if subject_specific else [],
+        "splits_file": "splits.json",
+        "subjects": subject_rows,
         "aggregates": aggregates,
     }
     save_json(run_dir / "summary.json", summary)

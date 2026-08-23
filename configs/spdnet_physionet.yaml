@@ -10,6 +10,8 @@ data:
   covariance_signal_scale: ["auto"]
   # Classic SPDNet consumes a standard covariance matrix directly.
   replace_covariance_diagonal_with_raw_energy: [false]
+  # Subjects evaluated independently: use 1 for one target or 1-10 for a batch.
+  # S088 is omitted because it uses a different sampling rate.
   subjects: 1-87,89-109
   # BCI IV-2a uses a different 22-channel montage, so use
   # configs/spdnet_bci_iv_2a.yaml or clear/change channels when switching.
@@ -34,9 +36,9 @@ data:
   executed: false
   # Match the CSP/MDM PhysioNet baselines: left-vs-right unilateral imagery.
   task_types: unilateral_fist
-  test_size: [0.2]
-  val_size: [0.0]
-  allow_subject_overlap: [true,false]
+  # Subject-specific mode below guarantees subject isolation itself. Keep this
+  # as a singleton so the grid does not launch duplicate equivalent jobs.
+  allow_subject_overlap: [true]
 
 model:
   # Original SPDNet-style three-stage dimensionality reduction: 64->32->16->8.
@@ -47,8 +49,12 @@ model:
 
 training:
   seed: [42]
+  # Train a fresh SPDNet independently for every subject/held-out-run split.
+  subject_specific: [true]
+  # Each run is held out once and split approximately 50/50 into
+  # validation/test. All other runs from the same subject are training data.
+  held_out_run_validation_size: [0.5]
   precision: ["float64"]
-  n_splits: [5]
   epochs: [200]
   batch_size: [30]
   spdnet_optimizer: ["sgd"]
@@ -56,9 +62,11 @@ training:
   spdnet_momentum: [0.0]
   spdnet_weight_decay: [0.0]
   gradient_clip_norm: [5.0]
+  early_stopping_patience: [20]
+  early_stopping_min_delta: [0.0008]
   log_every: [10]
   split_file: [null]
   num_workers: [0]
 
 output:
-  dir: experiments/results/spdnet_baseline
+  dir: experiments/results/spdnet_subject_specific_physionet

@@ -160,6 +160,153 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     raise ValueError(f"Cannot parse boolean value: {value!r}")
 
 
+def make_subject_specific_loro_splits(
+    y: np.ndarray,
+    subject_labels: np.ndarray,
+    run_labels: np.ndarray,
+    *,
+    held_out_run_validation_size: float = 0.5,
+    seed: int,
+) -> list[tuple[str, int, np.ndarray, np.ndarray, np.ndarray]]:
+    """Leave each run out and split that run into validation/test halves."""
+
+    from sklearn.model_selection import train_test_split
+
+    y = np.asarray(y, dtype=np.int64)
+    subject_labels = np.asarray(subject_labels, dtype=np.str_)
+    run_labels = np.asarray(run_labels, dtype=np.int16)
+    if not (len(y) == len(subject_labels) == len(run_labels)):
+        raise ValueError("y, subject_labels, and run_labels must align.")
+    if not 0.0 < held_out_run_validation_size < 1.0:
+        raise ValueError("held_out_run_validation_size must be between 0 and 1.")
+
+    expected_classes = set(np.unique(y).astype(int).tolist())
+    splits: list[tuple[str, int, np.ndarray, np.ndarray, np.ndarray]] = []
+    for subject_position, subject in enumerate(
+        sorted(np.unique(subject_labels).astype(str).tolist())
+    ):
+        subject_mask = subject_labels == subject
+        subject_classes = set(np.unique(y[subject_mask]).astype(int).tolist())
+        if subject_classes != expected_classes:
+            raise ValueError(
+                f"Subject {subject} has classes {sorted(subject_classes)}, "
+                f"expected {sorted(expected_classes)}."
+            )
+        subject_runs = sorted(
+            np.unique(run_labels[subject_mask]).astype(int).tolist()
+        )
+        if len(subject_runs) < 2:
+            raise ValueError(f"Subject {subject} needs at least two retained runs.")
+
+        for held_out_run in subject_runs:
+            train_idx = np.flatnonzero(
+                subject_mask & (run_labels != held_out_run)
+            ).astype(np.int64)
+            held_out_idx = np.flatnonzero(
+                subject_mask & (run_labels == held_out_run)
+            ).astype(np.int64)
+            train_classes = set(np.unique(y[train_idx]).astype(int).tolist())
+            if train_classes != expected_classes:
+                raise ValueError(
+                    f"Subject {subject} excluding run {held_out_run} has classes "
+                    f"{sorted(train_classes)}, expected {sorted(expected_classes)}."
+                )
+            held_out_counts = np.bincount(
+                y[held_out_idx], minlength=max(expected_classes) + 1
+            )
+            present_counts = held_out_counts[held_out_counts > 0]
+            if len(present_counts) == 0 or int(present_counts.min()) < 2:
+                raise ValueError(
+                    f"Subject {subject} run {held_out_run} cannot be split "
+                    "stratified into validation/test; class counts are "
+                    f"{held_out_counts.tolist()}."
+                )
+            validation_idx, test_idx = train_test_split(
+                held_out_idx,
+                test_size=1.0 - held_out_run_validation_size,
+                random_state=seed + subject_position * 1000 + held_out_run,
+                shuffle=True,
+                stratify=y[held_out_idx],
+            )
+            validation_idx = np.asarray(validation_idx, dtype=np.int64)
+            test_idx = np.asarray(test_idx, dtype=np.int64)
+            if (
+                np.intersect1d(train_idx, validation_idx).size
+                or np.intersect1d(train_idx, test_idx).size
+                or np.intersect1d(validation_idx, test_idx).size
+            ):
+                raise RuntimeError(
+                    f"Subject {subject} run {held_out_run} has split overlap."
+                )
+            if not (
+                np.all(subject_labels[train_idx] == subject)
+                and np.all(subject_labels[validation_idx] == subject)
+                and np.all(subject_labels[test_idx] == subject)
+                and np.all(run_labels[train_idx] != held_out_run)
+                and np.all(run_labels[validation_idx] == held_out_run)
+                and np.all(run_labels[test_idx] == held_out_run)
+            ):
+                raise RuntimeError(
+                    f"Subject/run leakage detected for {subject} run {held_out_run}."
+                )
+            splits.append(
+                (subject, held_out_run, train_idx, validation_idx, test_idx)
+            )
+    return splits
+
+
+def summarize_subject_fold_metrics(
+    rows: list[dict[str, Any]],
+    metric_names: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Pool held-out trial predictions into one publication row per subject.
+
+    Averaging run-level scores can give short runs too much weight and cannot
+    recover balanced accuracy.  Subject-specific trainers therefore attach
+    private ``_y_true``/``_y_pred`` arrays to each run row; these arrays are
+    pooled here and removed before the public run tables are written.
+    ``metric_names`` is retained for API compatibility with older callers.
+    """
+
+    del metric_names
+    from sklearn.metrics import (
+        accuracy_score,
+        balanced_accuracy_score,
+        cohen_kappa_score,
+        f1_score,
+    )
+
+    summaries: list[dict[str, Any]] = []
+    for subject in sorted({str(row["subject"]) for row in rows}):
+        subject_rows = [row for row in rows if str(row["subject"]) == subject]
+        if not all("_y_true" in row and "_y_pred" in row for row in subject_rows):
+            raise ValueError(
+                "Per-subject publication metrics require _y_true/_y_pred for "
+                f"every held-out run of {subject}."
+            )
+        y_true = np.concatenate(
+            [np.asarray(row["_y_true"], dtype=np.int64) for row in subject_rows]
+        )
+        y_pred = np.concatenate(
+            [np.asarray(row["_y_pred"], dtype=np.int64) for row in subject_rows]
+        )
+        summaries.append(
+            {
+                "Subject": subject,
+                "Trials": int(y_true.size),
+                "Accuracy (%)": float(accuracy_score(y_true, y_pred) * 100.0),
+                "Balanced Accuracy (%)": float(
+                    balanced_accuracy_score(y_true, y_pred) * 100.0
+                ),
+                "Macro-F1": float(
+                    f1_score(y_true, y_pred, average="macro", zero_division=0)
+                ),
+                "Cohen’s κ": float(cohen_kappa_score(y_true, y_pred)),
+            }
+        )
+    return summaries
+
+
 def optional_positive_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -225,7 +372,9 @@ def get_split_indices(
 
 def load_spd_like_train(
     data_cfg: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    *,
+    return_runs: bool = False,
+) -> tuple:
     data_cfg = normalize_data_time_config(data_cfg)
     dataset_name = normalize_dataset_name(data_cfg.get("dataset", "physionet_mi"))
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
@@ -237,8 +386,9 @@ def load_spd_like_train(
         dataset_name=dataset_name,
     )
 
+    run_labels = None
     if dataset_name == "physionet_mi":
-        x_spd, y, class_names, subject_labels = preprocess_spd(
+        loaded = preprocess_spd(
             filter_bank=filter_bank,
             root_dir=str(
                 data_cfg.get("root_dir", "data/MNE-eegbci-data/files/eegmmidb/1.0.0")
@@ -275,6 +425,7 @@ def load_spd_like_train(
                 default=False,
             ),
             return_subjects=True,
+            return_runs=return_runs,
             covariance_signal_scale=covariance_signal_scale,
             replace_covariance_diagonal_with_raw_energy=parse_bool(
                 data_cfg.get("replace_covariance_diagonal_with_raw_energy", False),
@@ -283,7 +434,16 @@ def load_spd_like_train(
             brain_region_mode=data_cfg.get("brain_region_mode"),
             output_dtype=data_cfg.get("covariance_output_dtype", "float32"),
         )
+        if return_runs:
+            x_spd, y, class_names, subject_labels, run_labels = loaded
+        else:
+            x_spd, y, class_names, subject_labels = loaded
     elif dataset_name == "bnci2014_001":
+        if return_runs:
+            raise ValueError(
+                "Run-based baseline evaluation is currently supported for "
+                "PhysioNet-MI only."
+            )
         x_spd, y, class_names, subject_labels = preprocess_bci_iv_2a_spd(
             filter_bank=filter_bank,
             root_dir=str(data_cfg.get("root_dir", "data")),
@@ -331,17 +491,24 @@ def load_spd_like_train(
 
     if not np.isfinite(x_spd).all():
         raise ValueError("SPD preprocessing returned NaN or Inf values.")
-    return (
+    result = (
         x_spd.astype(np.float64),
         y.astype(np.int64),
         np.asarray(subject_labels, dtype=np.str_),
         list(class_names),
     )
+    if return_runs:
+        if run_labels is None or len(run_labels) != len(y):
+            raise RuntimeError("PhysioNet run labels are missing or misaligned.")
+        return result[:3] + (np.asarray(run_labels, dtype=np.int16),) + result[3:]
+    return result
 
 
 def load_segmented_epochs_like_train(
     data_cfg: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], list[list[float]]]:
+    *,
+    return_runs: bool = False,
+) -> tuple:
     data_cfg = normalize_data_time_config(data_cfg)
     dataset_name = normalize_dataset_name(data_cfg.get("dataset", "physionet_mi"))
     filter_bank = normalize_filter_bank(data_cfg["filter_bank"])
@@ -360,6 +527,7 @@ def load_segmented_epochs_like_train(
     bands = []
     labels = None
     subject_labels = None
+    run_labels = None
     class_names = None
 
     if dataset_name == "physionet_mi":
@@ -394,16 +562,21 @@ def load_segmented_epochs_like_train(
                     data_cfg.get("autoreject_force_rebuild", False),
                     default=False,
                 ),
+                return_runs=return_runs,
             )
             x_band = dataset["X"]
             if labels is None:
                 labels = dataset["y"]
                 subject_labels = dataset["subject"]
+                if return_runs:
+                    run_labels = dataset["run"]
             else:
                 if not np.array_equal(labels, dataset["y"]):
                     raise RuntimeError("Labels changed across frequency bands.")
                 if not np.array_equal(subject_labels, dataset["subject"]):
                     raise RuntimeError("Subject order changed across frequency bands.")
+                if return_runs and not np.array_equal(run_labels, dataset["run"]):
+                    raise RuntimeError("Run order changed across frequency bands.")
 
             x_segments = segment_epochs(
                 x_band,
@@ -413,6 +586,11 @@ def load_segmented_epochs_like_train(
             )
             bands.append(x_segments.astype(np.float32))
     elif dataset_name == "bnci2014_001":
+        if return_runs:
+            raise ValueError(
+                "Run-based CSP+LDA evaluation is currently supported for "
+                "PhysioNet-MI only."
+            )
         if use_ica:
             print(
                 "BCI IV-2a MOABB segmented loading uses epoched EEG arrays; "
@@ -491,13 +669,18 @@ def load_segmented_epochs_like_train(
     # Shape: (n_trials, n_segments, n_frequency_bands, n_channels, n_samples)
     if not np.isfinite(x).all():
         raise ValueError("Segmented EEG dataset contains NaN or Inf values.")
-    return (
+    result = (
         x,
         y.astype(np.int64),
         np.asarray(subject_labels, dtype=np.str_),
         list(class_names),
         filter_bank,
     )
+    if return_runs:
+        if run_labels is None or len(run_labels) != len(y):
+            raise RuntimeError("PhysioNet run labels are missing or misaligned.")
+        return result[:3] + (np.asarray(run_labels, dtype=np.int16),) + result[3:]
+    return result
 
 
 def load_eegnet_author_data(
@@ -633,10 +816,11 @@ def log_euclidean_token_mean(x_spd: np.ndarray) -> np.ndarray:
 
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
-    from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 
     return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
         "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
     }
 
