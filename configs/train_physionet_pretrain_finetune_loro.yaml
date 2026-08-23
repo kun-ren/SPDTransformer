@@ -85,7 +85,7 @@ pretrain:
   lr_scheduler_metric: ["validation_macro_f1"]
   lr_scheduler_mode: ["max"]
   lr_scheduler_factor: [0.5]
-  lr_scheduler_patience: [8]
+  lr_scheduler_patience: [9]
   lr_scheduler_threshold: [0.0008]
   lr_scheduler_threshold_mode: ["abs"]
   lr_scheduler_min_lr: [1.0e-5]
@@ -104,7 +104,7 @@ pretrain:
 fine_tune:
   # One selected target run is stratified approximately 50/50 into
   # validation/test; the other target runs are shuffled for fine-tuning.
-  epochs: [25]
+  epochs: [50]
   batch_size: [32]
   precision: ["float32"]
   learning_rate: [0.0022]

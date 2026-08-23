@@ -276,17 +276,28 @@ def train_with_early_stopping(
             ),
         }
         history.append(row)
-        if validation_metrics["macro_f1"] > best_validation_macro_f1 + min_delta:
+        improved = (
+            validation_metrics["macro_f1"]
+            > best_validation_macro_f1 + min_delta
+        )
+        if improved:
             best_validation_macro_f1 = float(validation_metrics["macro_f1"])
             best_epoch = epoch
             best_state = _cpu_state_dict(model)
-        if epoch == 1 or epoch == epochs or epoch % max(1, epochs // 10) == 0:
-            print(
-                f"    {stage_name} epoch {epoch:03d}/{epochs}: "
-                f"loss={row['train_loss']:.4f}, "
-                f"accuracy={row['train_accuracy']:.4f}, "
-                f"validation_mf1={row['validation_macro_f1']:.4f}"
-            )
+        lr_text = f"lr={row['euclid_lr']:.3e}"
+        if row["stiefel_lr"] is not None:
+            lr_text += f", stiefel_lr={row['stiefel_lr']:.3e}"
+        print(
+            f"    {stage_name} epoch {epoch:03d}/{epochs}: "
+            f"train loss={row['train_loss']:.4f}, "
+            f"accuracy={row['train_accuracy']:.4f}, "
+            f"mf1={row['train_macro_f1']:.4f} | "
+            f"validation loss={row['validation_loss']:.4f}, "
+            f"accuracy={row['validation_accuracy']:.4f}, "
+            f"mf1={row['validation_macro_f1']:.4f} | "
+            f"{lr_text}"
+            f"{' [best]' if improved else ''}"
+        )
         if epoch - best_epoch >= patience:
             print(
                 f"    {stage_name} early stopping at epoch {epoch}; "
@@ -609,6 +620,24 @@ def main(argv: list[str] | None = None) -> int:
     if fine_tune_precision != precision:
         raise ValueError("pretrain and fine_tune precision must match.")
     dtype = resolve_precision(precision)
+    pretrain_allow_tf32 = parse_bool(
+        pretrain_cfg.get("allow_tf32", False), default=False
+    )
+    fine_tune_allow_tf32 = parse_bool(
+        fine_tune_cfg.get("allow_tf32", pretrain_allow_tf32),
+        default=pretrain_allow_tf32,
+    )
+    if fine_tune_allow_tf32 != pretrain_allow_tf32:
+        raise ValueError("pretrain and fine_tune allow_tf32 must match.")
+    if device.type == "cuda":
+        # Keep CUDA numerical settings aligned with train.py/train_grid.py.
+        torch.backends.cuda.matmul.allow_tf32 = pretrain_allow_tf32
+        torch.backends.cudnn.allow_tf32 = pretrain_allow_tf32
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision(
+                "high" if pretrain_allow_tf32 else "highest"
+            )
+        print(f"CUDA TF32 enabled: {pretrain_allow_tf32}")
     # Construct one tensor view for the whole cohort. Subset keeps only integer
     # indices, avoiding a multi-gigabyte NumPy copy for every target subject.
     full_dataset = MotorImageryDataset(x, y, dtype=dtype)
@@ -696,6 +725,36 @@ def main(argv: list[str] | None = None) -> int:
                 pretrain_cfg.get("condition_regularization_weight", 0.0)
             ),
         )
+        # train_with_early_stopping has already restored the best checkpoint.
+        # Re-evaluate it so the reported validation accuracy and Macro-F1 are
+        # guaranteed to describe the same weights used for the independent test.
+        pretrain_validation_predictions = predict_loader(
+            base_model,
+            pretrain_validation_loader,
+            nn.CrossEntropyLoss(),
+            device,
+            condition_regularization_weight=float(
+                pretrain_cfg.get("condition_regularization_weight", 0.0)
+            ),
+        )
+        print(
+            f"    pretrain best checkpoint epoch {pretrain_best_epoch:03d}: "
+            f"validation accuracy="
+            f"{pretrain_validation_predictions['accuracy']:.4f}, "
+            f"mf1={pretrain_validation_predictions['macro_f1']:.4f} | "
+            f"test accuracy={pretrain_test_predictions['accuracy']:.4f}, "
+            f"mf1={pretrain_test_predictions['macro_f1']:.4f}"
+        )
+        save_per_class_metrics(
+            target_dir / "pretrain_validation_per_class_metrics.csv",
+            {"validation": pretrain_validation_predictions},
+            class_names,
+        )
+        save_confusion_matrices(
+            target_dir / "pretrain_validation_confusion_matrix.csv",
+            {"validation": pretrain_validation_predictions},
+            class_names,
+        )
         save_per_class_metrics(
             target_dir / "pretrain_test_per_class_metrics.csv",
             {"test": pretrain_test_predictions},
@@ -717,6 +776,9 @@ def main(argv: list[str] | None = None) -> int:
                     "test_indices": pretrain_test_idx.astype(int).tolist(),
                     "best_epoch": pretrain_best_epoch,
                     "best_validation_macro_f1": pretrain_best_validation_mf1,
+                    "best_validation_accuracy": float(
+                        pretrain_validation_predictions["accuracy"]
+                    ),
                     "test_accuracy": float(pretrain_test_predictions["accuracy"]),
                     "test_macro_f1": float(pretrain_test_predictions["macro_f1"]),
                 },
