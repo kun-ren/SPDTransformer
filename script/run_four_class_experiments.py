@@ -329,7 +329,14 @@ def load_transformer_record(root: Path) -> RunRecord:
 
 
 def load_baseline_record(root: Path) -> RunRecord:
-    table = only_path(list(root.glob("run_*/per_subject_summary.csv")), str(root))
+    # Baseline runners create ``<timestamp>/run_<grid-id>/`` beneath the
+    # configured output directory. Keep the legacy direct ``run_*`` layout
+    # readable as well, so existing campaigns can be summarized in place.
+    tables = [
+        *root.glob("*/run_*/per_subject_summary.csv"),
+        *root.glob("run_*/per_subject_summary.csv"),
+    ]
+    table = only_path(tables, str(root))
     summary = read_json(table.parent / "summary.json")
     return RunRecord(
         config=dict(summary.get("config", {})),
