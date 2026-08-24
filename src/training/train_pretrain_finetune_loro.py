@@ -494,7 +494,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument(
         "--target-subjects",
-        help="Override config targets, for example 1, 1-10, or 1-3,8.",
+        help=(
+            "Override config targets, for example 1, 1-10, or 1-3,8; "
+            "use 'all' for every subject in data.pretrain_subjects."
+        ),
     )
     parser.add_argument(
         "--data-subjects",
@@ -525,11 +528,17 @@ def main(argv: list[str] | None = None) -> int:
         else configured_pretrain_subjects
     )
     data_cfg = normalize_data_config(preprocessing_data_cfg)
-    target_subjects = parse_subjects(
+    target_subject_value = (
         args.target_subjects
         if args.target_subjects is not None
         else configured_target_subjects
     )
+    if (
+        isinstance(target_subject_value, str)
+        and target_subject_value.strip().lower() == "all"
+    ):
+        target_subject_value = configured_pretrain_subjects
+    target_subjects = parse_subjects(target_subject_value)
     if not target_subjects:
         raise ValueError("Specify data.subjects in the config or --target-subjects.")
     dataset_subjects = data_cfg.get("subjects")

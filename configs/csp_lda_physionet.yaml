@@ -5,8 +5,8 @@ data:
     - [8, 30]
   sfreq: [160]
   # Subjects evaluated independently. Set to 1 for one target or 1-10 for a
-  # batch. S088 is omitted because it uses a different sampling rate.
-  subjects: 1-87,89-109
+  # batch. S088, S089, S092, S100, S104, and S106 are excluded.
+  subjects: 1-87,90-91,93-99,101-103,105,107-109
   # null keeps all 64 EEG channels from EEGMMIDB.
   channels: null
   reject_threshold_uv: [null]

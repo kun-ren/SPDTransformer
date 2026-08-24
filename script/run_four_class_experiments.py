@@ -145,6 +145,23 @@ def make_four_class_config(
     return config
 
 
+def resolve_campaign_subjects(subjects: str | None) -> Any:
+    """Resolve ``--subjects all`` to the configured pretraining cohort."""
+
+    if subjects is None or subjects.strip().lower() != "all":
+        return subjects
+    transformer_config = load_yaml(TRANSFORMER_CONFIG)
+    pretrain_subjects = transformer_config.get("data", {}).get(
+        "pretrain_subjects"
+    )
+    if pretrain_subjects is None or str(pretrain_subjects).strip() == "":
+        raise ValueError(
+            "--subjects all requires data.pretrain_subjects in "
+            f"{TRANSFORMER_CONFIG}."
+        )
+    return pretrain_subjects
+
+
 def make_transformer_config(
     base: dict[str, Any],
     output_dir: Path,
@@ -491,7 +508,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", help="Training device, e.g. cuda:0 or cpu.")
     parser.add_argument(
         "--subjects",
-        help="Target subjects, e.g. 1 or 1-10; overrides each generated config.",
+        help=(
+            "Target subjects, e.g. 1 or 1-10; use 'all' to target every "
+            "subject in Transformer data.pretrain_subjects. Overrides each "
+            "generated config."
+        ),
     )
     parser.add_argument(
         "--task-types",
@@ -522,11 +543,14 @@ def main(argv: list[str] | None = None) -> int:
         / datetime.now().strftime("%Y%m%d_%H%M%S")
     )
     campaign_dir.mkdir(parents=True, exist_ok=False)
-    commands = build_configs(campaign_dir, args.subjects, args.task_types)
+    campaign_subjects = resolve_campaign_subjects(args.subjects)
+    commands = build_configs(campaign_dir, campaign_subjects, args.task_types)
     print(
         "Subject-specific campaign "
         f"({','.join(args.task_types)}): {campaign_dir}"
     )
+    if args.subjects is not None:
+        print(f"Target subjects: {campaign_subjects}")
     for config_path, runner, uses_device in commands.values():
         command = [sys.executable, str(runner), "--config", str(config_path)]
         if args.device and uses_device:

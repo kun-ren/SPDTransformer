@@ -10,8 +10,8 @@ data:
   # Subjects to evaluate/fine-tune. This matches train_grid.yaml semantics.
   subjects: 1
   # Full cohort available for preprocessing and other-subject pretraining.
-  # S088 is excluded because its sampling rate differs from the 160 Hz cohort.
-  pretrain_subjects: 1-87,89-109
+  # Exclude S088, S089, S092, S100, S104, and S106.
+  pretrain_subjects: 1-87,90-91,93-99,101-103,105,107-109
 
   # As in train_grid.yaml, one filter-bank candidate needs an extra list level.
   filter_bank: [[[8, 13], [13, 20], [20, 30]]]

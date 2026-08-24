@@ -11,8 +11,8 @@ data:
   # Classic SPDNet consumes a standard covariance matrix directly.
   replace_covariance_diagonal_with_raw_energy: [false]
   # Subjects evaluated independently: use 1 for one target or 1-10 for a batch.
-  # S088 is omitted because it uses a different sampling rate.
-  subjects: 1-87,89-109
+  # S088, S089, S092, S100, S104, and S106 are excluded.
+  subjects: 1-87,90-91,93-99,101-103,105,107-109
   # BCI IV-2a uses a different 22-channel montage, so use
   # configs/spdnet_bci_iv_2a.yaml or clear/change channels when switching.
   # channels: "FC5, FC3, FC1, FCz, FC2, FC4, FC6, C5, C3, C1, Cz, C2, C4, C6, CP5, CP3, CP1, CPz, CP2, CP4, CP6"

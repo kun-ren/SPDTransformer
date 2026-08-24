@@ -2,8 +2,8 @@ defaults:
   download_dir: data
 datasets:
   - name: PhysionetMI
-    #subjects: 1-87,89-109
-    subjects: 1-87, 89-109
+    # Exclude S088, S089, S092, S100, S104, and S106.
+    subjects: 1-87,90-91,93-99,101-103,105,107-109
     params:
       imagined: true
       executed: false
