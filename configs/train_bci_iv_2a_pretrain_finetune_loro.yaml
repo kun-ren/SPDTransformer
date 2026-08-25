@@ -1,59 +1,44 @@
-# train_grid.yaml-aligned singleton-grid configuration.
-# data.subjects is the target subject set: use 1 or 1-10.
-# data.pretrain_subjects is the complete candidate pretraining cohort; the
-# current target is removed automatically before every target-specific run.
+# BCI Competition IV-2a four-class LOSO pretraining and target-run adaptation.
+# Every target A01--A09 is excluded from its own other-subject pretraining set.
 
 data:
-  dataset: ["physionet_mi"]
-  root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
-
-  # Subjects to evaluate/fine-tune. This matches train_grid.yaml semantics.
+  dataset: ["bnci2014_001"]
+  root_dir: ["data"]
   subjects: 1
-  # Full cohort available for preprocessing and other-subject pretraining.
-  # Exclude S088, S089, S092, S100, S104, and S106.
-  pretrain_subjects: 1-87,90-91,93-99,101-103,105,107-109
+  pretrain_subjects: 1-9
 
-  # As in train_grid.yaml, one filter-bank candidate needs an extra list level.
   filter_bank: [[[8, 13], [13, 20], [20, 30]]]
   estimator: ["lwf"]
-  sfreq: [160]
+  sfreq: [250]
   eps: [1.0e-6]
   covariance_signal_scale: ["auto"]
   replace_covariance_diagonal_with_raw_energy: [true]
-  brain_region_mode: ["physionet_8x8"]
+  brain_region_mode: ["motor_7"]
   covariance_output_dtype: ["float32"]
   channels: [null]
 
-  imaged: [true]
-  executed: [false]
-  # Use [[unilateral_fist]] for two classes, or the setting below for four.
-  task_types: [[unilateral_fist]]
-
-  # Paired time fields follow train_grid.yaml's grid syntax.
+  # MOABB maps the original 769/770/771/772 events to these names. Their
+  # configured order is also the final integer class order 0/1/2/3.
+  events: "left_hand,right_hand,feet,tongue"
+  sessions: "all"
   epoch_slice: [[-2.0, 4.0]]
   segment_slice: [[0.5, 0.25]]
 
   reject_threshold_uv: [null]
   use_ica: [false]
-  ica_n_components: [20]
-  ica_random_state: [42]
-  ica_eog_channels: [""]
   use_autoreject: [false]
-  autoreject_random_state: [42]
-  autoreject_n_jobs: [1]
-  autoreject_cv: [10]
-  autoreject_cache_dir: "experiments/cache/autoreject_masks"
-  autoreject_force_rebuild: false
   baseline_correction: [null]
   baseline_window: [null]
+  moabb_accept_terms: [true]
+  moabb_force_update: [false]
 
 model:
   head_nums: [4]
-  attention_dim: ["8"]
+  attention_dim: ["6"]
   stage_transition: [true]
   stage_projection_init: ["random"]
   add_norm_type: ["sequence_add_norm"]
-  ffn_hidden_spd_dim: [64]
+  ffn_hidden_spd_dim: [32]
   tau: [1.3]
   metric: ["learnable-metric"]
   depth: [1]
@@ -73,7 +58,6 @@ model:
   eps: [1.0e-6]
 
 pretrain:
-  # Other-subject trials: 70% train, 15% validation, 15% test.
   validation_size: [0.15]
   test_size: [0.15]
   epochs: [100]
@@ -102,8 +86,6 @@ pretrain:
   allow_tf32: [true]
 
 fine_tune:
-  # One selected target run is stratified approximately 50/50 into
-  # validation/test; the other target runs are shuffled for fine-tuning.
   epochs: [50]
   batch_size: [32]
   precision: ["float32"]
@@ -129,7 +111,7 @@ fine_tune:
   allow_tf32: [true]
 
 output:
-  dir: experiments/results/physionet_pretrain_finetune_loro
+  dir: experiments/results/bci_iv_2a_pretrain_finetune_loro
   dataset_cache_dir: experiments/cache/preprocessed_datasets
   save_pretrained_checkpoints: true
   save_fine_tuned_checkpoints: false

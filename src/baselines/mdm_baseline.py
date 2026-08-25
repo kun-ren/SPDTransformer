@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-MDM_DATASET_CACHE_VERSION = 3
+MDM_DATASET_CACHE_VERSION = 4
 DEFAULT_MDM_DATASET_CACHE_DIR = (
     PROJECT_ROOT / "experiments" / "cache" / "mdm_preprocessed_datasets"
 )
@@ -434,15 +434,8 @@ def load_or_preprocess_spd(
         return cached_dataset
 
     print(f"\nPreprocessing MDM data config {data_key}: {preprocessing_cfg}")
-    if normalize_dataset_name(preprocessing_cfg.get("dataset")) == "physionet_mi":
-        dataset = load_spd_like_train(preprocessing_cfg, return_runs=True)
-        x_spd, y, subject_labels, run_labels, class_names = dataset
-    else:
-        x_spd, y, subject_labels, class_names = load_spd_like_train(
-            preprocessing_cfg
-        )
-        run_labels = np.full(len(y), -1, dtype=np.int16)
-        dataset = (x_spd, y, subject_labels, run_labels, class_names)
+    dataset = load_spd_like_train(preprocessing_cfg, return_runs=True)
+    x_spd, y, subject_labels, run_labels, class_names = dataset
     print(
         f"  X.shape={x_spd.shape}, y.shape={y.shape}, "
         f"subjects={len(set(subject_labels.tolist()))}, classes={class_names}"

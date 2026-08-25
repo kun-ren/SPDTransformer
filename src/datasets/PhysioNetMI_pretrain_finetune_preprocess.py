@@ -1,8 +1,8 @@
-"""Run-labelled wrapper aligned with :mod:`PhysioNetMI_preprocess`.
+"""Run-labelled SPD wrapper for PhysioNet-MI and BCI Competition IV-2a.
 
 All signal processing and SPD construction are delegated to the project's
-canonical ``preprocess_spd`` implementation. This file only canonicalizes the
-config, requests physical EDF run labels, and caches the aligned arrays.
+canonical dataset preprocessors. This file canonicalizes configuration,
+requests physical run provenance, and caches the aligned arrays.
 """
 
 from __future__ import annotations
@@ -15,6 +15,11 @@ from typing import Any
 
 import numpy as np
 
+from src.datasets.BCICompetitionIV2a_preprocess import (
+    normalize_bci_iv_2a_events,
+    normalize_bci_iv_2a_sessions,
+    preprocess_bci_iv_2a_spd,
+)
 from src.datasets.PhysioNetMI_preprocess import (
     normalize_bool,
     normalize_brain_region_mode,
@@ -24,7 +29,30 @@ from src.datasets.PhysioNetMI_preprocess import (
 from src.training.config_grid import normalize_data_time_config, normalize_filter_bank
 
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
+
+
+def normalize_dataset_name(value: Any) -> str:
+    normalized = (
+        str(value or "physionet_mi").strip().lower().replace("-", "_")
+    )
+    aliases = {
+        "physionet": "physionet_mi",
+        "physionet_mi": "physionet_mi",
+        "physionetmi": "physionet_mi",
+        "eegbci": "physionet_mi",
+        "bci_iv_2a": "bnci2014_001",
+        "bci_competition_iv_2a": "bnci2014_001",
+        "bciciv_2a": "bnci2014_001",
+        "bnci2014_001": "bnci2014_001",
+        "bnci2014001": "bnci2014_001",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "Run-labelled preprocessing supports physionet_mi and "
+            "bnci2014_001 only."
+        )
+    return aliases[normalized]
 
 
 def parse_subjects(value: Any) -> list[int] | None:
@@ -95,20 +123,27 @@ def selected_run_ids(
 
 def normalize_data_config(data_cfg: dict[str, Any]) -> dict[str, Any]:
     cfg = normalize_data_time_config(deepcopy(data_cfg))
-    dataset = str(cfg.get("dataset", "physionet_mi")).strip().lower().replace("-", "_")
-    if dataset not in {"physionet", "physionet_mi", "physionetmi", "eegbci"}:
-        raise ValueError("This preprocessor supports PhysioNet-MI only.")
-    cfg["dataset"] = "physionet_mi"
+    cfg["dataset"] = normalize_dataset_name(cfg.get("dataset"))
     cfg["filter_bank"] = normalize_filter_bank(cfg["filter_bank"])
     cfg["subjects"] = parse_subjects(cfg.get("subjects"))
-    cfg["task_types"] = list(parse_task_types(cfg.get("task_types")))
-    cfg["imaged"] = normalize_bool(cfg.get("imaged", True), default=True)
-    cfg["executed"] = normalize_bool(cfg.get("executed", False), default=False)
-    if not cfg["imaged"] and not cfg["executed"]:
-        raise ValueError("At least one of data.imaged/data.executed must be true.")
+    if cfg["dataset"] == "physionet_mi":
+        cfg["task_types"] = list(parse_task_types(cfg.get("task_types")))
+        cfg["imaged"] = normalize_bool(cfg.get("imaged", True), default=True)
+        cfg["executed"] = normalize_bool(cfg.get("executed", False), default=False)
+        if not cfg["imaged"] and not cfg["executed"]:
+            raise ValueError(
+                "At least one of data.imaged/data.executed must be true."
+            )
+    else:
+        cfg["events"] = normalize_bci_iv_2a_events(
+            cfg.get("events", cfg.get("bci_iv_2a_events"))
+        )
+        cfg["sessions"] = normalize_bci_iv_2a_sessions(
+            cfg.get("sessions", cfg.get("bci_iv_2a_sessions"))
+        )
     scale = cfg.get("covariance_signal_scale", "auto")
     if scale is None or str(scale).strip().lower() in {"", "auto"}:
-        scale = 1.0e6
+        scale = 1.0e6 if cfg["dataset"] == "physionet_mi" else 1.0
     cfg["covariance_signal_scale"] = float(scale)
     cfg["use_ica"] = normalize_bool(cfg.get("use_ica", False), default=False)
     cfg["use_autoreject"] = normalize_bool(
@@ -130,48 +165,72 @@ def normalize_data_config(data_cfg: dict[str, Any]) -> dict[str, Any]:
 def preprocess_spd_with_runs(
     data_cfg: dict[str, Any],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """Call the canonical PhysioNet preprocessor with run provenance enabled."""
+    """Call the selected canonical preprocessor with run provenance enabled."""
 
     cfg = normalize_data_config(data_cfg)
     epoch_tmin, epoch_tmax = cfg["epoch_slice"]
     segment_duration, stride_duration = cfg["segment_slice"]
-    x, y, class_names, subject_labels, run_labels = preprocess_spd(
-        filter_bank=cfg["filter_bank"],
-        root_dir=str(cfg.get("root_dir", "data/MNE-eegbci-data/files/eegmmidb/1.0.0")),
-        subjects=cfg.get("subjects"),
-        channels=cfg.get("channels"),
-        estimator=str(cfg.get("estimator", "lwf")),
-        sfreq=float(cfg.get("sfreq", 160.0)),
-        eps=float(cfg.get("eps", 1e-6)),
-        segment_duration=float(segment_duration),
-        stride_duration=stride_duration,
-        imaged=bool(cfg["imaged"]),
-        executed=bool(cfg["executed"]),
-        task_types=tuple(cfg["task_types"]),
-        reject_threshold_uv=cfg.get("reject_threshold_uv"),
-        baseline_correction=cfg.get("baseline_correction"),
-        baseline_window=cfg.get("baseline_window"),
-        epoch_tmin=float(epoch_tmin),
-        epoch_tmax=float(epoch_tmax),
-        use_ica=bool(cfg["use_ica"]),
-        ica_n_components=cfg.get("ica_n_components", 20),
-        ica_random_state=int(cfg.get("ica_random_state", 42)),
-        ica_eog_channels=cfg.get("ica_eog_channels"),
-        use_autoreject=bool(cfg["use_autoreject"]),
-        autoreject_random_state=int(cfg.get("autoreject_random_state", 42)),
-        autoreject_n_jobs=int(cfg.get("autoreject_n_jobs", 1)),
-        autoreject_cv=int(cfg.get("autoreject_cv", 10)),
-        autoreject_cache_dir=cfg.get("autoreject_cache_dir"),
-        autoreject_force_rebuild=bool(cfg["autoreject_force_rebuild"]),
-        return_subjects=True,
-        return_runs=True,
-        covariance_signal_scale=float(cfg["covariance_signal_scale"]),
-        replace_covariance_diagonal_with_raw_energy=bool(
+    common = {
+        "filter_bank": cfg["filter_bank"],
+        "root_dir": str(cfg.get("root_dir", "data")),
+        "subjects": cfg.get("subjects"),
+        "channels": cfg.get("channels"),
+        "estimator": str(cfg.get("estimator", "lwf")),
+        "sfreq": float(
+            cfg.get(
+                "sfreq",
+                160.0 if cfg["dataset"] == "physionet_mi" else 250.0,
+            )
+        ),
+        "eps": float(cfg.get("eps", 1e-6)),
+        "segment_duration": float(segment_duration),
+        "stride_duration": stride_duration,
+        "reject_threshold_uv": cfg.get("reject_threshold_uv"),
+        "baseline_correction": cfg.get("baseline_correction"),
+        "baseline_window": cfg.get("baseline_window"),
+        "epoch_tmin": float(epoch_tmin),
+        "epoch_tmax": float(epoch_tmax),
+        "use_ica": bool(cfg["use_ica"]),
+        "use_autoreject": bool(cfg["use_autoreject"]),
+        "autoreject_random_state": int(cfg.get("autoreject_random_state", 42)),
+        "autoreject_n_jobs": int(cfg.get("autoreject_n_jobs", 1)),
+        "autoreject_cv": int(cfg.get("autoreject_cv", 10)),
+        "return_subjects": True,
+        "return_runs": True,
+        "covariance_signal_scale": float(cfg["covariance_signal_scale"]),
+        "replace_covariance_diagonal_with_raw_energy": bool(
             cfg["replace_covariance_diagonal_with_raw_energy"]
         ),
-        brain_region_mode=cfg.get("brain_region_mode"),
-        output_dtype=cfg.get("covariance_output_dtype", "float32"),
-    )
+        "brain_region_mode": cfg.get("brain_region_mode"),
+        "output_dtype": cfg.get("covariance_output_dtype", "float32"),
+    }
+    if cfg["dataset"] == "physionet_mi":
+        common["root_dir"] = str(
+            cfg.get("root_dir", "data/MNE-eegbci-data/files/eegmmidb/1.0.0")
+        )
+        x, y, class_names, subject_labels, run_labels = preprocess_spd(
+            **common,
+            imaged=bool(cfg["imaged"]),
+            executed=bool(cfg["executed"]),
+            task_types=tuple(cfg["task_types"]),
+            ica_n_components=cfg.get("ica_n_components", 20),
+            ica_random_state=int(cfg.get("ica_random_state", 42)),
+            ica_eog_channels=cfg.get("ica_eog_channels"),
+            autoreject_cache_dir=cfg.get("autoreject_cache_dir"),
+            autoreject_force_rebuild=bool(cfg["autoreject_force_rebuild"]),
+        )
+    else:
+        x, y, class_names, subject_labels, run_labels = preprocess_bci_iv_2a_spd(
+            **common,
+            events=cfg["events"],
+            sessions=cfg["sessions"],
+            moabb_accept_terms=normalize_bool(
+                cfg.get("moabb_accept_terms", True), default=True
+            ),
+            moabb_force_update=normalize_bool(
+                cfg.get("moabb_force_update", False), default=False
+            ),
+        )
     x = x.astype(
         normalize_float_dtype(cfg.get("covariance_output_dtype", "float32")),
         copy=False,
@@ -194,7 +253,7 @@ def preprocess_spd_with_runs(
 def _cache_path(cache_dir: Path, cfg: dict[str, Any]) -> Path:
     payload = json.dumps(cfg, sort_keys=True, default=str)
     digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
-    return cache_dir / f"physionet_loro_spd_{digest}.npz"
+    return cache_dir / f"{cfg['dataset']}_loro_spd_{digest}.npz"
 
 
 def load_or_preprocess_spd_with_runs(

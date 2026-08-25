@@ -1,8 +1,9 @@
-"""Run subject-specific PhysioNet baselines and ablations.
+"""Run subject-specific four-class BCI baselines and ablations.
 
 Every model is evaluated on the same target subjects. A target run is held
 out once, split approximately 50/50 into validation and test, and its test
 predictions are pooled per subject before table statistics are calculated.
+Use ``--dataset physionet_mi`` or ``--dataset bci_iv_2a``.
 """
 
 from __future__ import annotations
@@ -30,6 +31,12 @@ TRANSFORMER_CONFIG = (
 CSP_CONFIG = PROJECT_ROOT / "configs" / "csp_lda_physionet.yaml"
 MDM_CONFIG = PROJECT_ROOT / "configs" / "mdm_physionet.yaml"
 SPDNET_CONFIG = PROJECT_ROOT / "configs" / "spdnet_physionet.yaml"
+BCI_TRANSFORMER_CONFIG = (
+    PROJECT_ROOT / "configs" / "train_bci_iv_2a_pretrain_finetune_loro.yaml"
+)
+BCI_CSP_CONFIG = PROJECT_ROOT / "configs" / "csp_lda_bci_iv_2a.yaml"
+BCI_MDM_CONFIG = PROJECT_ROOT / "configs" / "mdm_bci_iv_2a.yaml"
+BCI_SPDNET_CONFIG = PROJECT_ROOT / "configs" / "spdnet_bci_iv_2a.yaml"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "experiments" / "results" / "four_class"
 
 DEFAULT_TASK_TYPES = ("unilateral_fist", "both")
@@ -43,6 +50,7 @@ TASK_CLASS_NAMES = {
     ("unilateral_fist",): {"left_hand", "right_hand"},
     ("both",): {"hands", "feet"},
 }
+BCI_IV_2A_CLASS_NAMES = {"left_hand", "right_hand", "feet", "tongue"}
 SUBJECT_COLUMNS = (
     "Subject",
     "Trials",
@@ -59,6 +67,40 @@ class RunRecord:
     subjects: list[dict[str, Any]]
     class_names: list[str]
     source: Path
+
+
+def normalize_campaign_dataset(value: Any) -> str:
+    normalized = str(value or "physionet_mi").strip().lower().replace("-", "_")
+    aliases = {
+        "physionet": "physionet_mi",
+        "physionet_mi": "physionet_mi",
+        "eegbci": "physionet_mi",
+        "bci_iv_2a": "bnci2014_001",
+        "bci_competition_iv_2a": "bnci2014_001",
+        "bnci2014_001": "bnci2014_001",
+    }
+    if normalized not in aliases:
+        raise argparse.ArgumentTypeError(
+            "dataset must be physionet_mi or bci_iv_2a"
+        )
+    return aliases[normalized]
+
+
+def dataset_config_paths(
+    dataset: str,
+) -> tuple[Path, dict[str, tuple[Path, str, bool]]]:
+    dataset = normalize_campaign_dataset(dataset)
+    if dataset == "bnci2014_001":
+        return BCI_TRANSFORMER_CONFIG, {
+            "csp_lda": (BCI_CSP_CONFIG, "csp_lda_baseline.py", False),
+            "mdm": (BCI_MDM_CONFIG, "mdm_baseline.py", True),
+            "spdnet": (BCI_SPDNET_CONFIG, "spdnet_baseline.py", True),
+        }
+    return TRANSFORMER_CONFIG, {
+        "csp_lda": (CSP_CONFIG, "csp_lda_baseline.py", False),
+        "mdm": (MDM_CONFIG, "mdm_baseline.py", True),
+        "spdnet": (SPDNET_CONFIG, "spdnet_baseline.py", True),
+    }
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -136,28 +178,41 @@ def make_four_class_config(
     output_dir: Path,
     subjects: str | None,
     task_types: tuple[str, ...],
+    dataset: str = "physionet_mi",
 ) -> dict[str, Any]:
     config = deepcopy(base)
-    config.setdefault("data", {})["task_types"] = [list(task_types)]
+    data_cfg = config.setdefault("data", {})
+    dataset = normalize_campaign_dataset(dataset)
+    if dataset == "physionet_mi":
+        data_cfg["dataset"] = ["physionet_mi"]
+        data_cfg["task_types"] = [list(task_types)]
+    else:
+        data_cfg["dataset"] = ["bnci2014_001"]
+        data_cfg["events"] = "left_hand,right_hand,feet,tongue"
+        data_cfg["sessions"] = "all"
     if subjects is not None:
-        config["data"]["subjects"] = subjects
+        data_cfg["subjects"] = subjects
     config.setdefault("output", {})["dir"] = str(output_dir.resolve())
     return config
 
 
-def resolve_campaign_subjects(subjects: str | None) -> Any:
+def resolve_campaign_subjects(
+    subjects: str | None,
+    dataset: str = "physionet_mi",
+) -> Any:
     """Resolve ``--subjects all`` to the configured pretraining cohort."""
 
     if subjects is None or subjects.strip().lower() != "all":
         return subjects
-    transformer_config = load_yaml(TRANSFORMER_CONFIG)
+    transformer_path, _ = dataset_config_paths(dataset)
+    transformer_config = load_yaml(transformer_path)
     pretrain_subjects = transformer_config.get("data", {}).get(
         "pretrain_subjects"
     )
     if pretrain_subjects is None or str(pretrain_subjects).strip() == "":
         raise ValueError(
             "--subjects all requires data.pretrain_subjects in "
-            f"{TRANSFORMER_CONFIG}."
+            f"{transformer_path}."
         )
     return pretrain_subjects
 
@@ -172,8 +227,15 @@ def make_transformer_config(
     metric: str = "learnable-metric",
     classifier_type: str = "mdm",
     single_band: bool = False,
+    dataset: str = "physionet_mi",
 ) -> dict[str, Any]:
-    config = make_four_class_config(base, output_dir, subjects, task_types)
+    config = make_four_class_config(
+        base,
+        output_dir,
+        subjects,
+        task_types,
+        dataset=dataset,
+    )
     config["data"]["epoch_slice"] = [[-float(resting_length), 4.0]]
     if single_band:
         config["data"]["filter_bank"] = [[[8, 30]]]
@@ -186,16 +248,19 @@ def build_configs(
     campaign_dir: Path,
     subjects: str | None,
     task_types: tuple[str, ...] = DEFAULT_TASK_TYPES,
+    dataset: str = "physionet_mi",
 ) -> dict[str, tuple[Path, Path, bool]]:
+    dataset = normalize_campaign_dataset(dataset)
     task_types = parse_task_types(task_types)
-    transformer_base = load_yaml(TRANSFORMER_CONFIG)
+    transformer_path, baseline_specs = dataset_config_paths(dataset)
+    transformer_base = load_yaml(transformer_path)
     if subjects is None and transformer_base.get("data", {}).get("subjects") in {
         None,
         "",
     }:
         raise ValueError(
             "No target subjects configured. Use --subjects 1 or --subjects 1-10, "
-            "or set data.subjects in train_physionet_pretrain_finetune_loro.yaml."
+            f"or set data.subjects in {transformer_path.name}."
         )
     config_dir = campaign_dir / "configs"
     raw_dir = campaign_dir / "raw"
@@ -214,6 +279,7 @@ def build_configs(
                 subjects,
                 task_types,
                 resting_length=rest,
+                dataset=dataset,
             ),
             transformer_runner,
             True,
@@ -227,6 +293,7 @@ def build_configs(
                 task_types,
                 resting_length=rest,
                 single_band=True,
+                dataset=dataset,
             ),
             transformer_runner,
             True,
@@ -240,6 +307,7 @@ def build_configs(
             task_types,
             resting_length=1.0,
             metric="log-euclidean",
+            dataset=dataset,
         ),
         transformer_runner,
         True,
@@ -252,20 +320,21 @@ def build_configs(
             task_types,
             resting_length=1.0,
             classifier_type="pooling",
+            dataset=dataset,
         ),
         transformer_runner,
         True,
     )
 
-    baseline_specs = {
-        "csp_lda": (CSP_CONFIG, "csp_lda_baseline.py", False),
-        "mdm": (MDM_CONFIG, "mdm_baseline.py", True),
-        "spdnet": (SPDNET_CONFIG, "spdnet_baseline.py", True),
-    }
     for name, (base_path, filename, uses_device) in baseline_specs.items():
         config = make_four_class_config(
-            load_yaml(base_path), raw_dir / name, subjects, task_types
+            load_yaml(base_path),
+            raw_dir / name,
+            subjects,
+            task_types,
+            dataset=dataset,
         )
+        config.setdefault("data", {})["allow_subject_overlap"] = [True]
         config.setdefault("training", {})["subject_specific"] = [True]
         config["training"]["held_out_run_validation_size"] = [0.5]
         specs[name] = (
@@ -276,9 +345,14 @@ def build_configs(
 
     commands: dict[str, tuple[Path, Path, bool]] = {}
     manifest: dict[str, Any] = {
+        "dataset": dataset,
         "protocol": "subject-specific leave-one-run-out; held-out run split 50/50 validation/test",
         "task_types": list(task_types),
-        "expected_classes": sorted(TASK_CLASS_NAMES[task_types]),
+        "expected_classes": sorted(
+            BCI_IV_2A_CLASS_NAMES
+            if dataset == "bnci2014_001"
+            else TASK_CLASS_NAMES[task_types]
+        ),
         "subject_aggregation": "pooled held-out test-trial predictions",
         "p_value": "two-sided paired Wilcoxon signed-rank test on subject accuracies",
         "runs": {},
@@ -436,8 +510,12 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def summarize_campaign(campaign_dir: Path) -> tuple[Path, Path, Path]:
     manifest = read_json(campaign_dir / "manifest.json")
-    task_types = parse_task_types(manifest.get("task_types", DEFAULT_TASK_TYPES))
-    expected_classes = TASK_CLASS_NAMES[task_types]
+    expected_classes = set(manifest.get("expected_classes", []))
+    if not expected_classes:
+        task_types = parse_task_types(
+            manifest.get("task_types", DEFAULT_TASK_TYPES)
+        )
+        expected_classes = TASK_CLASS_NAMES[task_types]
     raw = campaign_dir / "raw"
     complete = {
         rest: load_transformer_record(
@@ -512,6 +590,13 @@ def summarize_campaign(campaign_dir: Path) -> tuple[Path, Path, Path]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dataset",
+        type=normalize_campaign_dataset,
+        default="physionet_mi",
+        metavar="DATASET",
+        help="physionet_mi (default) or bci_iv_2a",
+    )
     parser.add_argument("--device", help="Training device, e.g. cuda:0 or cpu.")
     parser.add_argument(
         "--subjects",
@@ -528,7 +613,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TASKS",
         help=(
             "PhysioNet task selection: unilateral_fist,both (four classes), "
-            "unilateral_fist (left/right), or both (hands/feet)."
+            "unilateral_fist (left/right), or both (hands/feet). Ignored for "
+            "BCI IV-2a, whose four classes are fixed."
         ),
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT)
@@ -550,11 +636,21 @@ def main(argv: list[str] | None = None) -> int:
         / datetime.now().strftime("%Y%m%d_%H%M%S")
     )
     campaign_dir.mkdir(parents=True, exist_ok=False)
-    campaign_subjects = resolve_campaign_subjects(args.subjects)
-    commands = build_configs(campaign_dir, campaign_subjects, args.task_types)
+    campaign_subjects = resolve_campaign_subjects(args.subjects, args.dataset)
+    commands = build_configs(
+        campaign_dir,
+        campaign_subjects,
+        args.task_types,
+        dataset=args.dataset,
+    )
+    class_text = (
+        "left_hand,right_hand,feet,tongue"
+        if args.dataset == "bnci2014_001"
+        else ",".join(args.task_types)
+    )
     print(
-        "Subject-specific campaign "
-        f"({','.join(args.task_types)}): {campaign_dir}"
+        f"Subject-specific {args.dataset} campaign "
+        f"({class_text}): {campaign_dir}"
     )
     if args.subjects is not None:
         print(f"Target subjects: {campaign_subjects}")

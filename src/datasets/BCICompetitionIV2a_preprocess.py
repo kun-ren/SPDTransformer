@@ -182,6 +182,28 @@ def _format_subject_label(value: Any) -> str:
         return str(value)
 
 
+def _encode_session_run_labels(metadata) -> np.ndarray:
+    """Encode each MOABB session/run pair as one stable physical run id."""
+
+    missing = [name for name in ("session", "run") if name not in metadata]
+    if missing:
+        raise ValueError(
+            "MOABB metadata must contain session and run provenance; missing "
+            f"{missing}."
+        )
+    pairs = [
+        (str(session), str(run))
+        for session, run in zip(metadata["session"], metadata["run"])
+    ]
+    mapping: dict[tuple[str, str], int] = {}
+    encoded = []
+    for pair in pairs:
+        if pair not in mapping:
+            mapping[pair] = len(mapping) + 1
+        encoded.append(mapping[pair])
+    return np.asarray(encoded, dtype=np.int16)
+
+
 def _optional_positive_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -300,10 +322,12 @@ def load_bci_iv_2a_epochs(
         [_format_subject_label(subject) for subject in metadata["subject"]],
         dtype=np.str_,
     )
+    run_labels = _encode_session_run_labels(metadata)
     return {
         "X": np.asarray(x)[keep_mask],
         "y": np.asarray(labels, dtype=np.str_)[keep_mask],
         "subject": subject_labels,
+        "run": run_labels,
         "metadata": metadata,
         "events": event_names,
         "ch_names": channel_names,
@@ -358,6 +382,7 @@ def preprocess_bci_iv_2a_spd(
     output_dtype="float32",
     moabb_accept_terms=True,
     moabb_force_update=False,
+    return_runs=False,
 ):
     from pyriemann.estimation import Covariances
 
@@ -395,6 +420,7 @@ def preprocess_bci_iv_2a_spd(
     frequencies = []
     labels = None
     subject_labels = None
+    run_labels = None
     keep_mask = None
     channel_names = None
     brain_region_names = None
@@ -422,6 +448,7 @@ def preprocess_bci_iv_2a_spd(
         temp_x = np.asarray(dataset["X"])
         current_labels = np.asarray(dataset["y"], dtype=np.str_)
         current_subject_labels = np.asarray(dataset["subject"], dtype=np.str_)
+        current_run_labels = np.asarray(dataset["run"], dtype=np.int16)
         print(f"BCI IV-2a band {filter_band}: MOABB epoch shape {temp_x.shape}")
 
         if channel_names is None:
@@ -458,10 +485,12 @@ def preprocess_bci_iv_2a_spd(
             temp_x = temp_x[keep_mask]
             current_labels = current_labels[keep_mask]
             current_subject_labels = current_subject_labels[keep_mask]
+            current_run_labels = current_run_labels[keep_mask]
 
         if labels is None:
             labels = current_labels
             subject_labels = current_subject_labels
+            run_labels = current_run_labels
         else:
             if not np.array_equal(labels, current_labels):
                 raise RuntimeError(
@@ -472,6 +501,11 @@ def preprocess_bci_iv_2a_spd(
                 raise RuntimeError(
                     "Subject order changed across BCI IV-2a frequency bands. "
                     "Check filtering, session, and rejection settings."
+                )
+            if not np.array_equal(run_labels, current_run_labels):
+                raise RuntimeError(
+                    "Session/run order changed across BCI IV-2a frequency "
+                    "bands."
                 )
 
         temp_x = segment_epochs(
@@ -569,6 +603,16 @@ def preprocess_bci_iv_2a_spd(
     y, class_names = _encode_labels_in_event_order(labels, event_names)
     x_spd = np.stack(frequencies, axis=2)
 
+    if return_subjects and return_runs:
+        return (
+            x_spd,
+            y,
+            class_names,
+            np.asarray(subject_labels),
+            np.asarray(run_labels, dtype=np.int16),
+        )
     if return_subjects:
         return x_spd, y, class_names, np.asarray(subject_labels)
+    if return_runs:
+        return x_spd, y, class_names, np.asarray(run_labels, dtype=np.int16)
     return x_spd, y, class_names

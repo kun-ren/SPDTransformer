@@ -2,7 +2,7 @@
 
 For each requested target subject:
 1. train a fresh model on every trial from all *other* subjects;
-2. restore that identical pretrained state for every target EDF run;
+2. restore that identical pretrained state for every target recording run;
 3. fine-tune on the target subject's remaining runs;
 4. split that run evenly into validation/test trials;
 5. use validation for scheduling/early stopping and test the best checkpoint once.
@@ -44,6 +44,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.datasets.PhysioNetMI_pretrain_finetune_preprocess import (  # noqa: E402
     load_or_preprocess_spd_with_runs,
     normalize_data_config,
+    normalize_dataset_name,
     parse_subjects,
     selected_run_ids,
 )
@@ -67,6 +68,12 @@ from src.training.train import (  # noqa: E402
 
 
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_physionet_pretrain_finetune_loro.yaml"
+
+
+def format_subject_id(subject_number: int, dataset_name: str) -> str:
+    if normalize_dataset_name(dataset_name) == "bnci2014_001":
+        return f"A{int(subject_number):02d}"
+    return f"S{int(subject_number):03d}"
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -381,13 +388,14 @@ def validate_protocol(
     target_subjects: list[int],
     *,
     num_classes: int,
+    dataset_name: str = "physionet_mi",
 ) -> dict[str, list[int]]:
     """Audit target availability and class coverage without changing splits."""
 
     available_subjects = set(subject_labels.tolist())
     run_map: dict[str, list[int]] = {}
     for target_number in target_subjects:
-        target = f"S{target_number:03d}"
+        target = format_subject_id(target_number, dataset_name)
         if target not in available_subjects:
             raise ValueError(f"Target subject {target} is absent from the dataset.")
         pretrain_mask = subject_labels != target
@@ -559,18 +567,24 @@ def main(argv: list[str] | None = None) -> int:
         if int(cfg.get("epochs", 0)) < 1:
             raise ValueError(f"{name}.epochs must be at least 1.")
 
-    expected_runs = selected_run_ids(
-        imaged=bool(data_cfg["imaged"]),
-        executed=bool(data_cfg["executed"]),
-        task_types=tuple(data_cfg["task_types"]),
-    )
+    dataset_name = normalize_dataset_name(data_cfg.get("dataset"))
+    expected_runs: list[int] | str
+    if dataset_name == "physionet_mi":
+        expected_runs = selected_run_ids(
+            imaged=bool(data_cfg["imaged"]),
+            executed=bool(data_cfg["executed"]),
+            task_types=tuple(data_cfg["task_types"]),
+        )
+    else:
+        expected_runs = "MOABB session/run pairs (normally 12 per subject)"
     print("Protocol: other-subject pretraining -> target-subject run adaptation.")
     print(
         "Pretrain split=train/validation/test with configured 0.70/0.15/0.15; "
         "each target run is split evenly into validation/test."
     )
     print(
-        f"Targets={','.join(f'S{value:03d}' for value in target_subjects)}, "
+        "Targets="
+        f"{','.join(format_subject_id(value, dataset_name) for value in target_subjects)}, "
         f"expected runs={expected_runs}, pretrain epochs={pretrain_cfg['epochs']}, "
         f"fine-tune epochs={fine_tune_cfg['epochs']}."
     )
@@ -621,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
         run_labels,
         target_subjects,
         num_classes=num_classes,
+        dataset_name=dataset_name,
     )
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -661,7 +676,7 @@ def main(argv: list[str] | None = None) -> int:
     run_rows: list[dict[str, Any]] = []
 
     for target_position, target_number in enumerate(target_subjects, start=1):
-        target = f"S{target_number:03d}"
+        target = format_subject_id(target_number, dataset_name)
         target_dir = run_dir / target
         target_dir.mkdir()
         target_mask = subject_labels == target
@@ -1003,7 +1018,11 @@ def main(argv: list[str] | None = None) -> int:
     pooled_pred = np.concatenate([row["_y_pred"] for row in run_rows])
     subject_accuracies = [float(row["Accuracy (%)"]) / 100.0 for row in subject_rows]
     overall = {
-        "protocol": "other-subject 70/15/15 pretraining plus target-run validation/test adaptation",
+        "protocol": (
+            "other-subject 70/15/15 pretraining plus target-run "
+            "validation/test adaptation"
+        ),
+        "dataset": dataset_name,
         "pretrain_validation_fraction": float(
             pretrain_cfg.get("validation_size", 0.15)
         ),

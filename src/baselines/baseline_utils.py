@@ -473,12 +473,7 @@ def load_spd_like_train(
         else:
             x_spd, y, class_names, subject_labels = loaded
     elif dataset_name == "bnci2014_001":
-        if return_runs:
-            raise ValueError(
-                "Run-based baseline evaluation is currently supported for "
-                "PhysioNet-MI only."
-            )
-        x_spd, y, class_names, subject_labels = preprocess_bci_iv_2a_spd(
+        loaded = preprocess_bci_iv_2a_spd(
             filter_bank=filter_bank,
             root_dir=str(data_cfg.get("root_dir", "data")),
             subjects=subjects,
@@ -519,7 +514,12 @@ def load_spd_like_train(
                 data_cfg.get("moabb_force_update", False),
                 default=False,
             ),
+            return_runs=return_runs,
         )
+        if return_runs:
+            x_spd, y, class_names, subject_labels, run_labels = loaded
+        else:
+            x_spd, y, class_names, subject_labels = loaded
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -620,11 +620,6 @@ def load_segmented_epochs_like_train(
             )
             bands.append(x_segments.astype(np.float32))
     elif dataset_name == "bnci2014_001":
-        if return_runs:
-            raise ValueError(
-                "Run-based CSP+LDA evaluation is currently supported for "
-                "PhysioNet-MI only."
-            )
         if use_ica:
             print(
                 "BCI IV-2a MOABB segmented loading uses epoched EEG arrays; "
@@ -659,6 +654,7 @@ def load_segmented_epochs_like_train(
             x_band = np.asarray(dataset["X"])
             current_labels = np.asarray(dataset["y"], dtype=np.str_)
             current_subject_labels = np.asarray(dataset["subject"], dtype=np.str_)
+            current_run_labels = np.asarray(dataset["run"], dtype=np.int16)
             if reject_threshold_uv is not None:
                 if keep_mask is None:
                     peak_to_peak_uv = np.ptp(x_band, axis=-1).max(axis=1)
@@ -672,16 +668,26 @@ def load_segmented_epochs_like_train(
                 x_band = x_band[keep_mask]
                 current_labels = current_labels[keep_mask]
                 current_subject_labels = current_subject_labels[keep_mask]
+                current_run_labels = current_run_labels[keep_mask]
 
             if labels is None:
                 labels = current_labels
                 subject_labels = current_subject_labels
+                if return_runs:
+                    run_labels = current_run_labels
                 class_names = list(dataset["events"])
             else:
                 if not np.array_equal(labels, current_labels):
                     raise RuntimeError("Labels changed across frequency bands.")
                 if not np.array_equal(subject_labels, current_subject_labels):
                     raise RuntimeError("Subject order changed across frequency bands.")
+                if return_runs and not np.array_equal(
+                    run_labels,
+                    current_run_labels,
+                ):
+                    raise RuntimeError(
+                        "Session/run order changed across frequency bands."
+                    )
 
             x_segments = segment_epochs(
                 x_band,
@@ -712,7 +718,7 @@ def load_segmented_epochs_like_train(
     )
     if return_runs:
         if run_labels is None or len(run_labels) != len(y):
-            raise RuntimeError("PhysioNet run labels are missing or misaligned.")
+            raise RuntimeError("Run labels are missing or misaligned.")
         return result[:3] + (np.asarray(run_labels, dtype=np.int16),) + result[3:]
     return result
 
