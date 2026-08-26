@@ -8,7 +8,7 @@ data:
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
 
   # Subjects to evaluate/fine-tune. This matches train_grid.yaml semantics.
-  subjects: 1
+  subjects: 1-87,90-91,93-99,101-103,105,107-109
   # Full cohort available for preprocessing and other-subject pretraining.
   # Exclude S088, S089, S092, S100, S104, and S106.
   pretrain_subjects: 1-87,90-91,93-99,101-103,105,107-109
@@ -79,13 +79,13 @@ pretrain:
   epochs: [100]
   batch_size: [128]
   precision: ["float32"]
-  learning_rate: [0.0022]
-  stiefel_learning_rate: [0.0003]
+  learning_rate: [0.006]
+  stiefel_learning_rate: [0.0015]
   lr_scheduler: ["plateau"]
   lr_scheduler_metric: ["validation_macro_f1"]
   lr_scheduler_mode: ["max"]
   lr_scheduler_factor: [0.5]
-  lr_scheduler_patience: [9]
+  lr_scheduler_patience: [6]
   lr_scheduler_threshold: [0.0008]
   lr_scheduler_threshold_mode: ["abs"]
   lr_scheduler_min_lr: [1.0e-5]
@@ -93,13 +93,13 @@ pretrain:
   weight_decay: [0.01]
   apply_weight_decay_to_special_parameters: [true]
   gradient_clip_norm: [0.8]
-  early_stopping_patience: [11]
+  early_stopping_patience: [10]
   early_stopping_min_delta: [0.0008]
   condition_regularization_weight: [0.0]
   seed: [42]
   num_workers: [0]
   pin_memory: [true]
-  allow_tf32: [true]
+  allow_tf32: [false]
 
 fine_tune:
   # One selected target run is stratified approximately 50/50 into
@@ -107,13 +107,13 @@ fine_tune:
   epochs: [50]
   batch_size: [32]
   precision: ["float32"]
-  learning_rate: [0.001]
-  stiefel_learning_rate: [0.0001]
+  learning_rate: [0.002]
+  stiefel_learning_rate: [0.0002]
   lr_scheduler: ["plateau"]
   lr_scheduler_metric: ["validation_macro_f1"]
   lr_scheduler_mode: ["max"]
   lr_scheduler_factor: [0.5]
-  lr_scheduler_patience: [5]
+  lr_scheduler_patience: [6]
   lr_scheduler_threshold: [0.0008]
   lr_scheduler_threshold_mode: ["abs"]
   lr_scheduler_min_lr: [1.0e-5]
@@ -121,12 +121,12 @@ fine_tune:
   weight_decay: [0.01]
   apply_weight_decay_to_special_parameters: [true]
   gradient_clip_norm: [0.8]
-  early_stopping_patience: [8]
+  early_stopping_patience: [9]
   early_stopping_min_delta: [0.0008]
   condition_regularization_weight: [0.0]
   num_workers: [0]
   pin_memory: [true]
-  allow_tf32: [true]
+  allow_tf32: [false]
 
 output:
   dir: experiments/results/physionet_pretrain_finetune_loro
