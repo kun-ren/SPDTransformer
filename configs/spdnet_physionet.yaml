@@ -49,15 +49,15 @@ model:
 
 training:
   seed: [42]
-  # Train a fresh SPDNet independently for every subject/held-out-run split.
+  # Train a fresh SPDNet independently for every subject.
   subject_specific: [true]
-  # Each run is held out once and split approximately 50/50 into
-  # validation/test. All other runs from the same subject are training data.
-  held_out_run_validation_size: [0.5]
+  # Pool all runs and make one stratified trial-level train/test split.
+  # No validation dataset or validation-based early stopping is used.
+  train_size: [0.7]
+  test_size: [0.3]
   precision: ["float64"]
   # Official SPDNet optimization uses 500 epochs, batch size 30, SGD with
-  # learning rate 0.01 and weight decay 5e-4. Validation-based early stopping
-  # normally terminates earlier on these small subject-specific folds.
+  # learning rate 0.01 and weight decay 5e-4.
   epochs: [500]
   batch_size: [30]
   spdnet_optimizer: ["sgd"]
@@ -65,11 +65,9 @@ training:
   spdnet_momentum: [0.0]
   spdnet_weight_decay: [0.0005]
   gradient_clip_norm: [5.0]
-  early_stopping_patience: [30]
-  early_stopping_min_delta: [0.0001]
   log_every: [10]
   split_file: [null]
   num_workers: [0]
 
 output:
-  dir: experiments/results/spdnet_subject_specific_physionet
+  dir: experiments/results/spdnet_subject_trial_split_physionet

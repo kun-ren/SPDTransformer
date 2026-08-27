@@ -37,7 +37,7 @@ from src.baselines.baseline_utils import (
     expand_grid,
     load_spd_like_train,
     load_yaml,
-    make_subject_specific_loro_splits,
+    make_subject_specific_trial_splits,
     matrix_exp,
     matrix_log,
     normalize_dataset_name,
@@ -859,7 +859,6 @@ def run_differentiable_mdm(
     x_spd: np.ndarray,
     y: np.ndarray,
     train_idx: np.ndarray,
-    validation_idx: np.ndarray,
     test_idx: np.ndarray,
     class_names: list[str],
     model_cfg: dict[str, Any],
@@ -933,15 +932,6 @@ def run_differentiable_mdm(
             num_workers,
             pin_memory,
         ),
-        "validation": make_log_spd_loader(
-            x_log,
-            y_tensor,
-            validation_idx,
-            batch_size,
-            False,
-            num_workers,
-            pin_memory,
-        ),
         "test": make_log_spd_loader(
             x_log,
             y_tensor,
@@ -965,20 +955,12 @@ def run_differentiable_mdm(
     epochs = int(training_cfg.get("epochs", 100))
     if epochs < 1:
         raise ValueError(f"epochs must be positive, got {epochs}.")
-    patience = int(training_cfg.get("early_stopping_patience", 12))
-    min_delta = float(training_cfg.get("early_stopping_min_delta", 0.0))
-    if patience < 1:
-        raise ValueError("early_stopping_patience must be positive.")
-
     print(
         f"  classifier=differentiable dtype={dtype} device={device} "
         f"epochs={epochs} batch_size={batch_size} pooling={pooling}",
         flush=True,
     )
     history_rows: list[dict[str, Any]] = []
-    best_validation_macro_f1 = -np.inf
-    best_epoch = 0
-    best_state: dict[str, torch.Tensor] | None = None
     for epoch in range(1, epochs + 1):
         train_metrics = train_differentiable_epoch(
             model,
@@ -988,12 +970,6 @@ def run_differentiable_mdm(
             device,
             gradient_clip_norm,
         )
-        validation_metrics = evaluate_differentiable(
-            model,
-            loaders["validation"],
-            criterion,
-            device,
-        )
         history_rows.append(
             {
                 "epoch": epoch,
@@ -1002,55 +978,29 @@ def run_differentiable_mdm(
                 "train_accuracy": train_metrics["accuracy"],
                 "train_macro_f1": train_metrics["macro_f1"],
                 "train_cohen_kappa": train_metrics["cohen_kappa"],
-                "validation_loss": validation_metrics["loss"],
-                "validation_accuracy": validation_metrics["accuracy"],
-                "validation_macro_f1": validation_metrics["macro_f1"],
-                "validation_cohen_kappa": validation_metrics["cohen_kappa"],
             }
         )
-        improved = (
-            validation_metrics["macro_f1"]
-            > best_validation_macro_f1 + min_delta
-        )
-        if improved:
-            best_validation_macro_f1 = float(validation_metrics["macro_f1"])
-            best_epoch = epoch
-            best_state = {
-                name: tensor.detach().cpu().clone()
-                for name, tensor in model.state_dict().items()
-            }
         print(
             f"  epoch {epoch:03d}/{epochs} | "
             f"train loss={train_metrics['loss']:.4f} "
             f"acc={train_metrics['accuracy']:.4f} "
-            f"mf1={train_metrics['macro_f1']:.4f} | "
-            f"validation loss={validation_metrics['loss']:.4f} "
-            f"acc={validation_metrics['accuracy']:.4f} "
-            f"mf1={validation_metrics['macro_f1']:.4f}"
-            f"{' [best]' if improved else ''}",
+            f"mf1={train_metrics['macro_f1']:.4f}",
             flush=True,
         )
-        if epoch - best_epoch >= patience:
-            print(
-                f"  early stopping at epoch {epoch}; best epoch={best_epoch}, "
-                f"validation_mf1={best_validation_macro_f1:.4f}.",
-                flush=True,
-            )
-            break
 
     write_csv(run_dir / "history.csv", history_rows)
-    if best_state is None:
-        raise RuntimeError("Differentiable MDM did not produce a checkpoint.")
-    model.load_state_dict(best_state)
+    final_state = {
+        name: tensor.detach().cpu().clone()
+        for name, tensor in model.state_dict().items()
+    }
     torch.save(
         {
-            "model_state_dict": best_state,
+            "model_state_dict": final_state,
             "class_names": class_names,
             "config": experiment_cfg,
             "x_spd_shape": list(x_spd.shape),
             "token_shape": list(token_shape),
-            "best_epoch": best_epoch,
-            "best_validation_macro_f1": best_validation_macro_f1,
+            "epochs_completed": epochs,
         },
         run_dir / "model.pt",
     )
@@ -1059,7 +1009,6 @@ def run_differentiable_mdm(
     test_predictions: dict[str, list[int]] | None = None
     for split_name, split_idx, loader_name in (
         ("train", train_idx, "train_eval"),
-        ("validation", validation_idx, "validation"),
         ("test", test_idx, "test"),
     ):
         metrics = evaluate_differentiable(
@@ -1106,8 +1055,7 @@ def run_differentiable_mdm(
         "token_pooling": pooling_summary,
         "training_epochs_requested": epochs,
         "training_epochs_completed": len(history_rows),
-        "best_epoch": best_epoch,
-        "best_validation_macro_f1": best_validation_macro_f1,
+        "uses_validation": False,
         "learned_logit_scale": float(learned_scale.detach().cpu()),
         "parameter_count": int(sum(parameter.numel() for parameter in model.parameters())),
         "test_predictions": test_predictions,
@@ -1254,7 +1202,7 @@ def get_train_test_indices(
 def validate_mdm_cv_config(
     training_cfg: dict[str, Any],
     data_cfg: dict[str, Any],
-) -> tuple[int, int, bool, float]:
+) -> tuple[int, int, bool, float, float]:
     n_splits = int(training_cfg.get("n_splits", 5))
     seed = int(data_cfg.get("seed", training_cfg.get("seed", 42)))
     test_size = float(data_cfg.get("test_size", training_cfg.get("test_size", 0.2)))
@@ -1272,11 +1220,17 @@ def validate_mdm_cv_config(
     subject_specific = parse_bool(
         training_cfg.get("subject_specific", False), default=False
     )
-    held_out_run_validation_size = float(
-        training_cfg.get("held_out_run_validation_size", 0.5)
-    )
-    if subject_specific and not 0.0 < held_out_run_validation_size < 1.0:
-        raise ValueError("held_out_run_validation_size must be between 0 and 1.")
+    train_size = float(training_cfg.get("train_size", 0.7))
+    subject_test_size = float(training_cfg.get("test_size", 0.3))
+    if subject_specific and (
+        not 0.0 < train_size < 1.0
+        or not 0.0 < subject_test_size < 1.0
+        or not np.isclose(train_size + subject_test_size, 1.0)
+    ):
+        raise ValueError(
+            "Subject-specific train_size and test_size must be in (0, 1) "
+            "and sum to 1.0."
+        )
     if not subject_specific and not np.isclose(val_size, 0.0):
         raise ValueError(
             "MDM K-fold evaluation does not use a validation dataset; "
@@ -1289,7 +1243,7 @@ def validate_mdm_cv_config(
             f"got test_size={test_size} and n_splits={n_splits} "
             f"(expected {expected_test_size:.6f})."
         )
-    return n_splits, seed, allow_subject_overlap, held_out_run_validation_size
+    return n_splits, seed, allow_subject_overlap, train_size, subject_test_size
 
 
 def make_mdm_cv_splits(
@@ -1367,7 +1321,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "MDM baseline with the same SPD preprocessing as train.py and "
-            "optional subject-specific leave-one-run-out evaluation."
+            "optional subject-specific stratified trial train/test evaluation."
         )
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -1446,17 +1400,18 @@ def run_experiment(
         n_splits,
         seed,
         allow_subject_overlap,
-        held_out_run_validation_size,
+        train_size,
+        subject_test_size,
     ) = validate_mdm_cv_config(training_cfg, data_cfg)
     subject_specific = parse_bool(
         training_cfg.get("subject_specific", False), default=False
     )
     if subject_specific:
-        fold_specs = make_subject_specific_loro_splits(
+        fold_specs = make_subject_specific_trial_splits(
             y,
             subject_labels,
-            run_labels,
-            held_out_run_validation_size=held_out_run_validation_size,
+            train_size=train_size,
+            test_size=subject_test_size,
             seed=seed,
         )
     else:
@@ -1488,10 +1443,9 @@ def run_experiment(
         [
             {
                 "subject": subject if subject_specific else None,
-                "test_run": int(fold_index) if subject_specific else None,
+                "split": "trial_random" if subject_specific else None,
                 "fold": None if subject_specific else fold_index,
                 "train_indices": train_idx.astype(int).tolist(),
-                "validation_indices": validation_idx.astype(int).tolist(),
                 "test_indices": test_idx.astype(int).tolist(),
             }
             for subject, fold_index, train_idx, validation_idx, test_idx in fold_specs
@@ -1528,7 +1482,7 @@ def run_experiment(
             )
             tsupdate = None
             n_jobs = int(model_cfg.get("n_jobs", 1))
-        for subject, held_out_run, train_idx, validation_idx, test_idx in fold_specs:
+        for subject, held_out_run, train_idx, _validation_idx, test_idx in fold_specs:
             if classifier_type == "fgmdm":
                 classifier = FgMDM(
                     metric=metric,
@@ -1538,33 +1492,15 @@ def run_experiment(
             else:
                 classifier = MDM(metric=metric, n_jobs=n_jobs)
             classifier.fit(x_trial_spd[train_idx], y[train_idx])
-            validation_prediction = (
-                classifier.predict(x_trial_spd[validation_idx])
-                if subject_specific
-                else None
-            )
             prediction = classifier.predict(x_trial_spd[test_idx])
             row = {
                 **({"subject": subject} if subject_specific else {}),
                 **(
-                    {"test_run": int(held_out_run)}
-                    if subject_specific
-                    else {"fold": held_out_run}
+                    {} if subject_specific else {"fold": held_out_run}
                 ),
                 "n_train": int(len(train_idx)),
-                "n_validation": int(len(validation_idx)),
                 "n_test": int(len(test_idx)),
             }
-            if validation_prediction is not None:
-                validation_metrics = compute_mdm_metrics(
-                    y[validation_idx], validation_prediction
-                )
-                row.update(
-                    {
-                        f"validation_{name}": value
-                        for name, value in validation_metrics.items()
-                    }
-                )
             row.update(compute_mdm_metrics(y[test_idx], prediction))
             row["_y_true"] = y[test_idx].astype(int).tolist()
             row["_y_pred"] = np.asarray(prediction, dtype=int).tolist()
@@ -1573,15 +1509,9 @@ def run_experiment(
             print(
                 f"[MDM {'subject ' + subject + ' ' if subject_specific else ''}"
                 + (
-                    f"test run R{int(held_out_run):02d}] "
+                    "trial-random split] "
                     if subject_specific
                     else f"fold {held_out_run}/{n_splits}] "
-                )
-                + (
-                    f"validation_accuracy={row['validation_accuracy']:.4f} "
-                    f"validation_mf1={row['validation_macro_f1']:.4f} | "
-                    if subject_specific
-                    else ""
                 )
                 + f"test_accuracy={row['accuracy']:.4f} "
                 f"test_mf1={row['macro_f1']:.4f} "
@@ -1606,9 +1536,9 @@ def run_experiment(
                 "classifier_type='pyriemann' or 'fgmdm'."
             )
         fold_details = []
-        for subject, held_out_run, train_idx, validation_idx, test_idx in fold_specs:
+        for subject, held_out_run, train_idx, _validation_idx, test_idx in fold_specs:
             fold_dir = (
-                run_dir / subject / f"test_R{int(held_out_run):02d}"
+                run_dir / subject / "trial_random_split"
                 if subject_specific
                 else run_dir / f"fold_{held_out_run:02d}"
             )
@@ -1617,7 +1547,6 @@ def run_experiment(
                 x_spd=x_spd,
                 y=y,
                 train_idx=train_idx,
-                validation_idx=validation_idx,
                 test_idx=test_idx,
                 class_names=class_names,
                 model_cfg=model_cfg,
@@ -1631,22 +1560,10 @@ def run_experiment(
             row = {
                 **({"subject": subject} if subject_specific else {}),
                 **(
-                    {"test_run": int(held_out_run)}
-                    if subject_specific
-                    else {"fold": held_out_run}
+                    {} if subject_specific else {"fold": held_out_run}
                 ),
                 "n_train": int(len(train_idx)),
-                "n_validation": int(len(validation_idx)),
                 "n_test": int(len(test_idx)),
-                "validation_accuracy": next(
-                    item for item in rows if item["split"] == "validation"
-                )["accuracy"],
-                "validation_macro_f1": next(
-                    item for item in rows if item["split"] == "validation"
-                )["macro_f1"],
-                "validation_cohen_kappa": next(
-                    item for item in rows if item["split"] == "validation"
-                )["cohen_kappa"],
                 "accuracy": test_row["accuracy"],
                 "macro_f1": test_row["macro_f1"],
                 "cohen_kappa": test_row["cohen_kappa"],
@@ -1663,9 +1580,7 @@ def run_experiment(
                 {
                     **({"subject": subject} if subject_specific else {}),
                     **(
-                        {"test_run": int(held_out_run)}
-                        if subject_specific
-                        else {"fold": held_out_run}
+                        {} if subject_specific else {"fold": held_out_run}
                     ),
                     **details,
                 }
@@ -1674,32 +1589,24 @@ def run_experiment(
             print(
                 f"[MDM {'subject ' + subject + ' ' if subject_specific else ''}"
                 + (
-                    f"test run R{int(held_out_run):02d}] "
+                    "trial-random split] "
                     if subject_specific
                     else f"fold {held_out_run}/{n_splits}] "
                 )
-                + f"validation_accuracy={row['validation_accuracy']:.4f} "
-                f"validation_mf1={row['validation_macro_f1']:.4f} | "
-                f"test_accuracy={row['accuracy']:.4f} "
+                + f"test_accuracy={row['accuracy']:.4f} "
                 f"test_mf1={row['macro_f1']:.4f} "
                 f"test_kappa={row['cohen_kappa']:.4f}",
                 flush=True,
             )
         classifier_details = dict(fold_details[0])
         classifier_details.pop("fold", None)
-        classifier_details.pop("test_run", None)
         classifier_details.pop("subject", None)
         classifier_details["fold_details"] = fold_details
 
     aggregates = aggregate_mdm_fold_metrics(fold_rows)
     subject_rows = summarize_subject_fold_metrics(
         fold_rows,
-        (
-            "validation_accuracy",
-            "validation_macro_f1",
-            "validation_cohen_kappa",
-            *MDM_REPORT_METRICS,
-        ),
+        MDM_REPORT_METRICS,
     )
     if subject_specific:
         print("\nMDM pooled subject-specific test results")
@@ -1721,7 +1628,7 @@ def run_experiment(
     # Keep the historical filename for downstream analysis scripts.
     write_csv(run_dir / "results.csv", public_fold_rows)
     if subject_specific:
-        write_csv(run_dir / "per_run_results.csv", public_fold_rows)
+        write_csv(run_dir / "per_subject_results.csv", public_fold_rows)
     write_csv(run_dir / "per_subject_summary.csv", subject_rows)
 
     summary = {
@@ -1732,7 +1639,7 @@ def run_experiment(
         "x_spd_shape": list(x_spd.shape),
         "evaluation": {
             "strategy": (
-                "subject_specific_leave_one_run_out"
+                "subject_specific_stratified_trial_train_test"
                 if subject_specific
                 else (
                     "stratified_kfold"
@@ -1742,13 +1649,13 @@ def run_experiment(
             ),
             "n_splits": None if subject_specific else n_splits,
             "test_size_per_fold": None if subject_specific else 1.0 / n_splits,
-            "held_out_run_validation_size": (
-                held_out_run_validation_size if subject_specific else None
-            ),
+            "train_size": train_size if subject_specific else None,
+            "test_size": subject_test_size if subject_specific else 1.0 / n_splits,
+            "uses_validation": False,
             "seed": seed,
         },
         "folds": public_fold_rows,
-        "runs": public_fold_rows if subject_specific else [],
+        "runs": [],
         "splits_file": "splits.json",
         "subjects": subject_rows,
         "aggregates": aggregates,

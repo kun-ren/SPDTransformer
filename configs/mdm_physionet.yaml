@@ -44,9 +44,10 @@ model:
 
 training:
   seed: [42]
-  # Each run is held out once and split approximately 50/50 into
-  # validation/test. All other runs from the same subject are training data.
-  held_out_run_validation_size: [0.5]
+  # Pool all runs inside each subject and make one stratified trial-level
+  # train/test split. No validation dataset is created.
+  train_size: [0.7]
+  test_size: [0.3]
   # Fit class prototypes independently for every subject.
   subject_specific: [true]
   split_file: null
@@ -56,12 +57,10 @@ training:
   learning_rate: [0.01]
   weight_decay: [0.0]
   gradient_clip_norm: [1.0]
-  early_stopping_patience: [12]
-  early_stopping_min_delta: [0.0008]
   precision: ["float32"]
   num_workers: [0]
   pin_memory: [true]
 
 output:
-  dir: experiments/results/mdm_subject_specific_physionet
+  dir: experiments/results/mdm_subject_trial_split_physionet
   dataset_cache_dir: experiments/cache/mdm_preprocessed_datasets

@@ -1,11 +1,11 @@
-"""Cross-subject pretraining followed by target-subject run adaptation.
+"""Cross-subject pretraining followed by target-subject trial adaptation.
 
 For each requested target subject:
 1. train a fresh model on every trial from all *other* subjects;
-2. restore that identical pretrained state for every target recording run;
-3. fine-tune on the target subject's remaining runs;
-4. split that run evenly into validation/test trials;
-5. use validation for scheduling/early stopping and test the best checkpoint once.
+2. pool and shuffle every retained trial from the target subject;
+3. split those trials once into configurable train/test partitions;
+4. fine-tune for a fixed number of epochs without a validation dataset;
+5. evaluate the final weights on the test partition once.
 
 Other-subject pretraining independently uses stratified train/validation/test
 partitions (70/15/15 by default).
@@ -323,6 +323,70 @@ def train_with_early_stopping(
     return best_state, best_epoch, best_validation_macro_f1
 
 
+def train_fixed_epochs(
+    model: nn.Module,
+    train_loader: DataLoader,
+    cfg: dict[str, Any],
+    *,
+    device: torch.device,
+    history_path: Path,
+    stage_name: str,
+) -> dict[str, torch.Tensor]:
+    """Train without validation or test-time model selection."""
+
+    epochs = int(cfg.get("epochs", 1))
+    if epochs < 1:
+        raise ValueError(f"{stage_name}.epochs must be at least 1.")
+    scheduler_name = str(cfg.get("lr_scheduler", "none")).strip().lower()
+    if scheduler_name not in {"", "none", "null", "off", "false"}:
+        raise ValueError(
+            f"{stage_name}.lr_scheduler must be 'none' without validation; "
+            f"got {scheduler_name!r}."
+        )
+    optimizer, optimizer_stiefel = make_optimizers(model, cfg)
+    criterion = nn.CrossEntropyLoss()
+    gradient_clip_norm = cfg.get("gradient_clip_norm", 1.0)
+    if gradient_clip_norm is not None:
+        gradient_clip_norm = float(gradient_clip_norm)
+    condition_weight = float(cfg.get("condition_regularization_weight", 0.0))
+    history: list[dict[str, Any]] = []
+    for epoch in range(1, epochs + 1):
+        metrics = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            optimizer_stiefel,
+            device,
+            gradient_clip_norm=gradient_clip_norm,
+            condition_regularization_weight=condition_weight,
+        )
+        row = {
+            "epoch": epoch,
+            "train_loss": float(metrics["loss"]),
+            "train_accuracy": float(metrics["accuracy"]),
+            "train_macro_f1": float(metrics["macro_f1"]),
+            "euclid_lr": optimizer_lr_values(optimizer)[0],
+            "stiefel_lr": (
+                optimizer_lr_values(optimizer_stiefel)[0]
+                if optimizer_stiefel is not None
+                else None
+            ),
+        }
+        history.append(row)
+        lr_text = f"lr={row['euclid_lr']:.3e}"
+        if row["stiefel_lr"] is not None:
+            lr_text += f", stiefel_lr={row['stiefel_lr']:.3e}"
+        print(
+            f"    {stage_name} epoch {epoch:03d}/{epochs}: "
+            f"train loss={row['train_loss']:.4f}, "
+            f"accuracy={row['train_accuracy']:.4f}, "
+            f"mf1={row['train_macro_f1']:.4f} | {lr_text}"
+        )
+    _write_csv(history_path, history)
+    return _cpu_state_dict(model)
+
+
 def make_pretrain_split(
     indices: np.ndarray,
     y: np.ndarray,
@@ -359,24 +423,33 @@ def make_pretrain_split(
     )
 
 
-def split_run_validation_test(
-    run_indices: np.ndarray,
+def split_target_train_test(
+    target_indices: np.ndarray,
     y: np.ndarray,
     *,
+    train_size: float,
+    test_size: float,
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Stratify one held-out run as evenly as its odd trial count permits."""
+    """Pool all target runs and make one stratified trial-level split."""
 
-    run_indices = np.asarray(run_indices, dtype=np.int64)
-    validation_idx, test_idx = train_test_split(
-        run_indices,
-        test_size=0.5,
+    if not 0.0 < train_size < 1.0 or not 0.0 < test_size < 1.0:
+        raise ValueError("fine_tune train_size and test_size must be in (0, 1).")
+    if not np.isclose(train_size + test_size, 1.0):
+        raise ValueError(
+            "fine_tune train_size and test_size must sum to 1.0; "
+            f"got {train_size} + {test_size}."
+        )
+    target_indices = np.asarray(target_indices, dtype=np.int64)
+    train_idx, test_idx = train_test_split(
+        target_indices,
+        test_size=test_size,
         random_state=seed,
         shuffle=True,
-        stratify=y[run_indices],
+        stratify=y[target_indices],
     )
     return (
-        np.asarray(validation_idx, dtype=np.int64),
+        np.asarray(train_idx, dtype=np.int64),
         np.asarray(test_idx, dtype=np.int64),
     )
 
@@ -384,16 +457,14 @@ def split_run_validation_test(
 def validate_protocol(
     y: np.ndarray,
     subject_labels: np.ndarray,
-    run_labels: np.ndarray,
     target_subjects: list[int],
     *,
     num_classes: int,
     dataset_name: str = "physionet_mi",
-) -> dict[str, list[int]]:
+) -> None:
     """Audit target availability and class coverage without changing splits."""
 
     available_subjects = set(subject_labels.tolist())
-    run_map: dict[str, list[int]] = {}
     for target_number in target_subjects:
         target = format_subject_id(target_number, dataset_name)
         if target not in available_subjects:
@@ -404,31 +475,14 @@ def validate_protocol(
             raise ValueError(f"{target} has no other subjects available for pretraining.")
         if set(np.unique(y[pretrain_mask]).tolist()) != set(range(num_classes)):
             raise ValueError(f"Other-subject pretraining data for {target} lacks classes.")
-        target_runs = sorted(int(value) for value in np.unique(run_labels[target_mask]))
-        if len(target_runs) < 2:
-            raise ValueError(f"{target} needs at least two retained runs for LORO.")
-        for test_run in target_runs:
-            fine_tune_mask = target_mask & (run_labels != test_run)
-            held_out_run_mask = target_mask & (run_labels == test_run)
-            if not fine_tune_mask.any() or not held_out_run_mask.any():
-                raise RuntimeError(f"Empty LORO split for {target} R{test_run:02d}.")
-            if set(np.unique(y[fine_tune_mask]).tolist()) != set(range(num_classes)):
-                raise ValueError(
-                    f"Fine-tuning data for {target} excluding R{test_run:02d} "
-                    "does not contain every class."
-                )
-            held_out_counts = np.bincount(
-                y[held_out_run_mask], minlength=num_classes
+        target_counts = np.bincount(y[target_mask], minlength=num_classes)
+        if set(np.unique(y[target_mask]).tolist()) != set(range(num_classes)):
+            raise ValueError(f"Target data for {target} lacks classes.")
+        if int(target_counts[target_counts > 0].min()) < 2:
+            raise ValueError(
+                f"Target {target} cannot be stratified into train/test; "
+                f"class counts are {target_counts.tolist()}."
             )
-            present_counts = held_out_counts[held_out_counts > 0]
-            if len(present_counts) == 0 or int(present_counts.min()) < 2:
-                raise ValueError(
-                    f"{target} R{test_run:02d} cannot be stratified into "
-                    "validation/test halves; class counts are "
-                    f"{held_out_counts.tolist()}."
-                )
-        run_map[target] = target_runs
-    return run_map
 
 
 def _run_metrics(
@@ -577,10 +631,21 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         expected_runs = "MOABB session/run pairs (normally 12 per subject)"
-    print("Protocol: other-subject pretraining -> target-subject run adaptation.")
+    fine_tune_train_size = float(fine_tune_cfg.get("train_size", 0.7))
+    fine_tune_test_size = float(fine_tune_cfg.get("test_size", 0.3))
+    if (
+        not 0.0 < fine_tune_train_size < 1.0
+        or not 0.0 < fine_tune_test_size < 1.0
+        or not np.isclose(fine_tune_train_size + fine_tune_test_size, 1.0)
+    ):
+        raise ValueError(
+            "fine_tune train_size and test_size must be in (0, 1) and sum to 1.0."
+        )
+    print("Protocol: other-subject pretraining -> target-subject trial adaptation.")
     print(
         "Pretrain split=train/validation/test with configured 0.70/0.15/0.15; "
-        "each target run is split evenly into validation/test."
+        "all target runs are pooled into one stratified train/test split "
+        f"({fine_tune_train_size:.2f}/{fine_tune_test_size:.2f}) without validation."
     )
     print(
         "Targets="
@@ -629,10 +694,9 @@ def main(argv: list[str] | None = None) -> int:
             f"This experiment needs at least two classes, got "
             f"{num_classes}: {class_names}."
         )
-    run_map = validate_protocol(
+    validate_protocol(
         y,
         subject_labels,
-        run_labels,
         target_subjects,
         num_classes=num_classes,
         dataset_name=dataset_name,
@@ -836,182 +900,140 @@ def main(argv: list[str] | None = None) -> int:
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-        for fold_position, test_run in enumerate(run_map[target], start=1):
-            fold_dir = target_dir / f"test_R{test_run:02d}"
-            fold_dir.mkdir()
-            fine_tune_indices = np.flatnonzero(target_mask & (run_labels != test_run))
-            held_out_run_indices = np.flatnonzero(
-                target_mask & (run_labels == test_run)
+        adaptation_dir = target_dir / "trial_random_split"
+        adaptation_dir.mkdir()
+        target_indices = np.flatnonzero(target_mask)
+        fine_tune_indices, test_indices = split_target_train_test(
+            target_indices,
+            y,
+            train_size=fine_tune_train_size,
+            test_size=fine_tune_test_size,
+            seed=seed + target_number * 100,
+        )
+        if np.intersect1d(fine_tune_indices, test_indices).size:
+            raise RuntimeError(f"Fine-tune/test overlap for {target}.")
+        if len(fine_tune_indices) + len(test_indices) != len(target_indices):
+            raise RuntimeError(f"Fine-tune/test split omitted trials for {target}.")
+        print(
+            f"  pooled target trials={len(target_indices)}: "
+            f"fine-tune={len(fine_tune_indices)}, test={len(test_indices)}."
+        )
+        set_seed(seed + target_number * 100)
+        model = make_model(
+            config["model"],
+            x,
+            num_classes,
+            device=device,
+            dtype=dtype,
+        )
+        model.load_state_dict(pretrained_state)
+        fine_tune_loader = make_loader(
+            full_dataset,
+            fine_tune_indices,
+            batch_size=int(fine_tune_cfg.get("batch_size", 32)),
+            shuffle=True,
+            num_workers=int(fine_tune_cfg.get("num_workers", num_workers)),
+            pin_memory=parse_bool(
+                fine_tune_cfg.get("pin_memory", pin_memory), default=pin_memory
+            ),
+        )
+        final_state = train_fixed_epochs(
+            model,
+            fine_tune_loader,
+            fine_tune_cfg,
+            device=device,
+            history_path=adaptation_dir / "fine_tune_history.csv",
+            stage_name="fine-tune",
+        )
+        test_loader = make_loader(
+            full_dataset,
+            test_indices,
+            batch_size=int(fine_tune_cfg.get("batch_size", 32)),
+            shuffle=False,
+            num_workers=int(fine_tune_cfg.get("num_workers", num_workers)),
+            pin_memory=parse_bool(
+                fine_tune_cfg.get("pin_memory", pin_memory), default=pin_memory
+            ),
+        )
+        predictions = predict_loader(
+            model,
+            test_loader,
+            nn.CrossEntropyLoss(),
+            device,
+            condition_regularization_weight=float(
+                fine_tune_cfg.get("condition_regularization_weight", 0.0)
+            ),
+        )
+        metrics = _run_metrics(predictions, num_classes=num_classes)
+        present_names = [
+            class_names[int(value)]
+            for value in metrics["test_present_class_indices"].split(",")
+        ]
+        row: dict[str, Any] = {
+            "target_subject": target,
+            "fine_tune_runs": ",".join(
+                str(value) for value in sorted(np.unique(run_labels[fine_tune_indices]))
+            ),
+            "test_runs": ",".join(
+                str(value) for value in sorted(np.unique(run_labels[test_indices]))
+            ),
+            "n_pretrain_trials": int(len(pretrain_all_indices)),
+            "n_fine_tune_trials": int(len(fine_tune_indices)),
+            "n_test_trials": int(len(test_indices)),
+            "epochs_completed": int(fine_tune_cfg["epochs"]),
+            "test_present_classes": ",".join(present_names),
+            **metrics,
+            "_y_true": predictions["y_true"],
+            "_y_pred": predictions["y_pred"],
+        }
+        run_rows.append(row)
+        save_per_class_metrics(
+            adaptation_dir / "per_class_metrics.csv", {"test": predictions}, class_names
+        )
+        save_confusion_matrices(
+            adaptation_dir / "confusion_matrix.csv", {"test": predictions}, class_names
+        )
+        with (adaptation_dir / "split.json").open("w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "target_subject": target,
+                    "strategy": "stratified_trial_random_train_test",
+                    "train_size": fine_tune_train_size,
+                    "test_size": fine_tune_test_size,
+                    "pretrain_subjects": sorted(
+                        set(subject_labels[pretrain_all_indices].tolist())
+                    ),
+                    "fine_tune_indices": fine_tune_indices.astype(int).tolist(),
+                    "test_indices": test_indices.astype(int).tolist(),
+                    "epochs_completed": int(fine_tune_cfg["epochs"]),
+                },
+                handle,
+                indent=2,
             )
-            validation_indices, test_indices = split_run_validation_test(
-                held_out_run_indices,
-                y,
-                seed=seed + target_number * 100 + test_run,
+        if parse_bool(
+            output_cfg.get("save_fine_tuned_checkpoints", False), default=False
+        ):
+            torch.save(
+                {
+                    "model_state_dict": final_state,
+                    "target_subject": target,
+                    "class_names": class_names,
+                },
+                adaptation_dir / "fine_tuned_model.pt",
             )
-            split_sets = [
-                set(fine_tune_indices.tolist()),
-                set(validation_indices.tolist()),
-                set(test_indices.tolist()),
-            ]
-            if any(split_sets[i] & split_sets[j] for i in range(3) for j in range(i + 1, 3)):
-                raise RuntimeError(
-                    f"Fine-tune/validation/test overlap for {target} R{test_run:02d}."
-                )
-            print(
-                f"  [{fold_position}/{len(run_map[target])}] test R{test_run:02d}: "
-                f"fine-tune={len(fine_tune_indices)}, "
-                f"validation={len(validation_indices)}, test={len(test_indices)} trials."
-            )
-            set_seed(seed + target_number * 100 + test_run)
-            model = make_model(
-                config["model"],
-                x,
-                num_classes,
-                device=device,
-                dtype=dtype,
-            )
-            model.load_state_dict(pretrained_state)
-            fine_tune_loader = make_loader(
-                full_dataset,
-                fine_tune_indices,
-                batch_size=int(fine_tune_cfg.get("batch_size", 32)),
-                shuffle=True,
-                num_workers=int(fine_tune_cfg.get("num_workers", num_workers)),
-                pin_memory=parse_bool(
-                    fine_tune_cfg.get("pin_memory", pin_memory),
-                    default=pin_memory,
-                ),
-            )
-            validation_loader = make_loader(
-                full_dataset,
-                validation_indices,
-                batch_size=int(fine_tune_cfg.get("batch_size", 32)),
-                shuffle=False,
-                num_workers=int(fine_tune_cfg.get("num_workers", num_workers)),
-                pin_memory=parse_bool(
-                    fine_tune_cfg.get("pin_memory", pin_memory),
-                    default=pin_memory,
-                ),
-            )
-            _, best_epoch, best_validation_mf1 = train_with_early_stopping(
-                model,
-                fine_tune_loader,
-                validation_loader,
-                fine_tune_cfg,
-                device=device,
-                history_path=fold_dir / "fine_tune_history.csv",
-                stage_name="fine-tune",
-            )
-            test_loader = make_loader(
-                full_dataset,
-                test_indices,
-                batch_size=int(fine_tune_cfg.get("batch_size", 32)),
-                shuffle=False,
-                num_workers=int(fine_tune_cfg.get("num_workers", num_workers)),
-                pin_memory=parse_bool(
-                    fine_tune_cfg.get("pin_memory", pin_memory),
-                    default=pin_memory,
-                ),
-            )
-            predictions = predict_loader(
-                model,
-                test_loader,
-                nn.CrossEntropyLoss(),
-                device,
-                condition_regularization_weight=float(
-                    fine_tune_cfg.get("condition_regularization_weight", 0.0)
-                ),
-            )
-            validation_predictions = predict_loader(
-                model,
-                validation_loader,
-                nn.CrossEntropyLoss(),
-                device,
-                condition_regularization_weight=float(
-                    fine_tune_cfg.get("condition_regularization_weight", 0.0)
-                ),
-            )
-            metrics = _run_metrics(predictions, num_classes=num_classes)
-            present_names = [
-                class_names[int(value)]
-                for value in metrics["test_present_class_indices"].split(",")
-            ]
-            row: dict[str, Any] = {
-                "target_subject": target,
-                "test_run": int(test_run),
-                "fine_tune_runs": ",".join(
-                    str(value)
-                    for value in sorted(np.unique(run_labels[fine_tune_indices]))
-                ),
-                "n_pretrain_trials": int(len(pretrain_all_indices)),
-                "n_fine_tune_trials": int(len(fine_tune_indices)),
-                "n_validation_trials": int(len(validation_indices)),
-                "n_test_trials": int(len(test_indices)),
-                "best_epoch": int(best_epoch),
-                "best_validation_macro_f1": float(best_validation_mf1),
-                "validation_accuracy": float(validation_predictions["accuracy"]),
-                "test_present_classes": ",".join(present_names),
-                **metrics,
-                "_y_true": predictions["y_true"],
-                "_y_pred": predictions["y_pred"],
-            }
-            run_rows.append(row)
-            save_per_class_metrics(
-                fold_dir / "per_class_metrics.csv",
-                {"validation": validation_predictions, "test": predictions},
-                class_names,
-            )
-            save_confusion_matrices(
-                fold_dir / "confusion_matrix.csv",
-                {"validation": validation_predictions, "test": predictions},
-                class_names,
-            )
-            with (fold_dir / "split.json").open("w", encoding="utf-8") as handle:
-                json.dump(
-                    {
-                        "target_subject": target,
-                        "test_run": int(test_run),
-                        "fine_tune_runs": sorted(
-                            int(value)
-                            for value in np.unique(run_labels[fine_tune_indices])
-                        ),
-                        "pretrain_subjects": sorted(
-                            set(subject_labels[pretrain_all_indices].tolist())
-                        ),
-                        "fine_tune_indices": fine_tune_indices.astype(int).tolist(),
-                        "validation_indices": validation_indices.astype(int).tolist(),
-                        "test_indices": test_indices.astype(int).tolist(),
-                        "best_epoch": int(best_epoch),
-                        "best_validation_macro_f1": float(best_validation_mf1),
-                    },
-                    handle,
-                    indent=2,
-                )
-            if parse_bool(
-                output_cfg.get("save_fine_tuned_checkpoints", False), default=False
-            ):
-                torch.save(
-                    {
-                        "model_state_dict": _cpu_state_dict(model),
-                        "target_subject": target,
-                        "test_run": int(test_run),
-                        "class_names": class_names,
-                    },
-                    fold_dir / "fine_tuned_model.pt",
-                )
-            print(
-                f"    test accuracy={row['test_accuracy']:.4f}, "
-                f"present-class macro-F1={row['test_macro_f1_present_classes']:.4f}"
-            )
-            del model, fine_tune_loader, validation_loader, test_loader
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
+        print(
+            f"    test accuracy={row['test_accuracy']:.4f}, "
+            f"present-class macro-F1={row['test_macro_f1_present_classes']:.4f}"
+        )
+        del model, fine_tune_loader, test_loader
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     public_run_rows = [
         {key: value for key, value in row.items() if not key.startswith("_")}
         for row in run_rows
     ]
-    _write_csv(run_dir / "per_run_results.csv", public_run_rows)
+    _write_csv(run_dir / "per_subject_results.csv", public_run_rows)
     subject_rows = summarize_subjects(run_rows, num_classes=num_classes)
     _write_csv(run_dir / "per_subject_summary.csv", subject_rows)
     pooled_true = np.concatenate([row["_y_true"] for row in run_rows])
@@ -1019,15 +1041,17 @@ def main(argv: list[str] | None = None) -> int:
     subject_accuracies = [float(row["Accuracy (%)"]) / 100.0 for row in subject_rows]
     overall = {
         "protocol": (
-            "other-subject 70/15/15 pretraining plus target-run "
-            "validation/test adaptation"
+            "other-subject 70/15/15 pretraining plus target-subject "
+            "stratified trial-level train/test adaptation"
         ),
         "dataset": dataset_name,
         "pretrain_validation_fraction": float(
             pretrain_cfg.get("validation_size", 0.15)
         ),
         "pretrain_test_fraction": float(pretrain_cfg.get("test_size", 0.15)),
-        "target_run_validation_test_split": "stratified approximately 50/50",
+        "fine_tune_train_fraction": fine_tune_train_size,
+        "fine_tune_test_fraction": fine_tune_test_size,
+        "fine_tune_uses_validation": False,
         "n_target_subjects": len(subject_rows),
         "class_names": class_names,
         "chance_accuracy": 1.0 / num_classes,
@@ -1072,7 +1096,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     _write_csv(run_dir / "pooled_confusion_matrix.csv", confusion_rows)
     print(
-        "\nPer-subject run-adaptation accuracy: "
+        "\nPer-subject trial-adaptation accuracy: "
         f"{overall['mean_subject_accuracy'] * 100:.2f} +/- "
         f"{overall['between_subject_accuracy_sd'] * 100:.2f}% "
         "(mean +/- between-subject SD)"

@@ -49,6 +49,9 @@ def test_bci_campaign_generates_dataset_aligned_configs():
             )
             if name in {"csp_lda", "mdm", "spdnet"}:
                 assert config["training"]["subject_specific"] == [True]
+                assert config["training"]["train_size"] == [0.7]
+                assert config["training"]["test_size"] == [0.3]
+                assert "held_out_run_validation_size" not in config["training"]
                 assert config["data"]["allow_subject_overlap"] == [True]
             else:
                 assert config["data"]["pretrain_subjects"] == "1-9"

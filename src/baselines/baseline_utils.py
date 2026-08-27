@@ -255,6 +255,86 @@ def make_subject_specific_loro_splits(
     return splits
 
 
+def make_subject_specific_trial_splits(
+    y: np.ndarray,
+    subject_labels: np.ndarray,
+    *,
+    train_size: float = 0.7,
+    test_size: float = 0.3,
+    seed: int,
+) -> list[tuple[str, int, np.ndarray, np.ndarray, np.ndarray]]:
+    """Create one stratified trial-level train/test split per subject.
+
+    Runs are deliberately ignored: all retained trials for one subject are
+    pooled before shuffling.  The empty fourth tuple item keeps the historical
+    fold-spec shape while explicitly representing the absence of validation.
+    """
+
+    from sklearn.model_selection import train_test_split
+
+    y = np.asarray(y, dtype=np.int64)
+    subject_labels = np.asarray(subject_labels, dtype=np.str_)
+    if len(y) != len(subject_labels):
+        raise ValueError("y and subject_labels must align.")
+    if not 0.0 < train_size < 1.0 or not 0.0 < test_size < 1.0:
+        raise ValueError("train_size and test_size must both be between 0 and 1.")
+    if not np.isclose(train_size + test_size, 1.0):
+        raise ValueError(
+            "train_size and test_size must sum to 1.0; "
+            f"got {train_size} + {test_size}."
+        )
+
+    expected_classes = set(np.unique(y).astype(int).tolist())
+    splits: list[tuple[str, int, np.ndarray, np.ndarray, np.ndarray]] = []
+    for subject_position, subject in enumerate(
+        sorted(np.unique(subject_labels).astype(str).tolist())
+    ):
+        subject_idx = np.flatnonzero(subject_labels == subject).astype(np.int64)
+        subject_classes = set(np.unique(y[subject_idx]).astype(int).tolist())
+        if subject_classes != expected_classes:
+            raise ValueError(
+                f"Subject {subject} has classes {sorted(subject_classes)}, "
+                f"expected {sorted(expected_classes)}."
+            )
+        class_counts = np.bincount(
+            y[subject_idx], minlength=max(expected_classes) + 1
+        )
+        present_counts = class_counts[class_counts > 0]
+        if int(present_counts.min()) < 2:
+            raise ValueError(
+                f"Subject {subject} cannot be stratified into train/test; "
+                f"class counts are {class_counts.tolist()}."
+            )
+        train_idx, test_idx = train_test_split(
+            subject_idx,
+            test_size=test_size,
+            random_state=seed + subject_position,
+            shuffle=True,
+            stratify=y[subject_idx],
+        )
+        train_idx = np.asarray(train_idx, dtype=np.int64)
+        test_idx = np.asarray(test_idx, dtype=np.int64)
+        if np.intersect1d(train_idx, test_idx).size:
+            raise RuntimeError(f"Subject {subject} has train/test overlap.")
+        if not (
+            np.all(subject_labels[train_idx] == subject)
+            and np.all(subject_labels[test_idx] == subject)
+        ):
+            raise RuntimeError(f"Subject leakage detected for {subject}.")
+        if len(train_idx) + len(test_idx) != len(subject_idx):
+            raise RuntimeError(f"Subject {subject} split omitted trials.")
+        splits.append(
+            (
+                subject,
+                1,
+                train_idx,
+                np.empty(0, dtype=np.int64),
+                test_idx,
+            )
+        )
+    return splits
+
+
 def summarize_subject_fold_metrics(
     rows: list[dict[str, Any]],
     metric_names: tuple[str, ...],

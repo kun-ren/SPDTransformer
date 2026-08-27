@@ -1,4 +1,4 @@
-# BCI Competition IV-2a four-class LOSO pretraining and target-run adaptation.
+# BCI Competition IV-2a four-class LOSO pretraining and target-trial adaptation.
 # Every target A01--A09 is excluded from its own other-subject pretraining set.
 
 data:
@@ -86,32 +86,26 @@ pretrain:
   allow_tf32: [true]
 
 fine_tune:
+  # Pool every target-subject session/run and make one stratified train/test
+  # split. Fine-tuning uses no validation dataset.
+  train_size: [0.7]
+  test_size: [0.3]
   epochs: [50]
   batch_size: [32]
   precision: ["float32"]
   learning_rate: [0.001]
   stiefel_learning_rate: [0.0001]
-  lr_scheduler: ["plateau"]
-  lr_scheduler_metric: ["validation_macro_f1"]
-  lr_scheduler_mode: ["max"]
-  lr_scheduler_factor: [0.5]
-  lr_scheduler_patience: [5]
-  lr_scheduler_threshold: [0.0008]
-  lr_scheduler_threshold_mode: ["abs"]
-  lr_scheduler_min_lr: [1.0e-5]
-  stiefel_lr_scheduler_min_lr: [1.0e-6]
+  lr_scheduler: ["none"]
   weight_decay: [0.01]
   apply_weight_decay_to_special_parameters: [true]
   gradient_clip_norm: [0.8]
-  early_stopping_patience: [8]
-  early_stopping_min_delta: [0.0008]
   condition_regularization_weight: [0.0]
   num_workers: [0]
   pin_memory: [true]
   allow_tf32: [true]
 
 output:
-  dir: experiments/results/bci_iv_2a_pretrain_finetune_loro
+  dir: experiments/results/bci_iv_2a_pretrain_finetune_trial_split
   dataset_cache_dir: experiments/cache/preprocessed_datasets
   save_pretrained_checkpoints: true
   save_fine_tuned_checkpoints: false

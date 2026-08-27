@@ -19,7 +19,7 @@ from src.baselines.baseline_utils import (
     expand_data_training_experiments,
     load_segmented_epochs_like_train,
     load_yaml,
-    make_subject_specific_loro_splits,
+    make_subject_specific_trial_splits,
     parse_bool,
     save_json,
     summarize_subject_fold_metrics,
@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "CSP + shrinkage LDA baseline with optional subject-specific "
-            "leave-one-run-out train/validation/test evaluation."
+            "stratified trial-level train/test evaluation."
         )
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -96,7 +96,7 @@ def build_cv_splits(
 def validate_cv_config(
     training_cfg: dict[str, Any],
     data_cfg: dict[str, Any],
-) -> tuple[int, int, bool, float]:
+) -> tuple[int, int, bool, float, float]:
     n_splits = int(training_cfg.get("n_splits", 5))
     seed = int(training_cfg.get("seed", 42))
     test_size = float(data_cfg.get("test_size", training_cfg.get("test_size", 0.2)))
@@ -114,11 +114,17 @@ def validate_cv_config(
     subject_specific = parse_bool(
         training_cfg.get("subject_specific", False), default=False
     )
-    held_out_run_validation_size = float(
-        training_cfg.get("held_out_run_validation_size", 0.5)
-    )
-    if subject_specific and not 0.0 < held_out_run_validation_size < 1.0:
-        raise ValueError("held_out_run_validation_size must be between 0 and 1.")
+    train_size = float(training_cfg.get("train_size", 0.7))
+    subject_test_size = float(training_cfg.get("test_size", 0.3))
+    if subject_specific and (
+        not 0.0 < train_size < 1.0
+        or not 0.0 < subject_test_size < 1.0
+        or not np.isclose(train_size + subject_test_size, 1.0)
+    ):
+        raise ValueError(
+            "Subject-specific train_size and test_size must be in (0, 1) "
+            "and sum to 1.0."
+        )
     if not subject_specific and not np.isclose(val_size, 0.0):
         raise ValueError(
             "CSP+LDA K-fold evaluation does not use a validation dataset; "
@@ -131,7 +137,7 @@ def validate_cv_config(
             f"got test_size={test_size} and n_splits={n_splits} "
             f"(expected {expected_test_size:.6f})."
         )
-    return n_splits, seed, allow_subject_overlap, held_out_run_validation_size
+    return n_splits, seed, allow_subject_overlap, train_size, subject_test_size
 
 
 def build_csp_lda_pipeline(
@@ -231,33 +237,28 @@ def run_experiment(
         n_splits,
         seed,
         allow_subject_overlap,
-        held_out_run_validation_size,
+        train_size,
+        subject_test_size,
     ) = validate_cv_config(training_cfg, data_cfg)
 
     subject_specific = parse_bool(
         training_cfg.get("subject_specific", False), default=False
     )
     if subject_specific:
-        (
-            x,
+        x, y, subject_labels, class_names, filter_bank = (
+            load_segmented_epochs_like_train(data_cfg)
+        )
+        fold_specs = make_subject_specific_trial_splits(
             y,
             subject_labels,
-            run_labels,
-            class_names,
-            filter_bank,
-        ) = load_segmented_epochs_like_train(data_cfg, return_runs=True)
-        fold_specs = make_subject_specific_loro_splits(
-            y,
-            subject_labels,
-            run_labels,
-            held_out_run_validation_size=held_out_run_validation_size,
+            train_size=train_size,
+            test_size=subject_test_size,
             seed=seed,
         )
     else:
         x, y, subject_labels, class_names, filter_bank = (
             load_segmented_epochs_like_train(data_cfg)
         )
-        run_labels = None
         fold_specs = [
             (
                 "all",
@@ -301,47 +302,28 @@ def run_experiment(
 
     rows: list[dict[str, Any]] = []
     split_rows: list[dict[str, Any]] = []
-    for subject, held_out_run, train_idx, validation_idx, test_idx in fold_specs:
+    for subject, held_out_run, train_idx, _validation_idx, test_idx in fold_specs:
         split_rows.append(
             {
                 "subject": subject if subject_specific else None,
-                "test_run": int(held_out_run) if subject_specific else None,
+                "split": "trial_random" if subject_specific else None,
                 "fold": None if subject_specific else held_out_run,
                 "train_indices": train_idx.astype(int).tolist(),
-                "validation_indices": validation_idx.astype(int).tolist(),
                 "test_indices": test_idx.astype(int).tolist(),
             }
         )
         classifier = build_csp_lda_pipeline(csp_components, model_cfg)
         classifier.fit(trial_data[train_idx], y[train_idx])
-        validation_prediction = (
-            classifier.predict(trial_data[validation_idx])
-            if subject_specific
-            else None
-        )
         test_prediction = classifier.predict(trial_data[test_idx])
 
         row = {
             **({"subject": subject} if subject_specific else {}),
             **(
-                {"test_run": int(held_out_run)}
-                if subject_specific
-                else {"fold": held_out_run}
+                {} if subject_specific else {"fold": held_out_run}
             ),
             "n_train": int(len(train_idx)),
-            "n_validation": int(len(validation_idx)),
             "n_test": int(len(test_idx)),
         }
-        if validation_prediction is not None:
-            validation_metrics = compute_csp_metrics(
-                y[validation_idx], validation_prediction
-            )
-            row.update(
-                {
-                    f"validation_{name}": value
-                    for name, value in validation_metrics.items()
-                }
-            )
         row.update(compute_csp_metrics(y[test_idx], test_prediction))
         row["_y_true"] = y[test_idx].astype(int).tolist()
         row["_y_pred"] = np.asarray(test_prediction, dtype=int).tolist()
@@ -350,15 +332,9 @@ def run_experiment(
         print(
             f"[CSP+LDA {'subject ' + subject + ' ' if subject_specific else ''}"
             + (
-                f"test run R{int(held_out_run):02d}] "
+                "trial-random split] "
                 if subject_specific
                 else f"fold {held_out_run}/{n_splits}] "
-            )
-            + (
-                f"validation_accuracy={row['validation_accuracy']:.4f} "
-                f"validation_mf1={row['validation_macro_f1']:.4f} | "
-                if subject_specific
-                else ""
             )
             + f"test_accuracy={row['accuracy']:.4f} "
             f"test_mf1={row['macro_f1']:.4f} "
@@ -368,12 +344,7 @@ def run_experiment(
     aggregates = aggregate_fold_metrics(rows)
     subject_rows = summarize_subject_fold_metrics(
         rows,
-        (
-            "validation_accuracy",
-            "validation_macro_f1",
-            "validation_cohen_kappa",
-            *METRIC_NAMES,
-        ),
+        METRIC_NAMES,
     )
     if subject_specific:
         print("\nCSP+LDA pooled subject-specific test results")
@@ -404,7 +375,7 @@ def run_experiment(
         writer.writeheader()
         writer.writerows(public_rows)
     if subject_specific:
-        with (run_dir / "per_run_results.csv").open(
+        with (run_dir / "per_subject_results.csv").open(
             "w", encoding="utf-8", newline=""
         ) as handle:
             writer = csv.DictWriter(handle, fieldnames=list(public_rows[0]))
@@ -422,7 +393,7 @@ def run_experiment(
         "baseline": "csp_lda",
         "evaluation": {
             "strategy": (
-                "subject_specific_leave_one_run_out"
+                "subject_specific_stratified_trial_train_test"
                 if subject_specific
                 else (
                     "stratified_kfold"
@@ -432,9 +403,9 @@ def run_experiment(
             ),
             "n_splits": None if subject_specific else n_splits,
             "test_size_per_fold": None if subject_specific else 1.0 / n_splits,
-            "held_out_run_validation_size": (
-                held_out_run_validation_size if subject_specific else None
-            ),
+            "train_size": train_size if subject_specific else None,
+            "test_size": subject_test_size if subject_specific else 1.0 / n_splits,
+            "uses_validation": False,
             "seed": seed,
         },
         "config": effective_cfg,
@@ -445,7 +416,7 @@ def run_experiment(
         "feature_dim": csp_components,
         "pipeline_steps": ["csp", "lda"],
         "folds": public_rows,
-        "runs": public_rows if subject_specific else [],
+        "runs": [],
         "splits_file": "splits.json",
         "subjects": subject_rows,
         "aggregates": aggregates,

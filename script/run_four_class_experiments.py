@@ -336,7 +336,9 @@ def build_configs(
         )
         config.setdefault("data", {})["allow_subject_overlap"] = [True]
         config.setdefault("training", {})["subject_specific"] = [True]
-        config["training"]["held_out_run_validation_size"] = [0.5]
+        config["training"]["train_size"] = [0.7]
+        config["training"]["test_size"] = [0.3]
+        config["training"].pop("held_out_run_validation_size", None)
         specs[name] = (
             config,
             PROJECT_ROOT / "src" / "baselines" / filename,
@@ -346,14 +348,17 @@ def build_configs(
     commands: dict[str, tuple[Path, Path, bool]] = {}
     manifest: dict[str, Any] = {
         "dataset": dataset,
-        "protocol": "subject-specific leave-one-run-out; held-out run split 50/50 validation/test",
+        "protocol": (
+            "subject-specific stratified trial-level train/test split; "
+            "all runs pooled; no validation dataset"
+        ),
         "task_types": list(task_types),
         "expected_classes": sorted(
             BCI_IV_2A_CLASS_NAMES
             if dataset == "bnci2014_001"
             else TASK_CLASS_NAMES[task_types]
         ),
-        "subject_aggregation": "pooled held-out test-trial predictions",
+        "subject_aggregation": "one pooled trial-random test partition per subject",
         "p_value": "two-sided paired Wilcoxon signed-rank test on subject accuracies",
         "runs": {},
     }
