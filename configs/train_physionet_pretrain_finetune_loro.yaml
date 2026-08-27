@@ -105,7 +105,7 @@ fine_tune:
   # One selected target run is stratified approximately 50/50 into
   # validation/test; the other target runs are shuffled for fine-tuning.
   epochs: [50]
-  batch_size: [32]
+  batch_size: [64]
   precision: ["float32"]
   learning_rate: [0.002]
   stiefel_learning_rate: [0.0002]
