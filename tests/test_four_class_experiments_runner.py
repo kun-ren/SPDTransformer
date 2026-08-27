@@ -38,7 +38,7 @@ def test_bci_campaign_generates_dataset_aligned_configs():
             dataset="bci_iv_2a",
         )
 
-        assert len(commands) == 11
+        assert len(commands) == 13
         for name, (config_path, _runner, _uses_device) in commands.items():
             with config_path.open("r", encoding="utf-8") as handle:
                 config = yaml.safe_load(handle)
@@ -53,6 +53,15 @@ def test_bci_campaign_generates_dataset_aligned_configs():
                 assert config["training"]["test_size"] == [0.3]
                 assert "held_out_run_validation_size" not in config["training"]
                 assert config["data"]["allow_subject_overlap"] == [True]
+            elif name in {"eegnet_subject_wise", "eegnet_transfer"}:
+                expected_protocol = (
+                    "transfer" if name == "eegnet_transfer" else "subject_wise"
+                )
+                assert config["training"]["protocol"] == [expected_protocol]
+                assert config["training"]["subject_wise_n_splits"] == [1]
+                assert config["training"]["train_size"] == [0.7]
+                assert config["training"]["test_size"] == [0.3]
+                assert config["data"]["pretrain_subjects"] == "1-9"
             else:
                 assert config["data"]["pretrain_subjects"] == "1-9"
 

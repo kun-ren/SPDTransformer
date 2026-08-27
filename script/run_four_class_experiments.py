@@ -1,9 +1,10 @@
 """Run subject-specific four-class BCI baselines and ablations.
 
-Every model is evaluated on the same target subjects. A target run is held
-out once, split approximately 50/50 into validation and test, and its test
-predictions are pooled per subject before table statistics are calculated.
-Use ``--dataset physionet_mi`` or ``--dataset bci_iv_2a``.
+Every model is evaluated on the same target subjects. Runs are pooled inside
+each target subject and trials are shuffled into 70% train / 30% test with no
+validation dataset. EEGNet additionally reports other-subject pretraining plus
+target-subject fine-tuning. Use ``--dataset physionet_mi`` or
+``--dataset bci_iv_2a``.
 """
 
 from __future__ import annotations
@@ -31,12 +32,14 @@ TRANSFORMER_CONFIG = (
 CSP_CONFIG = PROJECT_ROOT / "configs" / "csp_lda_physionet.yaml"
 MDM_CONFIG = PROJECT_ROOT / "configs" / "mdm_physionet.yaml"
 SPDNET_CONFIG = PROJECT_ROOT / "configs" / "spdnet_physionet.yaml"
+EEGNET_CONFIG = PROJECT_ROOT / "configs" / "eegnet_physionet.yaml"
 BCI_TRANSFORMER_CONFIG = (
     PROJECT_ROOT / "configs" / "train_bci_iv_2a_pretrain_finetune_loro.yaml"
 )
 BCI_CSP_CONFIG = PROJECT_ROOT / "configs" / "csp_lda_bci_iv_2a.yaml"
 BCI_MDM_CONFIG = PROJECT_ROOT / "configs" / "mdm_bci_iv_2a.yaml"
 BCI_SPDNET_CONFIG = PROJECT_ROOT / "configs" / "spdnet_bci_iv_2a.yaml"
+BCI_EEGNET_CONFIG = PROJECT_ROOT / "configs" / "eegnet_bci_iv_2a.yaml"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "experiments" / "results" / "four_class"
 
 DEFAULT_TASK_TYPES = ("unilateral_fist", "both")
@@ -95,11 +98,23 @@ def dataset_config_paths(
             "csp_lda": (BCI_CSP_CONFIG, "csp_lda_baseline.py", False),
             "mdm": (BCI_MDM_CONFIG, "mdm_baseline.py", True),
             "spdnet": (BCI_SPDNET_CONFIG, "spdnet_baseline.py", True),
+            "eegnet_subject_wise": (
+                BCI_EEGNET_CONFIG,
+                "eegnet_baseline.py",
+                True,
+            ),
+            "eegnet_transfer": (
+                BCI_EEGNET_CONFIG,
+                "eegnet_baseline.py",
+                True,
+            ),
         }
     return TRANSFORMER_CONFIG, {
         "csp_lda": (CSP_CONFIG, "csp_lda_baseline.py", False),
         "mdm": (MDM_CONFIG, "mdm_baseline.py", True),
         "spdnet": (SPDNET_CONFIG, "spdnet_baseline.py", True),
+        "eegnet_subject_wise": (EEGNET_CONFIG, "eegnet_baseline.py", True),
+        "eegnet_transfer": (EEGNET_CONFIG, "eegnet_baseline.py", True),
     }
 
 
@@ -335,10 +350,20 @@ def build_configs(
             dataset=dataset,
         )
         config.setdefault("data", {})["allow_subject_overlap"] = [True]
-        config.setdefault("training", {})["subject_specific"] = [True]
-        config["training"]["train_size"] = [0.7]
-        config["training"]["test_size"] = [0.3]
-        config["training"].pop("held_out_run_validation_size", None)
+        training_cfg = config.setdefault("training", {})
+        training_cfg["train_size"] = [0.7]
+        training_cfg["test_size"] = [0.3]
+        training_cfg.pop("held_out_run_validation_size", None)
+        if name.startswith("eegnet_"):
+            training_cfg["protocol"] = [
+                "transfer" if name == "eegnet_transfer" else "subject_wise"
+            ]
+            training_cfg["subject_wise_n_splits"] = [1]
+            config["data"]["pretrain_subjects"] = transformer_base["data"][
+                "pretrain_subjects"
+            ]
+        else:
+            training_cfg["subject_specific"] = [True]
         specs[name] = (
             config,
             PROJECT_ROOT / "src" / "baselines" / filename,
@@ -350,7 +375,8 @@ def build_configs(
         "dataset": dataset,
         "protocol": (
             "subject-specific stratified trial-level train/test split; "
-            "all runs pooled; no validation dataset"
+            "all runs pooled; no validation dataset; EEGNet transfer excludes "
+            "the target from other-subject pretraining"
         ),
         "task_types": list(task_types),
         "expected_classes": sorted(
@@ -539,7 +565,19 @@ def summarize_campaign(campaign_dir: Path) -> tuple[Path, Path, Path]:
     csp = load_baseline_record(raw / "csp_lda")
     mdm = load_baseline_record(raw / "mdm")
     spdnet = load_baseline_record(raw / "spdnet")
-    records = [*complete.values(), *single.values(), fixed, linear, csp, mdm, spdnet]
+    eegnet_subject_wise = load_baseline_record(raw / "eegnet_subject_wise")
+    eegnet_transfer = load_baseline_record(raw / "eegnet_transfer")
+    records = [
+        *complete.values(),
+        *single.values(),
+        fixed,
+        linear,
+        csp,
+        mdm,
+        spdnet,
+        eegnet_subject_wise,
+        eegnet_transfer,
+    ]
     for record in records:
         validate_record(record, expected_classes)
 
@@ -548,6 +586,18 @@ def summarize_campaign(campaign_dir: Path) -> tuple[Path, Path, Path]:
         result_row("Model", "CSP+LDA", csp, proposed),
         result_row("Model", "MDM", mdm, proposed),
         result_row("Model", "SPDNet", spdnet, proposed),
+        result_row(
+            "Model",
+            "EEGNet (subject-wise)",
+            eegnet_subject_wise,
+            proposed,
+        ),
+        result_row(
+            "Model",
+            "EEGNet (pretrain + fine-tune)",
+            eegnet_transfer,
+            proposed,
+        ),
         result_row("Model", "Proposed SPD Transformer", proposed, None),
     ]
     ablation_specs = [
@@ -575,6 +625,8 @@ def summarize_campaign(campaign_dir: Path) -> tuple[Path, Path, Path]:
         ("CSP+LDA", csp),
         ("MDM", mdm),
         ("SPDNet", spdnet),
+        ("EEGNet (subject-wise)", eegnet_subject_wise),
+        ("EEGNet (pretrain + fine-tune)", eegnet_transfer),
         ("Proposed SPD Transformer", proposed),
     ):
         per_subject_rows.extend(
