@@ -1,0 +1,58 @@
+# EEGNet-8,2 for BCI Competition IV-2a with the same evaluation protocol used
+# by the current SPDTransformer branch. No hyperparameter search is performed.
+
+data:
+  dataset: ["bnci2014_001"]
+  root_dir: ["data"]
+  filter_bank:
+    - [4, 40]
+  sfreq: [250]
+  subjects: 1-9
+  pretrain_subjects: 1-9
+  events: "left_hand,right_hand,feet,tongue"
+  sessions: "all"
+  channels: null
+  reject_threshold_uv: [null]
+  use_ica: [false]
+  use_autoreject: [false]
+  moabb_accept_terms: [true]
+  moabb_force_update: [false]
+  epoch_slice: [[0.5, 2.5]]
+  segment_slice: [[2.0, null]]
+  eegnet_input_scale: [1.0e6]
+  eegnet_standardize: [true]
+
+model:
+  F1: 8
+  D: 2
+  F2: 16
+  # 0.25 seconds at 250 Hz, rounded to 64 samples.
+  kernel_length: 64
+  separable_kernel_length: 16
+  within_subject_dropout: 0.5
+  cross_subject_dropout: 0.25
+  depthwise_max_norm: 1.0
+  classifier_max_norm: 0.25
+
+training:
+  seed: [42]
+  protocol: [subject_wise, transfer]
+  subject_wise_n_splits: [1]
+  train_size: [0.7]
+  test_size: [0.3]
+  epochs: [500]
+  batch_size: [16]
+  learning_rate: [0.001]
+  pretrain_train_size: [0.7]
+  pretrain_test_size: [0.3]
+  pretrain_epochs: [500]
+  pretrain_learning_rate: [0.001]
+  fine_tune_epochs: [100]
+  fine_tune_learning_rate: [0.0001]
+  freeze_feature_extractor: [false]
+  num_workers: [0]
+  pin_memory: [true]
+  log_every: [10]
+
+output:
+  dir: experiments/results/eegnet_bci_iv_2a

@@ -434,7 +434,10 @@ class SingleHeadAttention(nn.Module):
             score = score + self.position_bias(score.shape[-1])
         score = self._stabilize_attention_score(score)
 
-        attention = torch.softmax(score, dim=-1)
+        # Metric factors are RMS-capped before score construction and the
+        # score is normalized with an overflow-safe RMS below. Keep the cast
+        # explicit in case a caller supplies a higher-precision score tensor.
+        attention = torch.softmax(score, dim=-1).to(dtype=log_v.dtype)
 
         attention = self.attention_dropout(attention)
 
@@ -467,12 +470,33 @@ class SingleHeadAttention(nn.Module):
 
     def _stabilize_attention_score(self, score: torch.Tensor) -> torch.Tensor:
         if not torch.isfinite(score).all():
+            finite = torch.isfinite(score)
+            finite_count = int(finite.sum().item())
+            finite_values = score[finite]
+            finite_range = (
+                "none"
+                if finite_values.numel() == 0
+                else (
+                    f"[{finite_values.min().item():.3e}, "
+                    f"{finite_values.max().item():.3e}]"
+                )
+            )
             raise RuntimeError(
                 "Non-finite SPD attention score detected before softmax. "
-                "Check SPD eigenvalue range, eps, and attention learning rate."
+                f"finite={finite_count}/{score.numel()}, "
+                f"finite_range={finite_range}. Check SPD eigenvalue range, "
+                "eps, and attention learning rate."
             )
         score = score - score.mean(dim=-1, keepdim=True)
-        row_rms = score.square().mean(dim=-1, keepdim=True).sqrt()
+        # Compute RMS after scaling by the row maximum. This is equivalent to
+        # sqrt(mean(score**2)) but cannot overflow on finite float32 scores.
+        row_scale = score.abs().amax(dim=-1, keepdim=True)
+        safe_row_scale = row_scale.clamp_min(torch.finfo(score.dtype).tiny)
+        scaled_score = score / safe_row_scale
+        row_rms = (
+            safe_row_scale
+            * scaled_score.square().mean(dim=-1, keepdim=True).sqrt()
+        )
         compression = (
             row_rms / self.attention_score_target_rms
         ).clamp_min(1.0)
@@ -510,8 +534,9 @@ class SingleHeadAttention(nn.Module):
         if self.metric_matrix is None:
             raise RuntimeError("Full metric score requires metric_matrix G.")
 
+        metric_matrix = self._cap_metric_rms(self.metric_matrix)
         metric = 0.5 * (
-            self.metric_matrix + self.metric_matrix.transpose(-1, -2)
+            metric_matrix + metric_matrix.transpose(-1, -2)
         )
         scale = math.sqrt(self.tangent_feature_dim)
 
@@ -533,22 +558,37 @@ class SingleHeadAttention(nn.Module):
         if self.metric_low_rank is None or self.learnable_metric_rank is None:
             raise RuntimeError("Low-rank metric score requires factor L and rank r.")
 
+        metric_low_rank = self._cap_metric_rms(self.metric_low_rank)
         scale = math.sqrt(self.learnable_metric_rank)
         if self.learnable_metric_score == "qgk":
-            q_low = torch.einsum("...d,dr->...r", q_vec, self.metric_low_rank)
-            k_low = torch.einsum("...d,dr->...r", k_vec, self.metric_low_rank)
+            q_low = torch.einsum("...d,dr->...r", q_vec, metric_low_rank)
+            k_low = torch.einsum("...d,dr->...r", k_vec, metric_low_rank)
             score_low = torch.einsum("...ir,...jr->...ij", q_low, k_low)
             score_eye = torch.einsum("...id,...jd->...ij", q_vec, k_vec)
             return (score_low + self.eps * score_eye) / scale
 
         diff = q_vec.unsqueeze(-2) - k_vec.unsqueeze(-3)
-        diff_low = torch.einsum("...ijd,dr->...ijr", diff, self.metric_low_rank)
+        diff_low = torch.einsum("...ijd,dr->...ijr", diff, metric_low_rank)
         squared_distance_low = diff_low.square().sum(dim=-1)
         squared_distance_eye = diff.square().sum(dim=-1)
         squared_distance = (
             squared_distance_low + self.eps * squared_distance_eye
         )
         return -squared_distance / scale
+
+    @staticmethod
+    def _cap_metric_rms(metric: torch.Tensor) -> torch.Tensor:
+        """Cap redundant global metric scale without changing its direction.
+
+        Attention rows are already RMS-compressed before softmax, so a global
+        metric scale above one carries no useful contrast information. The
+        small float64 reduction avoids overflow while the large score tensors
+        remain in their efficient training dtype.
+        """
+
+        rms = metric.to(torch.float64).square().mean().sqrt()
+        scale = rms.clamp_min(1.0).to(device=metric.device, dtype=metric.dtype)
+        return metric / scale
 
     @staticmethod
     def _pairwise_squared_euclidean(
