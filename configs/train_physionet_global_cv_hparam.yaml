@@ -82,12 +82,17 @@ training:
   batch_size: [128]
   precision: ["float32"]
 
-  # The Cartesian product is used. Together with two dropout values this file
-  # defines 2 x 2 x 2 = 8 configurations and 8 x 5 = 40 model trainings.
+  # The Cartesian product is used. With the current two dropout values and one
+  # value for each learning rate, this defines 2 x 5 = 10 fold trainings.
   learning_rate: [0.002,]
   stiefel_learning_rate: [0.0003]
 
-  lr_scheduler: ["none"]
+  # Epoch-based cosine decay is independent of fold test metrics, so it does
+  # not leak test-subject information into training. Set ["none"] to disable.
+  lr_scheduler: ["cosine"]
+  lr_scheduler_t_max: [100]
+  lr_scheduler_min_lr: [1.0e-5]
+  stiefel_lr_scheduler_min_lr: [1.0e-6]
   weight_decay: [0.01]
   apply_weight_decay_to_special_parameters: [true]
   gradient_clip_norm: [0.8]

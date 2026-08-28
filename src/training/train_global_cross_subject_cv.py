@@ -192,6 +192,61 @@ def make_optimizers(
     return optimizer, optimizer_stiefel
 
 
+def make_lr_schedulers(
+    optimizer: torch.optim.Optimizer,
+    optimizer_stiefel: torch.optim.Optimizer | None,
+    cfg: dict[str, Any],
+) -> tuple[Any | None, Any | None]:
+    """Build epoch-based schedulers that never inspect a test-fold metric."""
+
+    scheduler_name = str(cfg.get("lr_scheduler", "none")).strip().lower()
+    if scheduler_name in {"", "none", "null", "off", "false"}:
+        return None, None
+
+    epochs = int(cfg["epochs"])
+
+    def build_scheduler(
+        target_optimizer: torch.optim.Optimizer,
+        *,
+        stiefel: bool,
+    ) -> Any:
+        if scheduler_name in {"cosine", "cosine_annealing"}:
+            min_lr_key = (
+                "stiefel_lr_scheduler_min_lr" if stiefel else "lr_scheduler_min_lr"
+            )
+            return torch.optim.lr_scheduler.CosineAnnealingLR(
+                target_optimizer,
+                T_max=int(cfg.get("lr_scheduler_t_max", epochs)),
+                eta_min=float(cfg.get(min_lr_key, 0.0)),
+            )
+        if scheduler_name in {"step", "step_lr"}:
+            return torch.optim.lr_scheduler.StepLR(
+                target_optimizer,
+                step_size=int(cfg.get("lr_scheduler_step_size", 30)),
+                gamma=float(cfg.get("lr_scheduler_gamma", 0.1)),
+            )
+        if scheduler_name in {"multistep", "multi_step", "multistep_lr"}:
+            return torch.optim.lr_scheduler.MultiStepLR(
+                target_optimizer,
+                milestones=[int(value) for value in cfg["lr_scheduler_milestones"]],
+                gamma=float(cfg.get("lr_scheduler_gamma", 0.1)),
+            )
+        if scheduler_name in {"exponential", "exponential_lr"}:
+            return torch.optim.lr_scheduler.ExponentialLR(
+                target_optimizer,
+                gamma=float(cfg.get("lr_scheduler_gamma", 0.99)),
+            )
+        raise AssertionError(f"Unvalidated scheduler: {scheduler_name}")
+
+    scheduler = build_scheduler(optimizer, stiefel=False)
+    stiefel_scheduler = (
+        build_scheduler(optimizer_stiefel, stiefel=True)
+        if optimizer_stiefel is not None
+        else None
+    )
+    return scheduler, stiefel_scheduler
+
+
 def condition_regularization(matrix: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     eigenvalues = torch.clamp(torch.linalg.eigvalsh(matrix), min=eps)
     return torch.log(eigenvalues[..., -1] / eigenvalues[..., 0]).mean()
@@ -281,12 +336,24 @@ def train_fixed_epochs(
     stage_name: str,
 ) -> dict[str, torch.Tensor]:
     optimizer, optimizer_stiefel = make_optimizers(model, cfg)
+    scheduler, stiefel_scheduler = make_lr_schedulers(
+        optimizer,
+        optimizer_stiefel,
+        cfg,
+    )
     criterion = nn.CrossEntropyLoss()
     gradient_clip_norm = cfg.get("gradient_clip_norm", 1.0)
     if gradient_clip_norm is not None:
         gradient_clip_norm = float(gradient_clip_norm)
     condition_weight = float(cfg.get("condition_regularization_weight", 0.0))
     history = []
+    scheduler_name = str(cfg.get("lr_scheduler", "none")).strip().lower()
+    print(
+        f"    {stage_name} lr_scheduler={scheduler_name}, "
+        f"euclid_lr={optimizer_lr_values(optimizer)[0]:.6g}, "
+        f"stiefel_lr="
+        f"{optimizer_lr_values(optimizer_stiefel)[0] if optimizer_stiefel is not None else None}."
+    )
     for epoch in range(1, int(cfg["epochs"]) + 1):
         metrics = train_one_epoch(
             model,
@@ -311,10 +378,16 @@ def train_fixed_epochs(
             ),
         }
         history.append(row)
+        if scheduler is not None:
+            scheduler.step()
+        if stiefel_scheduler is not None:
+            stiefel_scheduler.step()
         print(
             f"    {stage_name} epoch {epoch:03d}/{int(cfg['epochs'])}: "
             f"loss={row['train_loss']:.4f}, accuracy={row['train_accuracy']:.4f}, "
-            f"macro-F1={row['train_macro_f1']:.4f}."
+            f"macro-F1={row['train_macro_f1']:.4f}, "
+            f"euclid_lr={row['euclid_lr']:.6g}, "
+            f"stiefel_lr={row['stiefel_lr']}."
         )
     write_csv(history_path, history)
     return {
@@ -618,11 +691,73 @@ def validate_training_config(training_cfg: dict[str, Any]) -> None:
     if int(training_cfg.get("epochs", 0)) < 1:
         raise ValueError("training.epochs must be at least 1.")
     scheduler = str(training_cfg.get("lr_scheduler", "none")).strip().lower()
-    if scheduler not in {"", "none", "null", "off", "false"}:
+    supported_schedulers = {
+        "",
+        "none",
+        "null",
+        "off",
+        "false",
+        "cosine",
+        "cosine_annealing",
+        "step",
+        "step_lr",
+        "multistep",
+        "multi_step",
+        "multistep_lr",
+        "exponential",
+        "exponential_lr",
+    }
+    if scheduler not in supported_schedulers:
         raise ValueError(
-            "Only train/test CV is allowed, so training.lr_scheduler must be "
-            f"'none'; got {scheduler!r}."
+            "training.lr_scheduler must be one of none, cosine, step, "
+            f"multistep, or exponential; got {scheduler!r}."
         )
+    if scheduler in {"cosine", "cosine_annealing"}:
+        t_max = int(
+            training_cfg.get("lr_scheduler_t_max", training_cfg.get("epochs", 0))
+        )
+        if t_max < 1:
+            raise ValueError("training.lr_scheduler_t_max must be at least 1.")
+        for key in ("lr_scheduler_min_lr", "stiefel_lr_scheduler_min_lr"):
+            if float(training_cfg.get(key, 0.0)) < 0.0:
+                raise ValueError(f"training.{key} must be non-negative.")
+        min_lr_pairs = (
+            ("lr_scheduler_min_lr", "learning_rate"),
+            ("stiefel_lr_scheduler_min_lr", "stiefel_learning_rate"),
+        )
+        for min_lr_key, initial_lr_key in min_lr_pairs:
+            if float(training_cfg.get(min_lr_key, 0.0)) > float(
+                training_cfg.get(initial_lr_key, 0.0)
+            ):
+                raise ValueError(
+                    f"training.{min_lr_key} must not exceed "
+                    f"training.{initial_lr_key}."
+                )
+    if scheduler in {"step", "step_lr"}:
+        if int(training_cfg.get("lr_scheduler_step_size", 30)) < 1:
+            raise ValueError("training.lr_scheduler_step_size must be at least 1.")
+    if scheduler in {"multistep", "multi_step", "multistep_lr"}:
+        milestones = training_cfg.get("lr_scheduler_milestones")
+        if not isinstance(milestones, (list, tuple)) or not milestones:
+            raise ValueError(
+                "training.lr_scheduler_milestones must be a non-empty list."
+            )
+        if any(int(value) < 1 for value in milestones):
+            raise ValueError(
+                "Every training.lr_scheduler_milestones value must be positive."
+            )
+    if scheduler in {
+        "step",
+        "step_lr",
+        "multistep",
+        "multi_step",
+        "multistep_lr",
+        "exponential",
+        "exponential_lr",
+    }:
+        gamma = float(training_cfg.get("lr_scheduler_gamma", 0.1))
+        if not 0.0 < gamma <= 1.0:
+            raise ValueError("training.lr_scheduler_gamma must be in (0, 1].")
 
 
 def class_counts(y: np.ndarray, indices: np.ndarray, num_classes: int) -> list[int]:
