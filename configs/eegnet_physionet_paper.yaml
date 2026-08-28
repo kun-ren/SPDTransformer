@@ -10,7 +10,8 @@
 data:
   dataset: ["physionet_mi"]
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
-  subjects: 1-109
+  # The 105 subjects retained by the paper.
+  subjects: 1-87,89-91,93-99,101-103,105-109
 
   # Use the paper authors' EDF loader: no band-pass, re-reference, notch, ICA,
   # autoreject, or train-set standardization. Trials start at cue onset.

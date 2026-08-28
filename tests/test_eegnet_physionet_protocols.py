@@ -3,7 +3,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.baselines.baseline_utils import expand_data_training_experiments, load_yaml
+from src.baselines.baseline_utils import (
+    expand_data_training_experiments,
+    load_yaml,
+    parse_subjects,
+)
 from src.baselines.eegnet_baseline import (
     EEGNet,
     global_subject_folds,
@@ -24,6 +28,10 @@ def test_paper_configuration_expands_to_two_three_and_four_classes():
     assert {item["training"]["protocol"] for item in experiments} == {
         "paper_global_ss_tl"
     }
+    subjects = parse_subjects(experiments[0]["data"]["subjects"])
+    assert subjects is not None
+    assert len(subjects) == 105
+    assert not {88, 92, 100, 104} & set(subjects)
 
 
 def test_paper_global_fold_is_subject_held_out_and_non_shuffled():

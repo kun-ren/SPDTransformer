@@ -683,6 +683,10 @@ def split_data_config_for_protocol(
 ) -> tuple[dict[str, Any], list[int] | None]:
     target_subjects = parse_subjects(data_cfg.get("subjects"))
     load_cfg = deepcopy(data_cfg)
+    if protocol == "paper_global_ss_tl":
+        # The paper's subject range is a loading cohort. Its author-style
+        # loader removes the four excluded subjects before defining CV folds.
+        return load_cfg, None
     if protocol == "transfer":
         pretrain_subjects = parse_subjects(data_cfg.get("pretrain_subjects"))
         if pretrain_subjects is None:

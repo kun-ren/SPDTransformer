@@ -99,6 +99,27 @@ def test_transfer_loads_pretraining_cohort_and_resolves_target():
     assert set(labels[labels != "S001"]) == {"S002", "S003"}
 
 
+def test_paper_protocol_resolves_targets_after_author_exclusions():
+    load_cfg, targets = split_data_config_for_protocol(
+        {
+            "subjects": "1-109",
+            "eegnet_excluded_subjects": "88,92,100,104",
+        },
+        "paper_global_ss_tl",
+    )
+    available = np.asarray(
+        [
+            f"S{subject:03d}"
+            for subject in range(1, 110)
+            if subject not in {88, 92, 100, 104}
+        ]
+    )
+
+    assert load_cfg["subjects"] == "1-109"
+    assert targets is None
+    assert resolve_target_labels(targets, available) == available.tolist()
+
+
 def test_eegnet_physionet_config_matches_trial_pooled_transfer_protocol():
     config = load_yaml(PROJECT_ROOT / "configs" / "eegnet_physionet.yaml")
     experiments = expand_data_training_experiments(config)
