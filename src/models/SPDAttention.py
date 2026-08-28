@@ -199,6 +199,38 @@ def spd_log(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     # return _symmetrize(y)
 
 
+def spd_exp(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Exponentiate symmetric log-SPD matrices without float overflow.
+
+    The infinity norm bounds every eigenvalue of a symmetric matrix. Rescaling
+    only matrices outside the usable log range keeps ``matrix_exp`` finite and
+    avoids silently replacing NaN or Inf values after they have appeared.
+    """
+
+    if not 0.0 < eps < 1.0:
+        raise ValueError(f"spd_exp eps must be in (0, 1), got {eps}.")
+    x = _symmetrize(x)
+    if not torch.isfinite(x).all():
+        raise RuntimeError("Non-finite log-SPD value detected before matrix_exp.")
+
+    dimension = x.shape[-1]
+    finfo = torch.finfo(x.dtype)
+    numeric_log_limit = (
+        math.log(finfo.max) - math.log(float(dimension)) - 2.0
+    )
+    usable_log_limit = max(1.0, min(-math.log(eps), numeric_log_limit))
+    infinity_norm = x.abs().sum(dim=-1).amax(dim=-1, keepdim=True).unsqueeze(-1)
+    compression = (infinity_norm / usable_log_limit).clamp_min(1.0)
+    stabilized_x = x / compression
+
+    output = torch.matrix_exp(stabilized_x.contiguous())
+    if not torch.isfinite(output).all():
+        raise RuntimeError(
+            "Non-finite SPD value detected after stabilized matrix_exp."
+        )
+    return _symmetrize(output)
+
+
 
 class PositionBias(nn.Module):
     """

@@ -12,6 +12,7 @@ from src.models.MultiHeadEncoder import (
 
 from src.models.SPDAttention import (
     SingleHeadAttention,
+    spd_exp,
     spd_log,
 )
 from src.models.SPDFeedForward import SPDFeedForward
@@ -268,7 +269,7 @@ class SPDEncoder(nn.Module):
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
 
         if attention_input.ndim >= 5 and attention_input.shape[2] > 1:
-            x_spd = torch.matrix_exp(_symmetrize(x_log).contiguous())
+            x_spd = spd_exp(x_log, eps=self.eps)
             frequency_output_log, aux = self._apply_attention_along_axis(
                 self.frequency_attention,
                 x_spd,
@@ -284,7 +285,7 @@ class SPDEncoder(nn.Module):
             x_log = self.frequency_add_norm2(x_log, self.frequency_ffn(x_log))
 
         if attention_input.ndim == 6 and attention_input.shape[3] > 1:
-            x_spd = torch.matrix_exp(_symmetrize(x_log))
+            x_spd = spd_exp(x_log, eps=self.eps)
             region_output_log, aux = self._apply_attention_along_axis(
                 self.region_attention,
                 x_spd,
@@ -303,7 +304,7 @@ class SPDEncoder(nn.Module):
         if return_log:
             return x_log, all_aux
 
-        x_spd = torch.matrix_exp(x_log.contiguous())
+        x_spd = spd_exp(x_log, eps=self.eps)
 
         return _symmetrize(x_spd), all_aux
 

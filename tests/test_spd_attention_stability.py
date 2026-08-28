@@ -2,7 +2,34 @@ from __future__ import annotations
 
 import torch
 
-from src.models.SPDAttention import SingleHeadAttention
+from src.models.SPDAttention import SingleHeadAttention, spd_exp
+
+
+def test_spd_exp_compresses_extreme_finite_log_spectrum():
+    log_eigenvalues = torch.tensor(
+        [[1.0e4, -1.0e4, 25.0]],
+        requires_grad=True,
+    )
+    log_spd = torch.diag_embed(log_eigenvalues)
+
+    spd = spd_exp(log_spd, eps=1.0e-6)
+
+    assert torch.isfinite(spd).all()
+    assert torch.linalg.eigvalsh(spd).min() > 0
+    spd.log1p().mean().backward()
+    assert log_eigenvalues.grad is not None
+    assert torch.isfinite(log_eigenvalues.grad).all()
+
+
+def test_spd_exp_rejects_non_finite_log_input():
+    log_spd = torch.diag_embed(torch.tensor([[0.0, float("inf")]]))
+
+    try:
+        spd_exp(log_spd)
+    except RuntimeError as error:
+        assert "before matrix_exp" in str(error)
+    else:
+        raise AssertionError("Non-finite log-SPD input must not be repaired.")
 
 
 def test_extreme_finite_low_rank_metric_does_not_overflow_attention_score():
