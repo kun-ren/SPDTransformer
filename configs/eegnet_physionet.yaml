@@ -1,13 +1,14 @@
-# EEGNet-8,2 baseline based on Lawhern et al. (2018) and the author code.
-# This file intentionally contains no hyperparameter grid search. It runs the
-# two requested protocols once each with fixed parameters.
+# EEGNet-8,2 under the same trial-level pretrain/fine-tune partition used by
+# train_physionet_pretrain_finetune_loro.yaml. This is the fair protocol-aligned
+# comparison; use eegnet_physionet_paper.yaml for the published paper protocol.
 
 data:
   dataset: ["physionet_mi"]
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
-  # Official SMR preprocessing uses 4--40 Hz.
+  # EEGNet accepts one signal tensor rather than an SPD filter bank. A single
+  # 8--30 Hz band covers the same frequency range as [8-13, 13-20, 20-30].
   filter_bank:
-    - [4, 40]
+    - [8, 30]
   sfreq: [160]
   # Target subjects. Use 1 for one target or 1-10 for a batch.
   subjects: 1-87,90-91,93-99,101-103,105,107-109
@@ -17,14 +18,22 @@ data:
   channels: null
   reject_threshold_uv: [null]
   use_ica: [false]
+  ica_n_components: [20]
+  ica_random_state: [42]
+  ica_eog_channels: [""]
   use_autoreject: [false]
+  autoreject_random_state: [42]
+  autoreject_n_jobs: [1]
+  autoreject_cv: [10]
+  baseline_correction: [null]
+  baseline_window: [null]
   imaged: [true]
   executed: [false]
-  # Change to [[unilateral_fist]] or [[both]] for a two-class experiment.
-  task_types: [[unilateral_fist, both]]
-  # Paper's SMR window: 0.5--2.5 s after cue, retained as one EEGNet trial.
-  epoch_slice: [[0.5, 2.5]]
-  segment_slice: [[2.0, null]]
+  task_types: [[unilateral_fist]]
+  # Match the SPDTransformer epoch. EEGNet must retain it as one full trial;
+  # 0.5 s overlapping segments are SPD tokens and are not EEGNet inputs.
+  epoch_slice: [[-2.0, 4.0]]
+  segment_slice: [[6.0, null]]
   # Convert PhysioNet volts to microvolts, then estimate channel mean/std only
   # from the current training partition (never validation/test data).
   eegnet_input_scale: [1.0e6]
@@ -46,8 +55,7 @@ model:
 
 training:
   seed: [42]
-  # Runs both requested implementations. Use one value to run only one mode.
-  protocol: [subject_wise, transfer]
+  protocol: [transfer]
 
   # subject_wise_n_splits=1 exactly follows the current SPDTransformer target
   # protocol: pool runs, stratified trial shuffle, 70% train / 30% test.
@@ -62,11 +70,12 @@ training:
   batch_size: [16]
   learning_rate: [0.001]
 
-  # Custom transfer extension (the paper's cross-subject experiment did not
-  # fine-tune on the target): other subjects 70/30 pretrain/test, then target
-  # subject 70/30 fine-tune/test. Every target trial is absent from pretraining.
+  # For every target subject, pool trials from every retained run. Other-subject
+  # trials are split 70/15/15; target trials are split 70/30 with no validation.
+  # No run is reserved as an independent test set in either stage.
   pretrain_train_size: [0.7]
-  pretrain_test_size: [0.3]
+  pretrain_validation_size: [0.15]
+  pretrain_test_size: [0.15]
   pretrain_epochs: [500]
   pretrain_learning_rate: [0.001]
   fine_tune_epochs: [100]
@@ -78,4 +87,4 @@ training:
   log_every: [10]
 
 output:
-  dir: experiments/results/eegnet_physionet
+  dir: experiments/results/eegnet_physionet_pretrain_finetune_trial_split

@@ -30,6 +30,7 @@ from src.baselines.baseline_utils import (
     compute_metrics,
     config_hash,
     expand_data_training_experiments,
+    load_eegnet_author_data,
     load_segmented_epochs_like_train,
     load_yaml,
     make_subject_specific_trial_splits,
@@ -43,6 +44,8 @@ from src.baselines.baseline_utils import (
 REPORT_METRICS = ("accuracy", "macro_f1", "cohen_kappa")
 OFFICIAL_REPOSITORY = "https://github.com/vlawhern/arl-eegmodels"
 OFFICIAL_PAPER = "https://doi.org/10.1088/1741-2552/aace8c"
+PHYSIONET_REPOSITORY = "https://github.com/MHersche/eegnet-based-embedded-bci"
+PHYSIONET_PAPER = "https://arxiv.org/abs/2004.00077"
 
 
 class EEGTrialDataset(Dataset):
@@ -90,18 +93,32 @@ class EEGNet(nn.Module):
         depth_multiplier: int = 2,
         f2: int = 16,
         dropout_rate: float = 0.5,
+        pool1_length: int = 4,
+        pool2_length: int = 8,
         depthwise_max_norm: float = 1.0,
         classifier_max_norm: float = 0.25,
         batch_norm_momentum: float = 0.01,
         batch_norm_epsilon: float = 1.0e-3,
     ) -> None:
         super().__init__()
-        if min(num_classes, channels, samples, kernel_length, f1, depth_multiplier, f2) < 1:
+        if min(
+            num_classes,
+            channels,
+            samples,
+            kernel_length,
+            f1,
+            depth_multiplier,
+            f2,
+            pool1_length,
+            pool2_length,
+        ) < 1:
             raise ValueError("EEGNet dimensions must be positive.")
         if not 0.0 <= dropout_rate < 1.0:
             raise ValueError("dropout_rate must be in [0, 1).")
-        if samples < 32:
-            raise ValueError("EEGNet requires at least 32 time samples for 4x8 pooling.")
+        if samples < pool1_length * pool2_length:
+            raise ValueError(
+                "EEGNet input is shorter than its temporal pooling reduction."
+            )
 
         f1d = int(f1 * depth_multiplier)
         self.temporal_conv = nn.Conv2d(
@@ -129,7 +146,7 @@ class EEGNet(nn.Module):
             eps=batch_norm_epsilon,
         )
         self.activation = nn.ELU()
-        self.pool1 = nn.AvgPool2d(kernel_size=(1, 4))
+        self.pool1 = nn.AvgPool2d(kernel_size=(1, pool1_length))
         self.dropout1 = nn.Dropout(dropout_rate)
 
         self.separable_depthwise = nn.Conv2d(
@@ -146,10 +163,10 @@ class EEGNet(nn.Module):
             momentum=batch_norm_momentum,
             eps=batch_norm_epsilon,
         )
-        self.pool2 = nn.AvgPool2d(kernel_size=(1, 8))
+        self.pool2 = nn.AvgPool2d(kernel_size=(1, pool2_length))
         self.dropout2 = nn.Dropout(dropout_rate)
 
-        pooled_samples = (samples // 4) // 8
+        pooled_samples = (samples // pool1_length) // pool2_length
         self.classifier = nn.Linear(f2 * pooled_samples, num_classes)
         self.depthwise_max_norm = float(depthwise_max_norm)
         self.classifier_max_norm = float(classifier_max_norm)
@@ -222,10 +239,14 @@ def normalize_protocol(value: Any) -> str:
         "transfer": "transfer",
         "pretrain_finetune": "transfer",
         "pretrain_fine_tune": "transfer",
+        "paper_global_ss_tl": "paper_global_ss_tl",
+        "global_ss_tl": "paper_global_ss_tl",
+        "physionet_paper": "paper_global_ss_tl",
     }
     if protocol not in aliases:
         raise ValueError(
-            f"Unknown EEGNet protocol {value!r}; use subject_wise or transfer."
+            f"Unknown EEGNet protocol {value!r}; use subject_wise, transfer, "
+            "or paper_global_ss_tl."
         )
     return aliases[protocol]
 
@@ -371,6 +392,7 @@ def train_fixed_epochs(
     *,
     epochs: int,
     learning_rate: float,
+    learning_rate_schedule: Any = None,
     device: torch.device,
     log_every: int,
     label: str,
@@ -385,11 +407,24 @@ def train_fixed_epochs(
         weight_decay=0.0,
     )
     history: list[dict[str, Any]] = []
+    schedule = parse_learning_rate_schedule(
+        learning_rate_schedule,
+        default_learning_rate=learning_rate,
+    )
     for epoch in range(1, epochs + 1):
+        epoch_index = epoch - 1
+        current_learning_rate = next(
+            rate
+            for start, rate in reversed(schedule)
+            if epoch_index >= start
+        )
+        for parameter_group in optimizer.param_groups:
+            parameter_group["lr"] = current_learning_rate
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
         should_log = epoch == 1 or epoch % log_every == 0 or epoch == epochs
         row: dict[str, Any] = {
             "epoch": epoch,
+            "learning_rate": current_learning_rate,
             "train_loss": train_loss,
             "train_accuracy": None,
             "train_macro_f1": None,
@@ -406,6 +441,36 @@ def train_fixed_epochs(
             )
         history.append(row)
     return history
+
+
+def parse_learning_rate_schedule(
+    value: Any,
+    *,
+    default_learning_rate: float,
+) -> list[tuple[int, float]]:
+    """Parse an epoch:rate schedule without making it a YAML grid dimension."""
+
+    if value is None or str(value).strip() == "":
+        return [(0, float(default_learning_rate))]
+    schedule: list[tuple[int, float]] = []
+    for item in str(value).split(","):
+        epoch_text, separator, rate_text = item.strip().partition(":")
+        if not separator:
+            raise ValueError(
+                "learning_rate_schedule must use epoch:rate pairs, for example "
+                "0:0.01,20:0.001,50:0.0001."
+            )
+        epoch = int(epoch_text)
+        rate = float(rate_text)
+        if epoch < 0 or rate <= 0.0:
+            raise ValueError("Learning-rate schedule epochs and rates must be positive.")
+        schedule.append((epoch, rate))
+    schedule.sort(key=lambda item: item[0])
+    if not schedule or schedule[0][0] != 0:
+        schedule.insert(0, (0, float(default_learning_rate)))
+    if len({epoch for epoch, _rate in schedule}) != len(schedule):
+        raise ValueError("Learning-rate schedule contains duplicate epochs.")
+    return schedule
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -487,6 +552,72 @@ def stratified_train_test_split(
     return np.asarray(train_idx, dtype=np.int64), np.asarray(test_idx, dtype=np.int64)
 
 
+def stratified_train_validation_test_split(
+    y: np.ndarray,
+    indices: np.ndarray,
+    *,
+    train_size: float,
+    validation_size: float,
+    test_size: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Split pooled trials into stratified train/validation/test partitions."""
+
+    from sklearn.model_selection import train_test_split
+
+    if not np.isclose(train_size + validation_size + test_size, 1.0):
+        raise ValueError("Pretrain train/validation/test sizes must sum to 1.0.")
+    indices = np.asarray(indices, dtype=np.int64)
+    train_validation_idx, test_idx = train_test_split(
+        indices,
+        test_size=test_size,
+        shuffle=True,
+        stratify=y[indices],
+        random_state=seed,
+    )
+    validation_fraction = validation_size / (1.0 - test_size)
+    train_idx, validation_idx = train_test_split(
+        train_validation_idx,
+        test_size=validation_fraction,
+        shuffle=True,
+        stratify=y[train_validation_idx],
+        random_state=seed + 1,
+    )
+    return (
+        np.asarray(train_idx, dtype=np.int64),
+        np.asarray(validation_idx, dtype=np.int64),
+        np.asarray(test_idx, dtype=np.int64),
+    )
+
+
+def global_subject_folds(
+    subject_labels: np.ndarray,
+    *,
+    n_splits: int,
+) -> list[tuple[int, np.ndarray, np.ndarray, list[str], list[str]]]:
+    """Match the paper's non-shuffled KFold split over ordered subjects."""
+
+    from sklearn.model_selection import KFold
+
+    subjects = np.asarray(sorted(np.unique(subject_labels).astype(str).tolist()))
+    splitter = KFold(n_splits=n_splits, shuffle=False)
+    folds = []
+    for fold, (train_subject_idx, test_subject_idx) in enumerate(
+        splitter.split(subjects),
+        start=1,
+    ):
+        train_subjects = subjects[train_subject_idx].tolist()
+        test_subjects = subjects[test_subject_idx].tolist()
+        train_idx = np.flatnonzero(np.isin(subject_labels, train_subjects)).astype(
+            np.int64
+        )
+        test_idx = np.flatnonzero(np.isin(subject_labels, test_subjects)).astype(
+            np.int64
+        )
+        folds.append((fold, train_idx, test_idx, train_subjects, test_subjects))
+    return folds
+
+
 def resolve_target_labels(
     requested_subjects: list[int] | None,
     available_labels: np.ndarray,
@@ -520,6 +651,8 @@ def make_model(
         depth_multiplier=int(model_cfg.get("D", 2)),
         f2=int(model_cfg.get("F2", 16)),
         dropout_rate=dropout_rate,
+        pool1_length=int(model_cfg.get("pool1_length", 4)),
+        pool2_length=int(model_cfg.get("pool2_length", 8)),
         depthwise_max_norm=float(model_cfg.get("depthwise_max_norm", 1.0)),
         classifier_max_norm=float(model_cfg.get("classifier_max_norm", 0.25)),
     ).to(device)
@@ -596,6 +729,34 @@ def make_loaders(
     train_eval_loader = make_loader(x, y, train_idx, shuffle=False, **common)
     test_loader = make_loader(x, y, test_idx, shuffle=False, **common)
     return train_loader, train_eval_loader, test_loader, mean, std
+
+
+def make_loaders_with_standardizer(
+    x: np.ndarray,
+    y: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    *,
+    batch_size: int,
+    num_workers: int,
+    pin_memory: bool,
+    input_scale: float,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    common = {
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "input_scale": input_scale,
+        "mean": mean,
+        "std": std,
+        "pin_memory": pin_memory,
+    }
+    return (
+        make_loader(x, y, train_idx, shuffle=True, **common),
+        make_loader(x, y, train_idx, shuffle=False, **common),
+        make_loader(x, y, test_idx, shuffle=False, **common),
+    )
 
 
 def run_subject_wise(
@@ -757,7 +918,12 @@ def run_transfer(
     target_train_size = float(training_cfg.get("train_size", 0.7))
     target_test_size = float(training_cfg.get("test_size", 0.3))
     pretrain_train_size = float(training_cfg.get("pretrain_train_size", 0.7))
-    pretrain_test_size = float(training_cfg.get("pretrain_test_size", 0.3))
+    pretrain_validation_size = float(
+        training_cfg.get("pretrain_validation_size", 0.0)
+    )
+    pretrain_test_size = float(
+        training_cfg.get("pretrain_test_size", 0.3 - pretrain_validation_size)
+    )
     pretrain_epochs = int(training_cfg.get("pretrain_epochs", 500))
     fine_tune_epochs = int(training_cfg.get("fine_tune_epochs", 100))
     pretrain_lr = float(training_cfg.get("pretrain_learning_rate", 1.0e-3))
@@ -775,26 +941,41 @@ def run_transfer(
     rows: list[dict[str, Any]] = []
     split_records: list[dict[str, Any]] = []
 
-    for position, target in enumerate(target_labels, start=1):
-        target_seed = seed + position - 1
-        set_seed(target_seed)
+    for target in target_labels:
+        target_number = int(target.upper().lstrip("S"))
+        pretrain_seed = seed + target_number
+        fine_tune_seed = seed + target_number * 100
+        set_seed(pretrain_seed)
         target_idx = np.flatnonzero(subject_labels == target).astype(np.int64)
         other_idx = np.flatnonzero(subject_labels != target).astype(np.int64)
         if np.any(subject_labels[other_idx] == target):
             raise RuntimeError(f"Target subject {target} leaked into pretraining.")
-        pretrain_idx, pretrain_test_idx = stratified_train_test_split(
-            y,
-            other_idx,
-            train_size=pretrain_train_size,
-            test_size=pretrain_test_size,
-            seed=target_seed,
-        )
+        if pretrain_validation_size > 0.0:
+            pretrain_idx, pretrain_validation_idx, pretrain_test_idx = (
+                stratified_train_validation_test_split(
+                    y,
+                    other_idx,
+                    train_size=pretrain_train_size,
+                    validation_size=pretrain_validation_size,
+                    test_size=pretrain_test_size,
+                    seed=pretrain_seed,
+                )
+            )
+        else:
+            pretrain_idx, pretrain_test_idx = stratified_train_test_split(
+                y,
+                other_idx,
+                train_size=pretrain_train_size,
+                test_size=pretrain_test_size,
+                seed=pretrain_seed,
+            )
+            pretrain_validation_idx = np.empty(0, dtype=np.int64)
         fine_tune_idx, target_test_idx = stratified_train_test_split(
             y,
             target_idx,
             train_size=target_train_size,
             test_size=target_test_size,
-            seed=target_seed + 10_000,
+            seed=fine_tune_seed,
         )
         if np.intersect1d(other_idx, target_idx).size:
             raise RuntimeError(f"Target subject {target} overlaps pretraining subjects.")
@@ -827,6 +1008,22 @@ def run_transfer(
         pretrain_loader, pretrain_eval_loader, pretrain_test_loader, pre_mean, pre_std = (
             pretrain_loaders
         )
+        pretrain_validation_loader = (
+            make_loader(
+                x,
+                y,
+                pretrain_validation_idx,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                shuffle=False,
+                input_scale=input_scale,
+                mean=pre_mean,
+                std=pre_std,
+                pin_memory=pin_memory,
+            )
+            if len(pretrain_validation_idx)
+            else None
+        )
         pretrain_history = train_fixed_epochs(
             model,
             pretrain_loader,
@@ -838,11 +1035,22 @@ def run_transfer(
             label=f"EEGNet pretrain excluding {target}",
         )
         pretrain_metrics = evaluate(model, pretrain_test_loader, criterion, device)
+        pretrain_validation_metrics = (
+            evaluate(model, pretrain_validation_loader, criterion, device)
+            if pretrain_validation_loader is not None
+            else None
+        )
         write_csv(pretrain_dir / "history.csv", pretrain_history)
         save_json(
             pretrain_dir / "test_metrics.json",
             {
                 "n_samples": int(len(pretrain_test_idx)),
+                "n_validation_samples": int(len(pretrain_validation_idx)),
+                "validation_accuracy": (
+                    pretrain_validation_metrics["accuracy"]
+                    if pretrain_validation_metrics is not None
+                    else None
+                ),
                 "loss": pretrain_metrics["loss"],
                 "accuracy": pretrain_metrics["accuracy"],
                 "balanced_accuracy": pretrain_metrics["balanced_accuracy"],
@@ -868,6 +1076,7 @@ def run_transfer(
                 parameter.requires_grad = False
             for parameter in model.classifier.parameters():
                 parameter.requires_grad = True
+        set_seed(fine_tune_seed)
         fine_tune_loaders = make_loaders(
             x,
             y,
@@ -897,6 +1106,7 @@ def run_transfer(
         row = {
             "subject": target,
             "n_pretrain": int(len(pretrain_idx)),
+            "n_pretrain_validation": int(len(pretrain_validation_idx)),
             "n_pretrain_test": int(len(pretrain_test_idx)),
             "n_train": int(len(fine_tune_idx)),
             "n_test": int(len(target_test_idx)),
@@ -935,6 +1145,7 @@ def run_transfer(
                 "target_subject": target,
                 "pretrain_subjects": sorted(np.unique(subject_labels[other_idx]).tolist()),
                 "pretrain_indices": pretrain_idx.tolist(),
+                "pretrain_validation_indices": pretrain_validation_idx.tolist(),
                 "pretrain_test_indices": pretrain_test_idx.tolist(),
                 "fine_tune_indices": fine_tune_idx.tolist(),
                 "test_indices": target_test_idx.tolist(),
@@ -953,15 +1164,281 @@ def run_transfer(
     evaluation = {
         "strategy": "other_subject_pretraining_then_target_subject_fine_tuning",
         "pretrain_train_size": pretrain_train_size,
+        "pretrain_validation_size": pretrain_validation_size,
         "pretrain_test_size": pretrain_test_size,
         "target_train_size": target_train_size,
         "target_test_size": target_test_size,
-        "uses_validation": False,
+        "uses_validation": pretrain_validation_size > 0.0,
         "target_excluded_from_pretraining": True,
         "freeze_feature_extractor": freeze_features,
         "seed": seed,
     }
     return rows, subject_rows, evaluation
+
+
+def run_paper_global_ss_tl(
+    *,
+    x: np.ndarray,
+    y: np.ndarray,
+    subject_labels: np.ndarray,
+    class_names: list[str],
+    model_cfg: dict[str, Any],
+    training_cfg: dict[str, Any],
+    data_cfg: dict[str, Any],
+    run_dir: Path,
+    device: torch.device,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    """Reproduce the PhysioNet paper's 5-fold global CV and 4-fold SS-TL."""
+
+    from sklearn.model_selection import StratifiedKFold
+
+    seed = int(training_cfg.get("seed", 42))
+    global_n_splits = int(training_cfg.get("global_n_splits", 5))
+    subject_n_splits = int(training_cfg.get("ss_tl_n_splits", 4))
+    global_epochs = int(training_cfg.get("global_epochs", 100))
+    global_lr = float(training_cfg.get("global_learning_rate", 1.0e-2))
+    global_lr_schedule = training_cfg.get(
+        "global_learning_rate_schedule",
+        "0:0.01,20:0.001,50:0.0001",
+    )
+    fine_tune_epochs = int(training_cfg.get("ss_tl_epochs", 5))
+    fine_tune_lr = float(training_cfg.get("ss_tl_learning_rate", 1.0e-3))
+    batch_size = int(training_cfg.get("batch_size", 16))
+    num_workers = int(training_cfg.get("num_workers", 0))
+    pin_memory = parse_bool(training_cfg.get("pin_memory", True), default=True)
+    log_every = max(1, int(training_cfg.get("log_every", 10)))
+    save_ss_models = parse_bool(
+        training_cfg.get("save_ss_tl_checkpoints", False),
+        default=False,
+    )
+    dropout_rate = float(model_cfg.get("cross_subject_dropout", 0.2))
+    input_scale, standardize = preprocessing_parameters(data_cfg)
+    criterion = nn.CrossEntropyLoss()
+
+    global_rows: list[dict[str, Any]] = []
+    ss_rows: list[dict[str, Any]] = []
+    split_records: list[dict[str, Any]] = []
+    folds = global_subject_folds(subject_labels, n_splits=global_n_splits)
+
+    for fold, global_train_idx, global_test_idx, train_subjects, test_subjects in folds:
+        set_seed(seed * fold)
+        fold_dir = run_dir / f"global_fold_{fold:02d}"
+        fold_dir.mkdir(parents=True, exist_ok=False)
+        global_model = make_model(
+            model_cfg,
+            num_classes=len(class_names),
+            channels=x.shape[1],
+            samples=x.shape[2],
+            dropout_rate=dropout_rate,
+            device=device,
+        )
+        global_loaders = make_loaders(
+            x,
+            y,
+            global_train_idx,
+            global_test_idx,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            input_scale=input_scale,
+            standardize=standardize,
+        )
+        (
+            global_train_loader,
+            global_train_eval_loader,
+            global_test_loader,
+            global_mean,
+            global_std,
+        ) = global_loaders
+        global_history = train_fixed_epochs(
+            global_model,
+            global_train_loader,
+            global_train_eval_loader,
+            epochs=global_epochs,
+            learning_rate=global_lr,
+            learning_rate_schedule=global_lr_schedule,
+            device=device,
+            log_every=log_every,
+            label=f"EEGNet paper global fold {fold}",
+        )
+        global_metrics = evaluate(global_model, global_test_loader, criterion, device)
+        global_row = {
+            "subject": f"global_fold_{fold:02d}",
+            "fold": fold,
+            "n_train_subjects": len(train_subjects),
+            "n_test_subjects": len(test_subjects),
+            "n_train": int(len(global_train_idx)),
+            "n_test": int(len(global_test_idx)),
+            "epochs_completed": global_epochs,
+            "loss": global_metrics["loss"],
+            "accuracy": global_metrics["accuracy"],
+            "balanced_accuracy": global_metrics["balanced_accuracy"],
+            "macro_f1": global_metrics["macro_f1"],
+            "cohen_kappa": global_metrics["cohen_kappa"],
+            "_y_true": global_metrics["y_true"].tolist(),
+            "_y_pred": global_metrics["y_pred"].tolist(),
+            "_subject_labels": subject_labels[global_test_idx].astype(str).tolist(),
+        }
+        global_rows.append(global_row)
+        write_csv(fold_dir / "history.csv", global_history)
+        save_json(
+            fold_dir / "test_metrics.json",
+            {key: value for key, value in global_row.items() if not key.startswith("_")},
+        )
+        global_state = deepcopy(global_model.state_dict())
+        torch.save(
+            {
+                "model_state_dict": global_state,
+                "class_names": class_names,
+                "train_subjects": train_subjects,
+                "test_subjects": test_subjects,
+                "channel_mean": global_mean,
+                "channel_std": global_std,
+                "input_scale": input_scale,
+            },
+            fold_dir / "global_model.pt",
+        )
+
+        fold_record = {
+            "global_fold": fold,
+            "train_subjects": train_subjects,
+            "test_subjects": test_subjects,
+            "global_train_indices": global_train_idx.tolist(),
+            "global_test_indices": global_test_idx.tolist(),
+            "subjects": [],
+        }
+        for subject_position, subject in enumerate(test_subjects):
+            subject_idx = np.flatnonzero(subject_labels == subject).astype(np.int64)
+            subject_splitter = StratifiedKFold(
+                n_splits=subject_n_splits,
+                shuffle=True,
+                random_state=42,
+            )
+            subject_record = {"subject": subject, "folds": []}
+            for subject_fold, (local_train, local_test) in enumerate(
+                subject_splitter.split(subject_idx, y[subject_idx]),
+                start=1,
+            ):
+                fine_tune_idx = subject_idx[local_train]
+                target_test_idx = subject_idx[local_test]
+                set_seed(seed + fold * 10_000 + subject_position * 100 + subject_fold)
+                model = make_model(
+                    model_cfg,
+                    num_classes=len(class_names),
+                    channels=x.shape[1],
+                    samples=x.shape[2],
+                    dropout_rate=dropout_rate,
+                    device=device,
+                )
+                model.load_state_dict(global_state)
+                train_loader, train_eval_loader, test_loader = (
+                    make_loaders_with_standardizer(
+                        x,
+                        y,
+                        fine_tune_idx,
+                        target_test_idx,
+                        batch_size=batch_size,
+                        num_workers=num_workers,
+                        pin_memory=pin_memory,
+                        input_scale=input_scale,
+                        mean=global_mean,
+                        std=global_std,
+                    )
+                )
+                before_metrics = evaluate(model, test_loader, criterion, device)
+                label = f"EEGNet paper SS-TL {subject} fold {subject_fold}"
+                history = train_fixed_epochs(
+                    model,
+                    train_loader,
+                    train_eval_loader,
+                    epochs=fine_tune_epochs,
+                    learning_rate=fine_tune_lr,
+                    device=device,
+                    log_every=log_every,
+                    label=label,
+                )
+                metrics = evaluate(model, test_loader, criterion, device)
+                subject_fold_dir = (
+                    fold_dir / "ss_tl" / subject / f"fold_{subject_fold:02d}"
+                )
+                subject_fold_dir.mkdir(parents=True, exist_ok=False)
+                row = {
+                    "subject": subject,
+                    "global_fold": fold,
+                    "subject_fold": subject_fold,
+                    "n_global_train": int(len(global_train_idx)),
+                    "n_train": int(len(fine_tune_idx)),
+                    "n_test": int(len(target_test_idx)),
+                    "global_accuracy": before_metrics["accuracy"],
+                    "epochs_completed": fine_tune_epochs,
+                    "loss": metrics["loss"],
+                    "accuracy": metrics["accuracy"],
+                    "balanced_accuracy": metrics["balanced_accuracy"],
+                    "macro_f1": metrics["macro_f1"],
+                    "cohen_kappa": metrics["cohen_kappa"],
+                    "_y_true": metrics["y_true"].tolist(),
+                    "_y_pred": metrics["y_pred"].tolist(),
+                    "_subject_labels": subject_labels[target_test_idx]
+                    .astype(str)
+                    .tolist(),
+                }
+                ss_rows.append(row)
+                write_csv(subject_fold_dir / "history.csv", history)
+                save_json(
+                    subject_fold_dir / "test_metrics.json",
+                    {key: value for key, value in row.items() if not key.startswith("_")},
+                )
+                if save_ss_models:
+                    torch.save(
+                        {
+                            "model_state_dict": model.state_dict(),
+                            "class_names": class_names,
+                            "global_fold": fold,
+                            "target_subject": subject,
+                            "subject_fold": subject_fold,
+                            "fine_tune_indices": fine_tune_idx,
+                            "test_indices": target_test_idx,
+                        },
+                        subject_fold_dir / "fine_tuned_model.pt",
+                    )
+                subject_record["folds"].append(
+                    {
+                        "subject_fold": subject_fold,
+                        "fine_tune_indices": fine_tune_idx.tolist(),
+                        "test_indices": target_test_idx.tolist(),
+                    }
+                )
+            fold_record["subjects"].append(subject_record)
+
+        split_records.append(fold_record)
+        print(
+            f"[EEGNet paper global fold {fold}] test_accuracy="
+            f"{global_row['accuracy']:.4f}",
+            flush=True,
+        )
+
+    save_json(run_dir / "splits.json", split_records)
+    global_subject_rows = summarize_subject_fold_metrics(global_rows, REPORT_METRICS)
+    ss_subject_rows = summarize_subject_fold_metrics(ss_rows, REPORT_METRICS)
+    evaluation = {
+        "strategy": "paper_5_fold_global_subject_cv_then_4_fold_subject_ss_tl",
+        "global_n_splits": global_n_splits,
+        "ss_tl_n_splits": subject_n_splits,
+        "global_subject_order_shuffled": False,
+        "ss_tl_trials_stratified_and_shuffled": True,
+        "global_aggregates": aggregate_rows(global_rows),
+        "ss_tl_aggregates": aggregate_rows(ss_rows),
+        "uses_validation": True,
+        "test_used_during_training": False,
+        "seed": seed,
+    }
+    return ss_rows, ss_subject_rows, evaluation, global_rows, global_subject_rows
 
 
 def run_experiment(
@@ -976,10 +1453,18 @@ def run_experiment(
     training_cfg = experiment_cfg["training"]
     protocol = normalize_protocol(training_cfg.get("protocol", "subject_wise"))
     load_cfg, requested_targets = split_data_config_for_protocol(data_cfg, protocol)
-    loaded_x, y, subject_labels, class_names, filter_bank = (
-        load_segmented_epochs_like_train(load_cfg)
+    author_preprocessing = parse_bool(
+        data_cfg.get("eegnet_author_preprocessing", False),
+        default=False,
     )
-    x = extract_single_trial_eeg(loaded_x)
+    if author_preprocessing:
+        x, y, subject_labels, class_names = load_eegnet_author_data(load_cfg)
+        filter_bank: list[list[float]] = []
+    else:
+        loaded_x, y, subject_labels, class_names, filter_bank = (
+            load_segmented_epochs_like_train(load_cfg)
+        )
+        x = extract_single_trial_eeg(loaded_x)
     target_labels = resolve_target_labels(requested_targets, subject_labels)
     effective_cfg = deepcopy(experiment_cfg)
     effective_cfg["model"] = deepcopy(model_cfg)
@@ -992,6 +1477,8 @@ def run_experiment(
         flush=True,
     )
 
+    global_rows: list[dict[str, Any]] = []
+    global_subject_rows: list[dict[str, Any]] = []
     if protocol == "subject_wise":
         rows, subject_rows, evaluation = run_subject_wise(
             x=x,
@@ -1004,7 +1491,7 @@ def run_experiment(
             run_dir=run_dir,
             device=device,
         )
-    else:
+    elif protocol == "transfer":
         rows, subject_rows, evaluation = run_transfer(
             x=x,
             y=y,
@@ -1017,17 +1504,43 @@ def run_experiment(
             run_dir=run_dir,
             device=device,
         )
+    else:
+        (
+            rows,
+            subject_rows,
+            evaluation,
+            global_rows,
+            global_subject_rows,
+        ) = run_paper_global_ss_tl(
+            x=x,
+            y=y,
+            subject_labels=subject_labels,
+            class_names=class_names,
+            model_cfg=model_cfg,
+            training_cfg=training_cfg,
+            data_cfg=data_cfg,
+            run_dir=run_dir,
+            device=device,
+        )
 
     visible_rows = public_rows(rows)
     write_csv(run_dir / "results.csv", visible_rows)
     write_csv(run_dir / "per_subject_results.csv", visible_rows)
     write_csv(run_dir / "per_subject_summary.csv", subject_rows)
+    if global_rows:
+        write_csv(run_dir / "global_results.csv", public_rows(global_rows))
+        write_csv(run_dir / "global_per_subject_summary.csv", global_subject_rows)
     aggregates = aggregate_rows(rows)
     summary = {
         "baseline": "eegnet",
         "protocol": protocol,
-        "source_repository": OFFICIAL_REPOSITORY,
-        "paper": OFFICIAL_PAPER,
+        "source_repository": (
+            PHYSIONET_REPOSITORY
+            if protocol == "paper_global_ss_tl"
+            else OFFICIAL_REPOSITORY
+        ),
+        "paper": PHYSIONET_PAPER if protocol == "paper_global_ss_tl" else OFFICIAL_PAPER,
+        "base_eegnet_repository": OFFICIAL_REPOSITORY,
         "architecture": "EEGNet-8,2",
         "official_architecture_parameters": {
             "F1": int(model_cfg.get("F1", 8)),
@@ -1037,6 +1550,8 @@ def run_experiment(
             "kernel_duration_seconds": int(model_cfg.get("kernel_length", 40))
             / float(data_cfg.get("sfreq", 160)),
             "separable_kernel_length": int(model_cfg.get("separable_kernel_length", 16)),
+            "pool1_length": int(model_cfg.get("pool1_length", 4)),
+            "pool2_length": int(model_cfg.get("pool2_length", 8)),
             "within_subject_dropout": float(model_cfg.get("within_subject_dropout", 0.5)),
             "cross_subject_dropout": float(model_cfg.get("cross_subject_dropout", 0.25)),
             "depthwise_max_norm": float(model_cfg.get("depthwise_max_norm", 1.0)),
@@ -1055,6 +1570,8 @@ def run_experiment(
         "evaluation": evaluation,
         "folds": visible_rows,
         "subjects": subject_rows,
+        "global_folds": public_rows(global_rows),
+        "global_subjects": global_subject_rows,
         "aggregates": aggregates,
         "test_used_during_training": False,
     }

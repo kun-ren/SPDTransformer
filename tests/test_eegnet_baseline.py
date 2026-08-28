@@ -99,14 +99,18 @@ def test_transfer_loads_pretraining_cohort_and_resolves_target():
     assert set(labels[labels != "S001"]) == {"S002", "S003"}
 
 
-def test_eegnet_physionet_config_runs_both_fixed_protocols_without_validation():
+def test_eegnet_physionet_config_matches_trial_pooled_transfer_protocol():
     config = load_yaml(PROJECT_ROOT / "configs" / "eegnet_physionet.yaml")
     experiments = expand_data_training_experiments(config)
-    assert [item["training"]["protocol"] for item in experiments] == [
-        "subject_wise",
-        "transfer",
-    ]
-    assert all("validation_size" not in item["training"] for item in experiments)
+    assert [item["training"]["protocol"] for item in experiments] == ["transfer"]
+    assert experiments[0]["training"]["pretrain_train_size"] == 0.7
+    assert experiments[0]["training"]["pretrain_validation_size"] == 0.15
+    assert experiments[0]["training"]["pretrain_test_size"] == 0.15
+    assert experiments[0]["training"]["train_size"] == 0.7
+    assert experiments[0]["training"]["test_size"] == 0.3
+    assert experiments[0]["data"]["task_types"] == ["unilateral_fist"]
+    assert experiments[0]["data"]["epoch_slice"] == [-2.0, 4.0]
+    assert experiments[0]["data"]["segment_slice"] == [6.0, None]
     assert config["model"]["F1"] == 8
     assert config["model"]["D"] == 2
     assert config["model"]["F2"] == 16

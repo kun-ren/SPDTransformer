@@ -1,0 +1,69 @@
+# Reproduction configuration for Hersche et al. (2020):
+# "An Accurate EEGNet-based Motor-Imagery Brain-Computer Interface for
+# Low-Power Edge Computing" (https://arxiv.org/abs/2004.00077).
+#
+# One run performs both evaluations without retraining a global model twice:
+# 1. non-shuffled 5-fold CV over the 105 subjects (84 train / 21 unseen test),
+# 2. stratified 4-fold SS-TL on each unseen subject, always restarting from the
+#    corresponding global-fold checkpoint.
+
+data:
+  dataset: ["physionet_mi"]
+  root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
+  subjects: 1-109
+
+  # Use the paper authors' EDF loader: no band-pass, re-reference, notch, ICA,
+  # autoreject, or train-set standardization. Trials start at cue onset.
+  eegnet_author_preprocessing: [true]
+  eegnet_excluded_subjects: ["88,92,100,104"]
+  eegnet_num_classes: [2, 3, 4]
+  eegnet_T: [3.0]
+  eegnet_downsample: [1]
+  eegnet_n_channels: [64]
+  eegnet_normalization: [0]
+  eegnet_scale_to_uv: [true]
+  eegnet_random_state: [7]
+  eegnet_max_trials_per_class: [7]
+  eegnet_input_scale: [1.0]
+  eegnet_standardize: [false]
+  sfreq: [160]
+
+  # Required canonical time metadata; author preprocessing uses eegnet_T.
+  epoch_slice: [[0.0, 3.0]]
+  segment_slice: [[3.0, null]]
+
+model:
+  F1: 8
+  D: 2
+  F2: 16
+  kernel_length: 128
+  separable_kernel_length: 16
+  pool1_length: 8
+  pool2_length: 8
+  within_subject_dropout: 0.2
+  cross_subject_dropout: 0.2
+  depthwise_max_norm: 1.0
+  classifier_max_norm: 0.25
+
+training:
+  protocol: [paper_global_ss_tl]
+  seed: [42]
+  global_n_splits: [5]
+  ss_tl_n_splits: [4]
+
+  # Paper: Adam, batch 16, 100 global epochs, piecewise-constant LR.
+  global_epochs: [100]
+  global_learning_rate: [0.01]
+  global_learning_rate_schedule: ["0:0.01,20:0.001,50:0.0001"]
+  batch_size: [16]
+
+  # Paper: all layers are adapted for five additional epochs.
+  ss_tl_epochs: [5]
+  ss_tl_learning_rate: [0.001]
+  save_ss_tl_checkpoints: [false]
+  num_workers: [0]
+  pin_memory: [true]
+  log_every: [10]
+
+output:
+  dir: experiments/results/eegnet_physionet_paper_global_ss_tl
