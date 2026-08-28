@@ -14,7 +14,7 @@ from script.run_four_class_experiments import (
 )
 
 
-def test_all_subjects_resolves_to_physionet_pretrain_cohort():
+def test_all_subjects_resolves_to_physionet_cohort():
     assert resolve_campaign_subjects("all") == (
         "1-87,90-91,93-99,101-103,105,107-109"
     )
@@ -63,7 +63,28 @@ def test_bci_campaign_generates_dataset_aligned_configs():
                 assert config["training"]["test_size"] == [0.3]
                 assert config["data"]["pretrain_subjects"] == "1-9"
             else:
-                assert config["data"]["pretrain_subjects"] == "1-9"
+                assert "pretrain_subjects" not in config["data"]
+                assert config["pretrain"]["subject_train_size"] == [0.8]
+                assert config["pretrain"]["subject_test_size"] == [0.2]
+
+
+def test_physionet_campaign_uses_complete_cohort_for_eegnet_transfer():
+    with TemporaryDirectory() as temporary_dir:
+        commands = build_configs(Path(temporary_dir), "1-3")
+        eegnet_path = commands["eegnet_transfer"][0]
+        transformer_path = commands["spd_transformer_complete_rest_1p0"][0]
+
+        with eegnet_path.open("r", encoding="utf-8") as handle:
+            eegnet_config = yaml.safe_load(handle)
+        with transformer_path.open("r", encoding="utf-8") as handle:
+            transformer_config = yaml.safe_load(handle)
+
+        assert eegnet_config["data"]["subjects"] == "1-3"
+        assert eegnet_config["data"]["pretrain_subjects"] == (
+            "1-87,90-91,93-99,101-103,105,107-109"
+        )
+        assert transformer_config["data"]["subjects"] == "1-3"
+        assert "pretrain_subjects" not in transformer_config["data"]
 
 
 def test_baseline_record_supports_timestamp_run_layout():

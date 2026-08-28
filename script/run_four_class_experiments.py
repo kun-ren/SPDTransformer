@@ -215,21 +215,27 @@ def resolve_campaign_subjects(
     subjects: str | None,
     dataset: str = "physionet_mi",
 ) -> Any:
-    """Resolve ``--subjects all`` to the configured pretraining cohort."""
+    """Resolve ``--subjects all`` to the configured complete cohort."""
 
     if subjects is None or subjects.strip().lower() != "all":
         return subjects
     transformer_path, _ = dataset_config_paths(dataset)
     transformer_config = load_yaml(transformer_path)
-    pretrain_subjects = transformer_config.get("data", {}).get(
-        "pretrain_subjects"
-    )
-    if pretrain_subjects is None or str(pretrain_subjects).strip() == "":
+    cohort_subjects = configured_subject_cohort(transformer_config)
+    if cohort_subjects is None or str(cohort_subjects).strip() == "":
         raise ValueError(
-            "--subjects all requires data.pretrain_subjects in "
+            "--subjects all requires data.subjects (or legacy "
+            "data.pretrain_subjects) in "
             f"{transformer_path}."
         )
-    return pretrain_subjects
+    return cohort_subjects
+
+
+def configured_subject_cohort(config: dict[str, Any]) -> Any:
+    """Return the complete cohort from new or legacy Transformer configs."""
+
+    data_cfg = config.get("data", {})
+    return data_cfg.get("pretrain_subjects") or data_cfg.get("subjects")
 
 
 def make_transformer_config(
@@ -359,9 +365,9 @@ def build_configs(
                 "transfer" if name == "eegnet_transfer" else "subject_wise"
             ]
             training_cfg["subject_wise_n_splits"] = [1]
-            config["data"]["pretrain_subjects"] = transformer_base["data"][
-                "pretrain_subjects"
-            ]
+            config["data"]["pretrain_subjects"] = configured_subject_cohort(
+                transformer_base
+            )
         else:
             training_cfg["subject_specific"] = [True]
         specs[name] = (
@@ -659,8 +665,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--subjects",
         help=(
             "Target subjects, e.g. 1 or 1-10; use 'all' to target every "
-            "subject in Transformer data.pretrain_subjects. Overrides each "
-            "generated config."
+            "subject in the configured Transformer cohort. For Transformer "
+            "runs this is the cohort split into Global-train/Global-test; it "
+            "overrides each generated config."
         ),
     )
     parser.add_argument(

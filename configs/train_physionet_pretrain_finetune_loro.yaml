@@ -1,17 +1,14 @@
-# train_grid.yaml-aligned singleton-grid configuration.
-# data.subjects is the target subject set: use 1 or 1-10.
-# data.pretrain_subjects is the complete candidate pretraining cohort; the
-# current target is removed automatically before every target-specific run.
+# One Global checkpoint followed by nested held-out-subject adaptation.
+# First split data.subjects into configurable Global-train/Global-test subject
+# cohorts. Then evaluate the Global checkpoint and adapt it independently to
+# each Global-test subject using a configurable pooled-trial train/test split.
 
 data:
   dataset: ["physionet_mi"]
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
 
-  # Subjects to evaluate/fine-tune. This matches train_grid.yaml semantics.
+  # Complete subject cohort. The subject split is configured under pretrain.
   subjects: 1-87,90-91,93-99,101-103,105,107-109
-  # Full cohort available for preprocessing and other-subject pretraining.
-  # Exclude S088, S089, S092, S100, S104, and S106.
-  pretrain_subjects: 1-87,90-91,93-99,101-103,105,107-109
 
   # As in train_grid.yaml, one filter-bank candidate needs an extra list level.
   filter_bank: [[[8, 13], [13, 20], [20, 30]]]
@@ -73,9 +70,17 @@ model:
   eps: [1.0e-6]
 
 pretrain:
-  # Other-subject trials: 70% train, 15% validation, 15% test.
+  # Split subjects once. Global-test subjects are completely absent from
+  # Global training and validation. With 103 configured subjects, 0.2 holds
+  # out approximately 21 subjects for cross-subject testing and adaptation.
+  subject_train_size: [0.8]
+  subject_test_size: [0.2]
+  subject_split_seed: [42]
+  subject_split_shuffle: [true]
+
+  # Only trials from Global-train subjects are split into train/validation.
+  # The validation partition selects the single best Global checkpoint.
   validation_size: [0.15]
-  test_size: [0.15]
   epochs: [100]
   batch_size: [128]
   precision: ["float32"]
@@ -104,10 +109,12 @@ pretrain:
   allow_tf32: [false]
 
 fine_tune:
-  # Pool every retained run for the target subject, shuffle trials, and make
-  # one stratified train/test split. There is no fine-tune validation dataset.
+  # Traverse every Global-test subject. For each one, restart from the same
+  # Global checkpoint, pool all retained runs, and make one stratified split.
+  # There is no fine-tune validation dataset.
   train_size: [0.7]
   test_size: [0.3]
+  seed: [42]
   epochs: [150]
   batch_size: [64]
   precision: ["float32"]
@@ -123,7 +130,7 @@ fine_tune:
   allow_tf32: [false]
 
 output:
-  dir: experiments/results/physionet_pretrain_finetune_trial_split
+  dir: experiments/results/physionet_global_subject_split_finetune
   dataset_cache_dir: experiments/cache/preprocessed_datasets
   save_pretrained_checkpoints: true
   save_fine_tuned_checkpoints: false

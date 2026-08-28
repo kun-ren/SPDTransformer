@@ -1,11 +1,11 @@
-# BCI Competition IV-2a four-class LOSO pretraining and target-trial adaptation.
-# Every target A01--A09 is excluded from its own other-subject pretraining set.
+# BCI Competition IV-2a one-Global-checkpoint subject adaptation protocol.
+# Split A01--A09 into Global-train/Global-test cohorts, evaluate the unchanged
+# Global checkpoint, then restart from it for every held-out subject.
 
 data:
   dataset: ["bnci2014_001"]
   root_dir: ["data"]
-  subjects: 1
-  pretrain_subjects: 1-9
+  subjects: 1-9
 
   filter_bank: [[[8, 13], [13, 20], [20, 30]]]
   estimator: ["lwf"]
@@ -58,8 +58,11 @@ model:
   eps: [1.0e-6]
 
 pretrain:
+  subject_train_size: [0.8]
+  subject_test_size: [0.2]
+  subject_split_seed: [42]
+  subject_split_shuffle: [true]
   validation_size: [0.15]
-  test_size: [0.15]
   epochs: [100]
   batch_size: [128]
   precision: ["float32"]
@@ -90,6 +93,7 @@ fine_tune:
   # split. Fine-tuning uses no validation dataset.
   train_size: [0.7]
   test_size: [0.3]
+  seed: [42]
   epochs: [50]
   batch_size: [32]
   precision: ["float32"]

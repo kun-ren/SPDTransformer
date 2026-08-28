@@ -1,0 +1,103 @@
+# Dedicated hyperparameter selection for the Global cross-subject model.
+# Each hyperparameter configuration runs subject-wise 5-fold CV. A fold uses
+# only train and test subjects: no validation, early stopping, final holdout,
+# checkpoint reuse, or subject-specific fine-tuning.
+#
+# Selection score: arithmetic mean of the five fold test accuracies.
+# Important: because test-fold accuracy selects hyperparameters, it is a CV
+# model-selection score, not an unbiased final test estimate.
+
+data:
+  dataset: ["physionet_mi"]
+  root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
+  subjects: 1-87,90-91,93-99,101-103,105,107-109
+
+  filter_bank: [[[8, 13], [13, 20], [20, 30]]]
+  estimator: ["lwf"]
+  sfreq: [160]
+  eps: [1.0e-6]
+  covariance_signal_scale: ["auto"]
+  replace_covariance_diagonal_with_raw_energy: [true]
+  brain_region_mode: ["physionet_8x8"]
+  covariance_output_dtype: ["float32"]
+  channels: [null]
+
+  imaged: [true]
+  executed: [false]
+  task_types: [[unilateral_fist]]
+  epoch_slice: [[-2.0, 4.0]]
+  segment_slice: [[0.5, 0.25]]
+
+  reject_threshold_uv: [null]
+  use_ica: [false]
+  ica_n_components: [20]
+  ica_random_state: [42]
+  ica_eog_channels: [""]
+  use_autoreject: [false]
+  autoreject_random_state: [42]
+  autoreject_n_jobs: [1]
+  autoreject_cv: [10]
+  autoreject_cache_dir: "experiments/cache/autoreject_masks"
+  autoreject_force_rebuild: false
+  baseline_correction: [null]
+  baseline_window: [null]
+
+model:
+  head_nums: [4]
+  attention_dim: ["8"]
+  stage_transition: [true]
+  stage_projection_init: ["random"]
+  add_norm_type: ["sequence_add_norm"]
+  ffn_hidden_spd_dim: [64]
+  tau: [1.3]
+  metric: ["learnable-metric"]
+  depth: [1]
+  classifier_type: ["mdm"]
+  pooling: ["weighted"]
+
+  # Hyperparameter search values. Two values create two model candidates.
+  dropout: [0.4， 0.6]
+
+  attention_dropout: [0.0]
+  use_position_bias: [true]
+  position_bias_axes: ["time"]
+  position_bias_max: [0.5]
+  attention_score_target_rms: [1.0]
+  attention_score_clip: [5.0]
+  layer_norm_affine: [false]
+  learnable_metric_mode: ["low-rank"]
+  learnable_metric_score: ["distance"]
+  learnable_metric_rank: [4]
+  eps: [1.0e-6]
+
+training:
+  cv_n_splits: [5]
+  # false gives deterministic, consecutive subject folds after sorting IDs.
+  # Set true to use cv_seed for a reproducible shuffled subject assignment.
+  cv_shuffle: [false]
+  cv_seed: [42]
+
+  # Fixed training only. Test data never controls epochs or learning rate.
+  epochs: [100]
+  batch_size: [128]
+  precision: ["float32"]
+
+  # The Cartesian product is used. Together with two dropout values this file
+  # defines 2 x 2 x 2 = 8 configurations and 8 x 5 = 40 model trainings.
+  learning_rate: [0.002,]
+  stiefel_learning_rate: [0.0003]
+
+  lr_scheduler: ["none"]
+  weight_decay: [0.01]
+  apply_weight_decay_to_special_parameters: [true]
+  gradient_clip_norm: [0.8]
+  condition_regularization_weight: [0.0]
+  seed: [42]
+  num_workers: [0]
+  pin_memory: [true]
+  allow_tf32: [false]
+
+output:
+  dir: experiments/results/physionet_global_cv_hparam
+  dataset_cache_dir: experiments/cache/preprocessed_datasets
+  save_fold_checkpoints: false
