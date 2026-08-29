@@ -402,6 +402,7 @@ class SingleHeadAttention(nn.Module):
         tangent_feature_dim = attention_dim * (attention_dim + 1) // 2
 
         self.tangent_feature_dim = tangent_feature_dim
+        self.requested_learnable_metric_rank = None
         self.learnable_metric_rank = None
         self.metric_matrix = None
         self.metric_low_rank = None
@@ -411,16 +412,15 @@ class SingleHeadAttention(nn.Module):
                 # It is symmetrized at use time but receives no factorization.
                 self.metric_matrix = nn.Parameter(torch.eye(tangent_feature_dim))
             else:
-                rank = (
+                requested_rank = (
                     min(21, tangent_feature_dim)
                     if learnable_metric_rank is None or int(learnable_metric_rank) <= 0
                     else int(learnable_metric_rank)
                 )
-                if rank > tangent_feature_dim:
-                    raise ValueError(
-                        "learnable_metric_rank must not exceed tangent feature "
-                        f"dimension {tangent_feature_dim}, got {rank}."
-                    )
+                # A shared rank setting is an upper bound because later
+                # Transformer layers may use a smaller SPD/tangent dimension.
+                rank = min(requested_rank, tangent_feature_dim)
+                self.requested_learnable_metric_rank = requested_rank
                 self.learnable_metric_rank = rank
                 self.metric_low_rank = nn.Parameter(
                     torch.randn(tangent_feature_dim, self.learnable_metric_rank) * 0.02,

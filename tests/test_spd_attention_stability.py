@@ -5,6 +5,23 @@ import torch
 from src.models.SPDAttention import SingleHeadAttention, spd_exp
 
 
+def test_metric_rank_is_capped_by_each_layers_tangent_dimension():
+    attention = SingleHeadAttention(
+        spd_in_dim=2,
+        attention_dim=2,
+        metric="learnable-metric",
+        stage_transition=False,
+        learnable_metric_mode="low-rank",
+        learnable_metric_score="distance",
+        learnable_metric_rank=4,
+    )
+
+    assert attention.tangent_feature_dim == 3
+    assert attention.requested_learnable_metric_rank == 4
+    assert attention.learnable_metric_rank == 3
+    assert attention.metric_low_rank.shape == (3, 3)
+
+
 def test_spd_exp_compresses_extreme_finite_log_spectrum():
     log_eigenvalues = torch.tensor(
         [[1.0e4, -1.0e4, 25.0]],

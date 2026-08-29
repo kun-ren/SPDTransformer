@@ -47,10 +47,13 @@ data:
 model:
   head_nums: [4]
   attention_dim: ["8"]
-  stage_transition: [true]
+  # PhysioNet region covariances and this layer are both 8x8, so no stage
+  # projection is needed. With false, attention_dim must equal the layer input.
+  stage_transition: [false]
   stage_projection_init: ["random"]
   add_norm_type: ["sequence_add_norm"]
-  ffn_hidden_spd_dim: [64]
+  # SPDFeedForward applies activation directly without hidden expansion.
+  ffn_hidden_spd_dim: [null]
   tau: [1.3]
   metric: ["learnable-metric"]
   depth: [1]
