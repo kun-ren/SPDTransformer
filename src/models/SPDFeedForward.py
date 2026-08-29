@@ -48,13 +48,14 @@ def _apply_activation(
 
 class SPDFeedForward(nn.Module):
     """
-    Log-domain vector feed-forward block for SPD Transformer.
+    Dimension-preserving log-domain activation block for SPD Transformer.
 
     The encoder already keeps the block input in the tangent/log domain, so this
-    module implements the stable part of the requested pipeline:
+    module applies the non-linearity without expanding and reducing the tangent
+    feature dimension:
 
         log(SPD) -> upper triangular vector
-            -> Linear -> GELU -> Dropout -> Linear
+            -> activation -> dropout
             -> symmetric matrix -> residual in log domain
 
     The returned matrix is symmetric log-domain output. TraceAddNorm consumes
@@ -79,27 +80,20 @@ class SPDFeedForward(nn.Module):
 
         self.spd_dim = spd_dim
         self.feature_dim = spd_dim * (spd_dim + 1) // 2
-        self.hidden_feature_dim = int(hidden_spd_dim or self.feature_dim * 2)
-        if self.hidden_feature_dim < 1:
-            raise ValueError(
-                f"hidden_spd_dim must be positive, got {hidden_spd_dim!r}."
-            )
+        # Retain the public argument and attribute for old configurations, but
+        # the block no longer creates a hidden expansion dimension.
+        self.hidden_feature_dim = self.feature_dim
+        self.configured_hidden_spd_dim = hidden_spd_dim
 
         self.activation = activation
         self.dropout = nn.Dropout(dropout)
         self.eps = eps
         self.debug_tensor_stats = debug_tensor_stats
 
-        self.linear_in = nn.Linear(self.feature_dim, self.hidden_feature_dim)
-        self.linear_out = nn.Linear(self.hidden_feature_dim, self.feature_dim)
         row, col = torch.triu_indices(spd_dim, spd_dim)
         self.register_buffer("triu_row", row, persistent=False)
         self.register_buffer("triu_col", col, persistent=False)
 
-        # Start close to identity: the residual branch exists, but initially
-        # contributes almost nothing until the final projection learns.
-        nn.init.zeros_(self.linear_out.weight)
-        nn.init.zeros_(self.linear_out.bias)
         self.raw_gate = nn.Parameter(torch.logit(torch.tensor(0.1)))
 
     def forward(self, x_log: torch.Tensor) -> torch.Tensor:
@@ -119,10 +113,8 @@ class SPDFeedForward(nn.Module):
         #x_log = _sym(x_log)
         vector = x_log[..., self.triu_row, self.triu_col]
 
-        hidden = self.linear_in(vector)
-        hidden = _apply_activation(hidden, self.activation)
-        hidden = self.dropout(hidden)
-        delta_vector = self.linear_out(hidden)
+        delta_vector = _apply_activation(vector, self.activation)
+        delta_vector = self.dropout(delta_vector)
 
         delta_log = self._upper_triangular_unvectorize(delta_vector)
         gate = torch.sigmoid(self.raw_gate)

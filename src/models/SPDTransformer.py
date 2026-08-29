@@ -344,18 +344,54 @@ class SPDTransformer(nn.Module):
             raise ValueError(f"depth must be >= 1, got {depth}.")
 
         self.spd_in_dim = spd_in_dim
-        self.attention_dim = [spd_in_dim, *[int(dim) for dim in attention_dim]]
+        self.attention_dim = [int(dim) for dim in attention_dim]
         self.depth = depth
         self.debug_tensor_stats = debug_tensor_stats
         self.stage_transition = stage_transition
+
+        if len(self.attention_dim) != depth:
+            raise ValueError(
+                "attention_dim must provide exactly one dimension per layer: "
+                f"depth={depth}, got {self.attention_dim}."
+            )
+        if any(dim < 1 for dim in self.attention_dim):
+            raise ValueError(
+                f"Every attention_dim must be positive, got {self.attention_dim}."
+            )
+
+        if self.stage_transition:
+            self.layer_input_dims = [spd_in_dim, *self.attention_dim[:-1]]
+            self.layer_output_dims = list(self.attention_dim)
+            for layer_index, (input_dim, output_dim) in enumerate(
+                    zip(self.layer_input_dims, self.layer_output_dims),
+            ):
+                if output_dim > input_dim:
+                    raise ValueError(
+                        "stage_transition uses a Stiefel projection and cannot "
+                        f"increase SPD dimension at layer {layer_index}: "
+                        f"input_dim={input_dim}, attention_dim={output_dim}."
+                    )
+        else:
+            self.layer_input_dims = [spd_in_dim] * depth
+            self.layer_output_dims = [spd_in_dim] * depth
+            for layer_index, attention_layer_dim in enumerate(self.attention_dim):
+                expected_dim = self.layer_input_dims[layer_index]
+                if attention_layer_dim != expected_dim:
+                    raise ValueError(
+                        "stage_transition=false preserves the SPD dimension, so "
+                        "attention_dim must equal the layer input/previous layer "
+                        f"output at layer {layer_index}: expected {expected_dim}, "
+                        f"got {attention_layer_dim}. Set stage_transition=true "
+                        "to reduce dimensions between layers."
+                    )
 
         if num_heads < 1:
             raise ValueError(f"num_heads must be >= 1, got {num_heads}.")
         
         if num_heads == 1:
             self.layers = nn.ModuleList([SPDEncoder(
-                spd_in_dim=self.attention_dim[index] if self.stage_transition else spd_in_dim,
-                attention_dim=self.attention_dim[index+1],
+                spd_in_dim=self.layer_input_dims[index],
+                attention_dim=self.attention_dim[index],
                 stage_transition=self.stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
@@ -376,12 +412,12 @@ class SPDTransformer(nn.Module):
                 dropout=dropout,
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
-            ) for index, dim in enumerate(self.attention_dim[:-1])])
+            ) for index in range(self.depth)])
         elif num_heads > 1:
             self.layers = nn.ModuleList([SPDMultiHeadEncoder(
                 num_heads=num_heads,
-                spd_in_dim=self.attention_dim[index] if self.stage_transition else spd_in_dim,
-                attention_dim=self.attention_dim[index + 1],
+                spd_in_dim=self.layer_input_dims[index],
+                attention_dim=self.attention_dim[index],
                 stage_transition=self.stage_transition,
                 time_sequence_length=time_sequence_length,
                 frequency_sequence_length=frequency_sequence_length,
@@ -402,7 +438,7 @@ class SPDTransformer(nn.Module):
                 dropout=dropout,
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
-            ) for index, dim in enumerate(self.attention_dim[:-1])])
+            ) for index in range(self.depth)])
 
     def forward(
             self,

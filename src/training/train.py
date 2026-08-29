@@ -576,10 +576,15 @@ def parse_attention_dims(value: Any, depth: int) -> list[int]:
     if not dims:
         raise ValueError("model.attention_dim must contain at least one dimension.")
 
-    if len(dims) < depth:
-        dims.extend([dims[-1]] * (depth - len(dims)))
-    elif len(dims) > depth:
-        dims = dims[:depth]
+    if len(dims) != depth:
+        raise ValueError(
+            "model.attention_dim must provide exactly one value per layer: "
+            f"depth={depth}, got {dims}."
+        )
+    if any(dim < 1 for dim in dims):
+        raise ValueError(
+            f"Every model.attention_dim value must be positive, got {dims}."
+        )
 
     return dims
 
