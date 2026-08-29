@@ -11,6 +11,7 @@ from src.models.MultiHeadEncoder import (
 )
 
 from src.models.SPDAttention import (
+    AttentionMetricParameters,
     SingleHeadAttention,
     spd_exp,
     spd_log,
@@ -69,6 +70,14 @@ class SPDEncoder(nn.Module):
         else:
             spd_out_dim = spd_in_dim
 
+        self.shared_metric = AttentionMetricParameters(
+            attention_dim=attention_dim,
+            metric=self.metric,
+            learnable_metric_mode=learnable_metric_mode,
+            learnable_metric_score=learnable_metric_score,
+            learnable_metric_rank=learnable_metric_rank,
+        )
+
         self.time_attention = SingleHeadAttention(
             spd_out_dim,
             attention_dim,
@@ -83,6 +92,7 @@ class SPDEncoder(nn.Module):
             use_position=use_position_bias,
             max_position=time_sequence_length,
             debug_tensor_stats=debug_tensor_stats,
+            own_metric_parameters=False,
         )
 
         self.time_add_norm1 = _make_add_norm(
@@ -124,6 +134,7 @@ class SPDEncoder(nn.Module):
             use_position=use_position_bias,
             max_position=frequency_sequence_length,
             debug_tensor_stats=debug_tensor_stats,
+            own_metric_parameters=False,
         )
         self.frequency_add_norm1 = _make_add_norm(
             add_norm_type,
@@ -165,6 +176,7 @@ class SPDEncoder(nn.Module):
             use_position=use_position_bias,
             max_position=brain_region_sequence_length,
             debug_tensor_stats=debug_tensor_stats,
+            own_metric_parameters=False,
         )
         self.region_add_norm1 = _make_add_norm(
             add_norm_type,
@@ -199,6 +211,7 @@ class SPDEncoder(nn.Module):
             attention: SingleHeadAttention,
             x: torch.Tensor,
             axis: int,
+            metric_parameters: AttentionMetricParameters,
             return_aux: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if x.ndim < 4:
@@ -223,7 +236,11 @@ class SPDEncoder(nn.Module):
             perm.insert(seq_pos, moved_axis)
             x = x.permute(perm)
 
-        y_log, aux = attention(x, return_aux=return_aux)
+        y_log, aux = attention(
+            x,
+            return_aux=return_aux,
+            metric_parameters=metric_parameters,
+        )
 
         if axis != seq_pos:
             inverse_perm = [0] * len(perm)
@@ -259,6 +276,7 @@ class SPDEncoder(nn.Module):
             self.time_attention,
             attention_input,
             axis=1,
+            metric_parameters=self.shared_metric,
             return_aux=return_aux,
         )
         if return_aux:
@@ -274,6 +292,7 @@ class SPDEncoder(nn.Module):
                 self.frequency_attention,
                 x_spd,
                 axis=2,
+                metric_parameters=self.shared_metric,
                 return_aux=return_aux,
             )
             if return_aux:
@@ -290,6 +309,7 @@ class SPDEncoder(nn.Module):
                 self.region_attention,
                 x_spd,
                 axis=3,
+                metric_parameters=self.shared_metric,
                 return_aux=return_aux,
             )
             if return_aux:

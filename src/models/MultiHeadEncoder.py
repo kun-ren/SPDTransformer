@@ -5,6 +5,7 @@ from torch import nn
 
 from src.models.GeooptBiMap import GeooptBiMap
 from src.models.SPDAttention import (
+    AttentionMetricParameters,
     SingleHeadAttention,
     normalize_position_bias_axes,
     spd_exp,
@@ -165,6 +166,14 @@ class SPDMultiHeadEncoder(nn.Module):
         else:
             spd_out_dim = spd_in_dim
 
+        self.shared_metric = AttentionMetricParameters(
+            attention_dim=attention_dim,
+            metric=self.metric,
+            learnable_metric_mode=learnable_metric_mode,
+            learnable_metric_score=learnable_metric_score,
+            learnable_metric_rank=learnable_metric_rank,
+        )
+
         self.time_attention = nn.ModuleList([
             SingleHeadAttention(
                 spd_out_dim,
@@ -183,6 +192,7 @@ class SPDMultiHeadEncoder(nn.Module):
                 attention_score_target_rms=attention_score_target_rms,
                 attention_score_clip=attention_score_clip,
                 debug_tensor_stats=debug_tensor_stats,
+                own_metric_parameters=False,
             )
             for _ in range(num_heads)
         ])
@@ -231,6 +241,7 @@ class SPDMultiHeadEncoder(nn.Module):
                 attention_score_target_rms=attention_score_target_rms,
                 attention_score_clip=attention_score_clip,
                 debug_tensor_stats=debug_tensor_stats,
+                own_metric_parameters=False,
             )
             for _ in range(num_heads)
         ])
@@ -279,6 +290,7 @@ class SPDMultiHeadEncoder(nn.Module):
                 attention_score_target_rms=attention_score_target_rms,
                 attention_score_clip=attention_score_clip,
                 debug_tensor_stats=debug_tensor_stats,
+                own_metric_parameters=False,
             )
             for _ in range(num_heads)
         ])
@@ -337,6 +349,7 @@ class SPDMultiHeadEncoder(nn.Module):
             head_logits: torch.Tensor,
             x: torch.Tensor | list[torch.Tensor],
             axis: int,
+            metric_parameters: AttentionMetricParameters,
             return_aux: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if isinstance(x, torch.Tensor):
@@ -378,6 +391,7 @@ class SPDMultiHeadEncoder(nn.Module):
             y_log, aux = attention_head(
                 head_inputs[head_index],
                 return_aux=return_aux,
+                metric_parameters=metric_parameters,
             )
             head_logs.append(y_log)
             if return_aux:
@@ -422,6 +436,7 @@ class SPDMultiHeadEncoder(nn.Module):
             self.time_head_logits,
             attention_input,
             axis=1,
+            metric_parameters=self.shared_metric,
             return_aux=return_aux,
         )
         if return_aux:
@@ -438,6 +453,7 @@ class SPDMultiHeadEncoder(nn.Module):
                 self.frequency_head_logits,
                 x_spd,
                 axis=2,
+                metric_parameters=self.shared_metric,
                 return_aux=return_aux,
             )
             if return_aux:
@@ -454,6 +470,7 @@ class SPDMultiHeadEncoder(nn.Module):
                 self.region_head_logits,
                 x_spd,
                 axis=3,
+                metric_parameters=self.shared_metric,
                 return_aux=return_aux,
             )
             if return_aux:

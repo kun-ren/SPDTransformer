@@ -58,9 +58,9 @@ model:
   metric: ["learnable-metric"]
   depth: [1]
   classifier_type: ["mdm"]
-  pooling: ["weighted"]
-  dropout: [0.4]
-  attention_dropout: [0.0]
+  pooling: ["mean"]
+  dropout: [0.2]
+  attention_dropout: [0.1]
   use_position_bias: [true]
   position_bias_axes: ["time"]
   position_bias_max: [0.5]
@@ -69,6 +69,7 @@ model:
   layer_norm_affine: [false]
   learnable_metric_mode: ["low-rank"]
   learnable_metric_score: ["distance"]
+  # Shared by all four heads and all three attention axes in this layer.
   learnable_metric_rank: [4]
   eps: [1.0e-6]
 

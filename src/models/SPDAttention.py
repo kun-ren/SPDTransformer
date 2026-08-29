@@ -15,6 +15,106 @@ class MetricType(Enum):
     LearnableMetric = 'learnable-metric'
     LearnableAffineLogFunction = 'learnable-affine-log-function'
 
+
+def _normalize_metric_mode(value: str) -> Literal["full", "low-rank"]:
+    normalized = str(value).strip().lower().replace("_", "-")
+    if normalized in {"matrix", "full-rank", "unparameterized"}:
+        normalized = "full"
+    if normalized not in {"full", "low-rank"}:
+        raise ValueError(
+            "learnable_metric_mode must be 'full' or 'low-rank', got "
+            f"{value!r}."
+        )
+    return normalized
+
+
+def _normalize_metric_score(value: str) -> Literal["qgk", "distance"]:
+    normalized = str(value).strip().lower().replace("_", "-")
+    if normalized in {"dot", "dot-product", "bilinear", "similarity"}:
+        normalized = "qgk"
+    if normalized in {"dist", "squared-distance", "distance-squared"}:
+        normalized = "distance"
+    if normalized not in {"qgk", "distance"}:
+        raise ValueError(
+            "learnable_metric_score must be 'qgk' or 'distance', got "
+            f"{value!r}."
+        )
+    return normalized
+
+
+def _effective_metric_rank(
+        metric: MetricType,
+        tangent_feature_dim: int,
+        requested_rank: int | None,
+) -> tuple[int | None, int | None]:
+    if metric != MetricType.LearnableMetric:
+        return None, None
+    requested = (
+        min(21, tangent_feature_dim)
+        if requested_rank is None or int(requested_rank) <= 0
+        else int(requested_rank)
+    )
+    return requested, min(requested, tangent_feature_dim)
+
+
+class AttentionMetricParameters(nn.Module):
+    """One metric parameter set shared by all axes and heads in a layer."""
+
+    def __init__(
+            self,
+            attention_dim: int,
+            metric: str,
+            learnable_metric_mode: Literal["full", "low-rank"] = "low-rank",
+            learnable_metric_score: Literal["qgk", "distance"] = "qgk",
+            learnable_metric_rank: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.metric = MetricType(metric)
+        self.attention_dim = int(attention_dim)
+        self.tangent_feature_dim = self.attention_dim * (self.attention_dim + 1) // 2
+        self.learnable_metric_mode = _normalize_metric_mode(learnable_metric_mode)
+        self.learnable_metric_score = _normalize_metric_score(learnable_metric_score)
+        (
+            self.requested_learnable_metric_rank,
+            self.learnable_metric_rank,
+        ) = _effective_metric_rank(
+            self.metric,
+            self.tangent_feature_dim,
+            learnable_metric_rank,
+        )
+
+        if self.metric == MetricType.LearnableAffineLogFunction:
+            inverse_softplus_one = math.log(math.expm1(1.0))
+            self.affine_log_scale_raw = nn.Parameter(
+                torch.tensor(inverse_softplus_one)
+            )
+        else:
+            self.register_parameter("affine_log_scale_raw", None)
+
+        if (
+                self.metric == MetricType.LearnableMetric
+                and self.learnable_metric_mode == "full"
+        ):
+            self.metric_matrix = nn.Parameter(torch.eye(self.tangent_feature_dim))
+        else:
+            self.register_parameter("metric_matrix", None)
+
+        if (
+                self.metric == MetricType.LearnableMetric
+                and self.learnable_metric_mode == "low-rank"
+        ):
+            assert self.learnable_metric_rank is not None
+            self.metric_low_rank = nn.Parameter(
+                torch.randn(
+                    self.tangent_feature_dim,
+                    self.learnable_metric_rank,
+                ) * 0.02
+            )
+            nn.init.orthogonal_(self.metric_low_rank)
+        else:
+            self.register_parameter("metric_low_rank", None)
+
+
 POSITION_BIAS_AXES = frozenset({"time", "frequency", "region"})
 
 
@@ -302,6 +402,7 @@ class SingleHeadAttention(nn.Module):
             debug_tensor_stats: bool = False,
             spd_out_dim: int | None = None,
             metric_eps: float | None = None,
+            own_metric_parameters: bool = True,
     ):
         super().__init__()
         if attention_dim is None:
@@ -320,30 +421,8 @@ class SingleHeadAttention(nn.Module):
         self.attention_dim = attention_dim
         self.metric = MetricType(metric)
         self.stage_transition = stage_transition
-        normalized_metric_mode = (
-            str(learnable_metric_mode).strip().lower().replace("_", "-")
-        )
-        if normalized_metric_mode in {"matrix", "full-rank", "unparameterized"}:
-            normalized_metric_mode = "full"
-        if normalized_metric_mode not in {"full", "low-rank"}:
-            raise ValueError(
-                "learnable_metric_mode must be 'full' or 'low-rank', got "
-                f"{learnable_metric_mode!r}."
-            )
-        normalized_metric_score = (
-            str(learnable_metric_score).strip().lower().replace("_", "-")
-        )
-        if normalized_metric_score in {"dot", "dot-product", "bilinear", "similarity"}:
-            normalized_metric_score = "qgk"
-        if normalized_metric_score in {"dist", "squared-distance", "distance-squared"}:
-            normalized_metric_score = "distance"
-        if normalized_metric_score not in {"qgk", "distance"}:
-            raise ValueError(
-                "learnable_metric_score must be 'qgk' or 'distance', got "
-                f"{learnable_metric_score!r}."
-            )
-        self.learnable_metric_mode = normalized_metric_mode
-        self.learnable_metric_score = normalized_metric_score
+        self.learnable_metric_mode = _normalize_metric_mode(learnable_metric_mode)
+        self.learnable_metric_score = _normalize_metric_score(learnable_metric_score)
         self.eps = eps
         self.attention_dropout = nn.Dropout(attention_dropout)
         self.debug_attention_dropout = debug_attention_dropout
@@ -369,12 +448,6 @@ class SingleHeadAttention(nn.Module):
                 eps=self.eps,
                 init="random",
             )
-            self.key = GeooptBiMap(
-                in_dim=spd_in_dim,
-                out_dim=spd_in_dim,
-                eps=self.eps,
-                init="random",
-            )
             self.value = GeooptBiMap(in_dim=spd_in_dim, out_dim=self.spd_in_dim, eps=self.eps)
         else:
             self.query = GeooptBiMap(
@@ -383,49 +456,29 @@ class SingleHeadAttention(nn.Module):
                 eps=self.eps,
                 init="random",
             )
-            self.key = GeooptBiMap(
-                in_dim=spd_in_dim,
-                out_dim=attention_dim,
-                eps=self.eps,
-                init="random",
-            )
             self.value = GeooptBiMap(in_dim=spd_in_dim, out_dim=self.spd_in_dim, eps=self.eps)
 
-        if self.metric == MetricType.LearnableAffineLogFunction:
-            inverse_softplus_one = math.log(math.expm1(1.0))
-            self.affine_log_scale_raw = nn.Parameter(
-                torch.tensor(inverse_softplus_one)
-            )
-        else:
-            self.register_parameter("affine_log_scale_raw", None)
-
         tangent_feature_dim = attention_dim * (attention_dim + 1) // 2
-
         self.tangent_feature_dim = tangent_feature_dim
-        self.requested_learnable_metric_rank = None
-        self.learnable_metric_rank = None
-        self.metric_matrix = None
-        self.metric_low_rank = None
-        if self.metric == MetricType.LearnableMetric:
-            if self.learnable_metric_mode == "full":
-                # Direct, unconstrained dense G in tangent-vector coordinates.
-                # It is symmetrized at use time but receives no factorization.
-                self.metric_matrix = nn.Parameter(torch.eye(tangent_feature_dim))
-            else:
-                requested_rank = (
-                    min(21, tangent_feature_dim)
-                    if learnable_metric_rank is None or int(learnable_metric_rank) <= 0
-                    else int(learnable_metric_rank)
-                )
-                # A shared rank setting is an upper bound because later
-                # Transformer layers may use a smaller SPD/tangent dimension.
-                rank = min(requested_rank, tangent_feature_dim)
-                self.requested_learnable_metric_rank = requested_rank
-                self.learnable_metric_rank = rank
-                self.metric_low_rank = nn.Parameter(
-                    torch.randn(tangent_feature_dim, self.learnable_metric_rank) * 0.02,
-                )
-                nn.init.orthogonal_(self.metric_low_rank)
+        (
+            self.requested_learnable_metric_rank,
+            self.learnable_metric_rank,
+        ) = _effective_metric_rank(
+            self.metric,
+            tangent_feature_dim,
+            learnable_metric_rank,
+        )
+        self.metric_parameters = (
+            AttentionMetricParameters(
+                attention_dim=attention_dim,
+                metric=metric,
+                learnable_metric_mode=self.learnable_metric_mode,
+                learnable_metric_score=self.learnable_metric_score,
+                learnable_metric_rank=learnable_metric_rank,
+            )
+            if own_metric_parameters
+            else None
+        )
 
         self.position_bias = (
             PositionBias(max_position=max_position, max_bias=position_bias_max)
@@ -439,16 +492,40 @@ class SingleHeadAttention(nn.Module):
         vector_scale[row != col] = math.sqrt(2.0)
         self.register_buffer("triu_scale", vector_scale, persistent=False)
 
+    @property
+    def key(self) -> GeooptBiMap:
+        """Q and K intentionally use the exact same Stiefel projection."""
+
+        return self.query
+
+    @property
+    def affine_log_scale_raw(self) -> nn.Parameter | None:
+        if self.metric_parameters is None:
+            return None
+        return self.metric_parameters.affine_log_scale_raw
+
+    @property
+    def metric_matrix(self) -> nn.Parameter | None:
+        if self.metric_parameters is None:
+            return None
+        return self.metric_parameters.metric_matrix
+
+    @property
+    def metric_low_rank(self) -> nn.Parameter | None:
+        if self.metric_parameters is None:
+            return None
+        return self.metric_parameters.metric_low_rank
+
     def forward(
             self,
             x: torch.Tensor,
             return_aux: bool = True,
+            metric_parameters: AttentionMetricParameters | None = None,
     ) -> tuple[Tensor, dict[str, torch.Tensor]]:
 
         aux = {}
         q = self.query(x)
-
-        k = self.key(x)
+        k = q
 
         v = self.value(x)
 
@@ -461,7 +538,11 @@ class SingleHeadAttention(nn.Module):
             aux['P_k'] = k
             aux['P_v'] = v
 
-        score = self.learnableRiemannianScore(log_q, log_k)
+        score = self.learnableRiemannianScore(
+            log_q,
+            log_k,
+            metric_parameters=metric_parameters,
+        )
         if self.position_bias is not None:
             score = score + self.position_bias(score.shape[-1])
         score = self._stabilize_attention_score(score)
@@ -477,7 +558,12 @@ class SingleHeadAttention(nn.Module):
 
         return weighted_log_v, aux
 
-    def learnableRiemannianScore(self, log_q, log_k) -> torch.Tensor:
+    def learnableRiemannianScore(
+            self,
+            log_q,
+            log_k,
+            metric_parameters: AttentionMetricParameters | None = None,
+    ) -> torch.Tensor:
 
         if self.metric == MetricType.LogEuclidean:
             # pairwise qk score
@@ -488,17 +574,43 @@ class SingleHeadAttention(nn.Module):
             # [B, N_q, N_k]
 
         if self.metric == MetricType.LearnableMetric:
+            parameters = self._resolve_metric_parameters(metric_parameters)
             q_vec = self._upper_triangular_vectorize_cached(log_q)
             k_vec = self._upper_triangular_vectorize_cached(log_k)
 
             if self.learnable_metric_mode == "full":
-                score = self._full_metric_score(q_vec, k_vec)
+                score = self._full_metric_score(q_vec, k_vec, parameters)
             else:
-                score = self._low_rank_metric_score(q_vec, k_vec)
+                score = self._low_rank_metric_score(q_vec, k_vec, parameters)
 
             return score
 
         raise NotImplementedError(f"Metric {self.metric.value!r} is not implemented yet.")
+
+    def _resolve_metric_parameters(
+            self,
+            metric_parameters: AttentionMetricParameters | None,
+    ) -> AttentionMetricParameters:
+        parameters = metric_parameters or self.metric_parameters
+        if parameters is None:
+            raise RuntimeError(
+                "Learnable attention metric requires local or layer-shared parameters."
+            )
+        if parameters.metric != self.metric:
+            raise ValueError(
+                "Shared metric type does not match attention metric: "
+                f"{parameters.metric.value!r} != {self.metric.value!r}."
+            )
+        if parameters.attention_dim != self.attention_dim:
+            raise ValueError(
+                "Shared metric dimension does not match attention dimension: "
+                f"{parameters.attention_dim} != {self.attention_dim}."
+            )
+        if parameters.learnable_metric_mode != self.learnable_metric_mode:
+            raise ValueError("Shared metric mode does not match attention metric mode.")
+        if parameters.learnable_metric_score != self.learnable_metric_score:
+            raise ValueError("Shared metric score does not match attention score mode.")
+        return parameters
 
     def _stabilize_attention_score(self, score: torch.Tensor) -> torch.Tensor:
         if not torch.isfinite(score).all():
@@ -562,11 +674,13 @@ class SingleHeadAttention(nn.Module):
             self,
             q_vec: torch.Tensor,
             k_vec: torch.Tensor,
+            metric_parameters: AttentionMetricParameters,
     ) -> torch.Tensor:
-        if self.metric_matrix is None:
+        metric_matrix = metric_parameters.metric_matrix
+        if metric_matrix is None:
             raise RuntimeError("Full metric score requires metric_matrix G.")
 
-        metric_matrix = self._cap_metric_rms(self.metric_matrix)
+        metric_matrix = self._cap_metric_rms(metric_matrix)
         metric = 0.5 * (
             metric_matrix + metric_matrix.transpose(-1, -2)
         )
@@ -586,12 +700,15 @@ class SingleHeadAttention(nn.Module):
             self,
             q_vec: torch.Tensor,
             k_vec: torch.Tensor,
+            metric_parameters: AttentionMetricParameters,
     ) -> torch.Tensor:
-        if self.metric_low_rank is None or self.learnable_metric_rank is None:
+        metric_low_rank = metric_parameters.metric_low_rank
+        metric_rank = metric_parameters.learnable_metric_rank
+        if metric_low_rank is None or metric_rank is None:
             raise RuntimeError("Low-rank metric score requires factor L and rank r.")
 
-        metric_low_rank = self._cap_metric_rms(self.metric_low_rank)
-        scale = math.sqrt(self.learnable_metric_rank)
+        metric_low_rank = self._cap_metric_rms(metric_low_rank)
+        scale = math.sqrt(metric_rank)
         if self.learnable_metric_score == "qgk":
             q_low = torch.einsum("...d,dr->...r", q_vec, metric_low_rank)
             k_low = torch.einsum("...d,dr->...r", k_vec, metric_low_rank)

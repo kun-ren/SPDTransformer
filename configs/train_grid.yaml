@@ -63,18 +63,18 @@ model:
   #head_nums: [1,4] # 4 is better than 1
   head_nums: [4] # 4 is better than 2,6
   attention_dim: ["8"]
-  stage_transition: [True]
+  stage_transition: [false]
   stage_projection_init: ["random"] # "random" is much better than indentity
   add_norm_type: ["sequence_add_norm"]
-  ffn_hidden_spd_dim: [64]
+  ffn_hidden_spd_dim: [null]
   tau: [1.3]
   metric: ["learnable-metric"]
   depth: [1]
   #classifier_type: ["mdm"]
   classifier_type: ["mdm"]
-  pooling: ["weighted"]
-  dropout: [0.4]
-  attention_dropout: [0.0]   #   fix to 0.0 or 0.1
+  pooling: ["mean"]
+  dropout: [0.1, 0.2, 0.3]
+  attention_dropout: [0.1, 0.2]
   #use_position_bias: [true, false] # gated bias starts as an exact no-op
   use_position_bias: [true] # gated bias starts as an exact no-op
   position_bias_axes: ["time"] # gated bias; enable frequency/region only by ablation
