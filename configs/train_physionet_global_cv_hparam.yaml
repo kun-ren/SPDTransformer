@@ -54,8 +54,17 @@ model:
   tau: [1.3]
   metric: ["learnable-metric"]
   depth: [3]
-  classifier_type: ["mdm"]
-  pooling: ["weighted"]
+  classifier_type: ["shape_power"]
+  # Shape tokens use mean pooling; power is encoded by a small temporal CNN.
+  pooling: ["mean"]
+  power_hidden_dim: [16]
+  power_feature_dim: [16]
+  power_kernel_size: [5]
+  power_dropout: [0.2]
+  power_center_log: [true]
+  fusion_classifier: ["cosine"]
+  fusion_dropout: [0.2]
+  cosine_initial_scale: [10.0]
 
   # Hyperparameter search values. Two values create two model candidates.
   dropout: [0.4,0.6]
@@ -106,6 +115,6 @@ training:
   allow_tf32: [false]
 
 output:
-  dir: experiments/results/physionet_global_cv_hparam
+  dir: experiments/results/physionet_global_cv_shape_power
   dataset_cache_dir: experiments/cache/preprocessed_datasets
   save_fold_checkpoints: false

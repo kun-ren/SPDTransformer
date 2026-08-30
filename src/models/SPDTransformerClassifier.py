@@ -5,10 +5,11 @@ from torch import nn
 
 from src.models.SPDMDMClassifier import SPDMDMClassifier
 from src.models.SPDPoolingClassifier import SPDPoolingClassifier
+from src.models.SPDShapePowerClassifier import SPDShapePowerClassifier
 
 
 
-ClassifierType = Literal["pooling", "task", "mdm"]
+ClassifierType = Literal["pooling", "task", "mdm", "shape_power"]
 EncoderType = Literal["spd", "tangent"]
 
 
@@ -26,6 +27,10 @@ class SPDTransformerClassifier(nn.Module):
     classifier_type="mdm":
         pool encoder tokens into one log-domain SPD matrix and classify by
         distance to learnable MDM prototypes.
+
+    classifier_type="shape_power":
+        trace-normalize SPD tokens for the shape encoder, process log band-power
+        with a temporal CNN, and classify the concatenated features.
     """
 
     def __init__(
@@ -65,15 +70,24 @@ class SPDTransformerClassifier(nn.Module):
             tangent_activation: Literal["relu", "gelu"] = "gelu",
             tangent_norm_first: bool = False,
             tangent_use_position_embedding: bool | None = None,
+            power_hidden_dim: int = 16,
+            power_feature_dim: int = 16,
+            power_kernel_size: int = 5,
+            power_dropout: float = 0.2,
+            power_center_log: bool = True,
+            fusion_classifier: Literal["cosine", "linear"] = "cosine",
+            fusion_dropout: float = 0.2,
+            cosine_initial_scale: float = 10.0,
     ):
         super().__init__()
         self.debug_tensor_stats = debug_tensor_stats
         if pooling == "task":
             classifier_type = "task"
             pooling = "mean"
-        if classifier_type not in {"pooling", "task", "mdm"}:
+        if classifier_type not in {"pooling", "task", "mdm", "shape_power"}:
             raise ValueError(
-                "classifier_type must be 'pooling', 'task', or 'mdm', "
+                "classifier_type must be 'pooling', 'task', 'mdm', or "
+                "'shape_power', "
                 f"got {classifier_type!r}."
             )
 
@@ -175,6 +189,42 @@ class SPDTransformerClassifier(nn.Module):
                 layer_norm_affine=layer_norm_affine,
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
+            )
+        elif classifier_type == "shape_power":
+            self.model = SPDShapePowerClassifier(
+                num_heads=num_heads,
+                spd_in_dim=spd_in_dim,
+                attention_dim=attention_dim,
+                num_classes=num_classes,
+                stage_transition=stage_transition,
+                time_sequence_length=time_sequence_length,
+                frequency_sequence_length=frequency_sequence_length,
+                brain_region_sequence_length=brain_region_sequence_length,
+                tau=tau,
+                ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                metric=metric,
+                depth=depth,
+                dropout=dropout,
+                attention_dropout=attention_dropout,
+                debug_attention_dropout=debug_attention_dropout,
+                debug_attention_shape=debug_attention_shape,
+                debug_tensor_stats=debug_tensor_stats,
+                learnable_metric_mode=learnable_metric_mode,
+                learnable_metric_score=learnable_metric_score,
+                learnable_metric_rank=learnable_metric_rank,
+                eps=eps,
+                use_position_bias=use_position_bias,
+                layer_norm_affine=layer_norm_affine,
+                stage_projection_init=stage_projection_init,
+                add_norm_type=add_norm_type,
+                power_hidden_dim=power_hidden_dim,
+                power_feature_dim=power_feature_dim,
+                power_kernel_size=power_kernel_size,
+                power_dropout=power_dropout,
+                power_center_log=power_center_log,
+                fusion_classifier=fusion_classifier,
+                fusion_dropout=fusion_dropout,
+                cosine_initial_scale=cosine_initial_scale,
             )
         else:
             self.model = None

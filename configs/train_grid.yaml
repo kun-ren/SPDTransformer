@@ -70,11 +70,18 @@ model:
   tau: [1.3]
   metric: ["learnable-metric"]
   depth: [1]
-  #classifier_type: ["mdm"]
-  classifier_type: ["mdm"]
-  pooling: ["weighted"]
+  classifier_type: ["shape_power"]
+  pooling: ["mean"]
+  power_hidden_dim: [16]
+  power_feature_dim: [16]
+  power_kernel_size: [5]
+  power_dropout: [0.2]
+  power_center_log: [true]
+  fusion_classifier: ["cosine"]
+  fusion_dropout: [0.2]
+  cosine_initial_scale: [10.0]
   dropout: [0.4]
-  attention_dropout: [0.0]   #   fix to 0.0 or 0.1
+  attention_dropout: [0.0]   # fix to 0.0 or 0.1
   #use_position_bias: [true, false] # gated bias starts as an exact no-op
   use_position_bias: [true] # gated bias starts as an exact no-op
   position_bias_axes: ["time"] # gated bias; enable frequency/region only by ablation
@@ -115,5 +122,5 @@ training:
   allow_tf32: [true]
 
 output:
-  dir: experiments/results/spd_transformer_grid
+  dir: experiments/results/spd_shape_power_grid
   dataset_cache_dir: experiments/cache/preprocessed_datasets

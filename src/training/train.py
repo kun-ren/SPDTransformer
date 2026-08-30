@@ -559,6 +559,17 @@ def build_model(
             default=False,
         ),
         tangent_use_position_embedding=tangent_use_position_embedding,
+        power_hidden_dim=int(model_cfg.get("power_hidden_dim", 16)),
+        power_feature_dim=int(model_cfg.get("power_feature_dim", 16)),
+        power_kernel_size=int(model_cfg.get("power_kernel_size", 5)),
+        power_dropout=float(model_cfg.get("power_dropout", 0.2)),
+        power_center_log=parse_bool(
+            model_cfg.get("power_center_log", True),
+            default=True,
+        ),
+        fusion_classifier=str(model_cfg.get("fusion_classifier", "cosine")),
+        fusion_dropout=float(model_cfg.get("fusion_dropout", 0.2)),
+        cosine_initial_scale=float(model_cfg.get("cosine_initial_scale", 10.0)),
     )
 
 
