@@ -55,11 +55,11 @@ model:
   metric: ["learnable-metric"]
   depth: [1]
   classifier_type: ["mdm"]
-  pooling: ["mean"]
+  pooling: ["weighted"]
 
   # Search regularization on both the FFN and the dominant attention path.
-  dropout: [0.1, 0.2, 0.3]
-  attention_dropout: [0.1, 0.2]
+  dropout: [ 0.2, 0.4]
+  attention_dropout: [0.2, 0.4]
   use_position_bias: [true]
   position_bias_axes: ["time"]
   position_bias_max: [0.5]
@@ -73,7 +73,7 @@ model:
   eps: [1.0e-6]
 
 training:
-  cv_n_splits: [5]
+  cv_n_splits: [2]
   # false gives deterministic, consecutive subject folds after sorting IDs.
   # Set true to use cv_seed for a reproducible shuffled subject assignment.
   cv_shuffle: [false]
@@ -85,14 +85,14 @@ training:
   precision: ["float32"]
 
   # The Cartesian product gives six regularization candidates and 30 fold runs.
-  learning_rate: [0.002,]
-  stiefel_learning_rate: [0.0003]
+  learning_rate: [0.010]
+  stiefel_learning_rate: [0.001]
 
   # Epoch-based cosine decay is independent of fold test metrics, so it does
   # not leak test-subject information into training. Set ["none"] to disable.
-  lr_scheduler: ["cosine"]
-  lr_scheduler_t_max: [100]
-  lr_scheduler_min_lr: [1.0e-5]
+  lr_scheduler: ["multistep"]
+  lr_scheduler_gamma: 0.5
+  lr_scheduler_milestones: [50, 70, 85, 95]
   stiefel_lr_scheduler_min_lr: [1.0e-6]
   weight_decay: [0.01]
   apply_weight_decay_to_special_parameters: [true]
