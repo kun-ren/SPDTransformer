@@ -92,7 +92,7 @@ training:
   # not leak test-subject information into training. Set ["none"] to disable.
   lr_scheduler: ["multistep"]
   lr_scheduler_gamma: 0.5
-  lr_scheduler_milestones: [50, 70, 85, 95]
+  lr_scheduler_milestones: [[50, 70, 85, 95]]
   stiefel_lr_scheduler_min_lr: [1.0e-6]
   weight_decay: [0.01]
   apply_weight_decay_to_special_parameters: [true]
