@@ -175,7 +175,16 @@ def make_optimizers(
     model: nn.Module,
     cfg: dict[str, Any],
 ) -> tuple[torch.optim.Optimizer, torch.optim.Optimizer | None]:
-    stiefel_params, decay_params, no_decay_params = split_params(model)
+    apply_weight_decay_to_special_parameters = parse_bool(
+        cfg.get("apply_weight_decay_to_special_parameters", False),
+        default=False,
+    )
+    stiefel_params, decay_params, no_decay_params = split_params(
+        model,
+        apply_weight_decay_to_special_parameters=(
+            apply_weight_decay_to_special_parameters
+        ),
+    )
     euclidean_groups = []
     if decay_params:
         euclidean_groups.append(

@@ -595,10 +595,54 @@ def condition_regularization(P, eps=1e-5):
     return torch.log(cond).mean()
 
 
-def split_params(model: nn.Module):
+_SPECIAL_PARAMETER_MARKERS = (
+    "metric_low_rank",
+    "metric_matrix",
+    "metric_cholesky",
+    "affine_log_scale_raw",
+)
+
+
+def _normalization_parameter_ids(model: nn.Module) -> set[int]:
+    """Collect direct parameters owned by standard or project normalization."""
+    return {
+        id(parameter)
+        for module in model.modules()
+        if "norm" in type(module).__name__.lower()
+        for parameter in module.parameters(recurse=False)
+        if parameter.requires_grad
+    }
+
+
+def _is_special_parameter(
+        name: str,
+        parameter: nn.Parameter,
+        normalization_parameter_ids: set[int],
+) -> bool:
+    """Return whether an Euclidean parameter normally skips weight decay."""
+    normalized_name = name.lower()
+    leaf_name = normalized_name.rsplit(".", maxsplit=1)[-1]
+    return (
+        leaf_name.endswith("bias")
+        or id(parameter) in normalization_parameter_ids
+        or any(marker in normalized_name for marker in _SPECIAL_PARAMETER_MARKERS)
+    )
+
+
+def split_params(
+        model: nn.Module,
+        apply_weight_decay_to_special_parameters: bool = False,
+):
+    """Split trainable parameters into Stiefel, decay, and no-decay groups.
+
+    Stiefel parameters always use the manifold optimizer without Euclidean
+    weight decay. The configuration flag controls whether special Euclidean
+    parameters (biases, normalization, and SPD metric parameters) are decayed.
+    """
     stiefel_params = []
     decay_params = []
     no_decay_params = []
+    normalization_parameter_ids = _normalization_parameter_ids(model)
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
@@ -609,15 +653,29 @@ def split_params(model: nn.Module):
             stiefel_params.append(param)
             continue
 
-        # Bias and normalization layers: no weight decay
         if (
-                "norm" in name.lower()
-                or "metric_low_rank" in name.lower()
-                or "metric_matrix" in name.lower()
+                not apply_weight_decay_to_special_parameters
+                and _is_special_parameter(
+                    name,
+                    param,
+                    normalization_parameter_ids,
+                )
         ):
             no_decay_params.append(param)
         else:
             decay_params.append(param)
+
+    grouped_params = stiefel_params + decay_params + no_decay_params
+    grouped_ids = [id(param) for param in grouped_params]
+    trainable_ids = {
+        id(param)
+        for param in model.parameters()
+        if param.requires_grad
+    }
+    if len(grouped_ids) != len(set(grouped_ids)):
+        raise RuntimeError("A trainable parameter was assigned to multiple groups.")
+    if set(grouped_ids) != trainable_ids:
+        raise RuntimeError("Optimizer parameter grouping omitted a trainable parameter.")
 
     return stiefel_params, decay_params, no_decay_params
 
@@ -1078,23 +1136,38 @@ def train_fold(
 
     criterion = nn.CrossEntropyLoss()
     weight_decay = float(training_cfg.get("weight_decay", 1e-4))
-    # apply_weight_decay_to_special_parameters = bool(
-    #    training_cfg.get("apply_weight_decay_to_special_parameters", False)
-    # )
+    apply_weight_decay_to_special_parameters = parse_bool(
+        training_cfg.get("apply_weight_decay_to_special_parameters", False),
+        default=False,
+    )
 
-    stiefel_params, decay_params, no_decay_params = split_params(model)
+    stiefel_params, decay_params, no_decay_params = split_params(
+        model,
+        apply_weight_decay_to_special_parameters=(
+            apply_weight_decay_to_special_parameters
+        ),
+    )
 
-    optimizer_euclid = torch.optim.AdamW(
-        [
+    euclidean_groups = []
+    if decay_params:
+        euclidean_groups.append(
             {
                 "params": decay_params,
                 "weight_decay": weight_decay,
-            },
+            }
+        )
+    if no_decay_params:
+        euclidean_groups.append(
             {
                 "params": no_decay_params,
                 "weight_decay": 0.0,
-            },
-        ],
+            }
+        )
+    if not euclidean_groups:
+        raise RuntimeError("Model has no Euclidean trainable parameters.")
+
+    optimizer_euclid = torch.optim.AdamW(
+        euclidean_groups,
         lr=float(training_cfg.get("learning_rate", 1e-3)),
     )
 
