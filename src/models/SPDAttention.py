@@ -466,9 +466,6 @@ class SingleHeadAttention(nn.Module):
             score = score + self.position_bias(score.shape[-1])
         score = self._stabilize_attention_score(score)
 
-        # Metric factors are RMS-capped before score construction and the
-        # score is normalized with an overflow-safe RMS below. Keep the cast
-        # explicit in case a caller supplies a higher-precision score tensor.
         attention = torch.softmax(score, dim=-1).to(dtype=log_v.dtype)
 
         attention = self.attention_dropout(attention)
@@ -519,25 +516,7 @@ class SingleHeadAttention(nn.Module):
                 f"finite_range={finite_range}. Check SPD eigenvalue range, "
                 "eps, and attention learning rate."
             )
-        score = score - score.mean(dim=-1, keepdim=True)
-        # Compute RMS after scaling by the row maximum. This is equivalent to
-        # sqrt(mean(score**2)) but cannot overflow on finite float32 scores.
-        row_scale = score.abs().amax(dim=-1, keepdim=True)
-        safe_row_scale = row_scale.clamp_min(torch.finfo(score.dtype).tiny)
-        scaled_score = score / safe_row_scale
-        row_rms = (
-            safe_row_scale
-            * scaled_score.square().mean(dim=-1, keepdim=True).sqrt()
-        )
-        compression = (
-            row_rms / self.attention_score_target_rms
-        ).clamp_min(1.0)
-        score = score / compression
-        score = score.clamp(
-            min=-self.attention_score_clip,
-            max=self.attention_score_clip,
-        )
-        return score - score.amax(dim=-1, keepdim=True)
+        return score
 
     @staticmethod
     def _upper_triangular_vectorize(x: torch.Tensor) -> torch.Tensor:
