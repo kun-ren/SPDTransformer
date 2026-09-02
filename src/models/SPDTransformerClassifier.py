@@ -65,6 +65,15 @@ class SPDTransformerClassifier(nn.Module):
             tangent_activation: Literal["relu", "gelu"] = "gelu",
             tangent_norm_first: bool = False,
             tangent_use_position_embedding: bool | None = None,
+            position_bias_axes: str | tuple[str, ...] | list[str] | None = None,
+            position_bias_max: float = 0.5,
+            attention_score_target_rms: float = 1.0,
+            attention_score_clip: float = 5.0,
+            share_metric_across_layers: bool | str | list[bool] = False,
+            head_dropout: float = 0.0,
+            pooling_weight_mode: Literal["full", "factorized"] = "full",
+            pooling_dropout: float = 0.0,
+            pooling_uniform_mix: float = 0.0,
     ):
         super().__init__()
         self.debug_tensor_stats = debug_tensor_stats
@@ -143,9 +152,18 @@ class SPDTransformerClassifier(nn.Module):
                 learnable_metric_rank=learnable_metric_rank,
                 eps=eps,
                 use_position_bias=use_position_bias,
+                position_bias_axes=position_bias_axes,
+                position_bias_max=position_bias_max,
+                attention_score_target_rms=attention_score_target_rms,
+                attention_score_clip=attention_score_clip,
                 layer_norm_affine=layer_norm_affine,
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
+                share_metric_across_layers=share_metric_across_layers,
+                head_dropout=head_dropout,
+                pooling_weight_mode=pooling_weight_mode,
+                pooling_dropout=pooling_dropout,
+                pooling_uniform_mix=pooling_uniform_mix,
             )
         elif classifier_type == "mdm":
             self.model = SPDMDMClassifier(
@@ -172,9 +190,18 @@ class SPDTransformerClassifier(nn.Module):
                 learnable_metric_rank=learnable_metric_rank,
                 eps=eps,
                 use_position_bias=use_position_bias,
+                position_bias_axes=position_bias_axes,
+                position_bias_max=position_bias_max,
+                attention_score_target_rms=attention_score_target_rms,
+                attention_score_clip=attention_score_clip,
                 layer_norm_affine=layer_norm_affine,
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
+                share_metric_across_layers=share_metric_across_layers,
+                head_dropout=head_dropout,
+                pooling_weight_mode=pooling_weight_mode,
+                pooling_dropout=pooling_dropout,
+                pooling_uniform_mix=pooling_uniform_mix,
             )
         else:
             self.model = None

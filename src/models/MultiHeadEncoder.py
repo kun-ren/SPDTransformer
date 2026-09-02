@@ -15,6 +15,10 @@ from src.models.LogResidualAdd import LogResidualAdd
 from src.models.ScaleShapeSequenceAddNorm import ScaleShapeSequenceAddNorm
 from src.models.SequenceAddNorm import SequenceAddNorm
 from src.models.SharedTraceAddNorm import SharedTraceAddNorm
+from src.models.SimplexWeightRegularization import (
+    regularize_simplex_weights,
+    validate_probability,
+)
 from src.models.TraceAddNorm import TraceAddNorm
 
 
@@ -131,6 +135,7 @@ class SPDMultiHeadEncoder(nn.Module):
             dropout: float = 0.0,
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: AddNormType = "trace",
+            head_dropout: float = 0.0,
     ):
         super().__init__()
         if num_heads < 1:
@@ -146,6 +151,7 @@ class SPDMultiHeadEncoder(nn.Module):
         self.debug_tensor_stats = debug_tensor_stats
         self.stage_transition = stage_transition
         self.eps = eps
+        self.head_dropout = validate_probability(head_dropout, "head_dropout")
         enabled_position_bias_axes = normalize_position_bias_axes(
             use_position_bias,
             position_bias_axes,
@@ -186,7 +192,11 @@ class SPDMultiHeadEncoder(nn.Module):
             )
             for _ in range(num_heads)
         ])
-        self.time_head_logits = nn.Parameter(torch.zeros(num_heads))
+        self._share_axis_metric(self.time_attention)
+        if num_heads > 1:
+            self.time_head_logits = nn.Parameter(torch.zeros(num_heads))
+        else:
+            self.register_parameter("time_head_logits", None)
 
         self.time_add_norm1 = _make_add_norm(
             add_norm_type,
@@ -234,7 +244,11 @@ class SPDMultiHeadEncoder(nn.Module):
             )
             for _ in range(num_heads)
         ])
-        self.frequency_head_logits = nn.Parameter(torch.zeros(num_heads))
+        self._share_axis_metric(self.frequency_attention)
+        if num_heads > 1:
+            self.frequency_head_logits = nn.Parameter(torch.zeros(num_heads))
+        else:
+            self.register_parameter("frequency_head_logits", None)
 
         self.frequency_add_norm1 = _make_add_norm(
             add_norm_type,
@@ -282,7 +296,11 @@ class SPDMultiHeadEncoder(nn.Module):
             )
             for _ in range(num_heads)
         ])
-        self.region_head_logits = nn.Parameter(torch.zeros(num_heads))
+        self._share_axis_metric(self.region_attention)
+        if num_heads > 1:
+            self.region_head_logits = nn.Parameter(torch.zeros(num_heads))
+        else:
+            self.register_parameter("region_head_logits", None)
 
         self.region_add_norm1 = _make_add_norm(
             add_norm_type,
@@ -312,29 +330,53 @@ class SPDMultiHeadEncoder(nn.Module):
         self.attention = self.time_attention
 
     @staticmethod
+    def _share_axis_metric(
+            attention_heads: nn.ModuleList,
+    ) -> None:
+        if len(attention_heads) < 2:
+            return
+        source = attention_heads[0]
+        for attention_head in attention_heads[1:]:
+            attention_head.share_metric_parameters_from(source)
+
     def _combine_head_logs(
+            self,
             head_logs: list[torch.Tensor],
-            head_logits: torch.Tensor,
+            head_logits: torch.Tensor | None,
     ) -> torch.Tensor:
-        if len(head_logs) != head_logits.numel():
+        if len(head_logs) == 1:
+            if head_logits is not None:
+                raise ValueError("Single-head attention must not use fusion logits.")
+            return head_logs[0]
+        if head_logits is None or len(head_logs) != head_logits.numel():
+            logit_count = 0 if head_logits is None else head_logits.numel()
             raise ValueError(
-                f"Expected {head_logits.numel()} head outputs, got {len(head_logs)}."
+                f"Expected {logit_count} head outputs, got {len(head_logs)}."
             )
 
         stacked = torch.stack(head_logs, dim=0)
-        weights = torch.softmax(
+        base_weights = torch.softmax(
             head_logits.to(device=stacked.device, dtype=stacked.dtype),
             dim=0,
         )
-        view_shape = [weights.shape[0], *([1] * (stacked.ndim - 1))]
-        weighted_log = (stacked * weights.view(view_shape)).sum(dim=0)
+        sample_weights = regularize_simplex_weights(
+            base_weights,
+            sample_count=stacked.shape[1],
+            dropout=self.head_dropout,
+            training=self.training,
+        ).transpose(0, 1)
+        view_shape = [
+            sample_weights.shape[0],
+            sample_weights.shape[1],
+            *([1] * (stacked.ndim - 2)),
+        ]
+        weighted_log = (stacked * sample_weights.reshape(view_shape)).sum(dim=0)
         return weighted_log
 
-    @classmethod
     def _apply_attention_along_axis(
-            cls,
+            self,
             attention_heads: nn.ModuleList,
-            head_logits: torch.Tensor,
+            head_logits: torch.Tensor | None,
             x: torch.Tensor | list[torch.Tensor],
             axis: int,
             return_aux: bool = True,
@@ -384,7 +426,7 @@ class SPDMultiHeadEncoder(nn.Module):
                 for key, value in aux.items():
                     all_aux[f"axis_{axis}_head_{head_index}_{key}"] = value
 
-        y_log = cls._combine_head_logs(head_logs, head_logits)
+        y_log = self._combine_head_logs(head_logs, head_logits)
 
         if axis != seq_pos:
             inverse_perm = [0] * len(perm)

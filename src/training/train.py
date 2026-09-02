@@ -501,6 +501,14 @@ def build_model(
         frequency_sequence_length,
         brain_region_sequence_length=1,
 ) -> SPDTransformerClassifier:
+    if "share_metric_across_heads" in model_cfg:
+        raise ValueError(
+            "model.share_metric_across_heads has been removed because heads "
+            "within one axis always share their metric. Use "
+            "model.share_metric_across_layers to control sharing between "
+            "encoder layers."
+        )
+
     depth = int(model_cfg.get("depth", 1))
     attention_dim = parse_attention_dims(
         model_cfg.get("attention_dim", spd_in_dim),
@@ -559,6 +567,20 @@ def build_model(
             default=False,
         ),
         tangent_use_position_embedding=tangent_use_position_embedding,
+        position_bias_axes=model_cfg.get("position_bias_axes"),
+        position_bias_max=float(model_cfg.get("position_bias_max", 0.5)),
+        attention_score_target_rms=float(
+            model_cfg.get("attention_score_target_rms", 1.0)
+        ),
+        attention_score_clip=float(model_cfg.get("attention_score_clip", 5.0)),
+        share_metric_across_layers=model_cfg.get(
+            "share_metric_across_layers",
+            False,
+        ),
+        head_dropout=float(model_cfg.get("head_dropout", 0.0)),
+        pooling_weight_mode=str(model_cfg.get("pooling_weight_mode", "full")),
+        pooling_dropout=float(model_cfg.get("pooling_dropout", 0.0)),
+        pooling_uniform_mix=float(model_cfg.get("pooling_uniform_mix", 0.0)),
     )
 
 

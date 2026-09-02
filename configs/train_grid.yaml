@@ -69,12 +69,23 @@ model:
   ffn_hidden_spd_dim: [64]
   tau: [1.3]
   metric: ["learnable-metric"]
+  # Heads within one axis always share a metric, while time/frequency/region
+  # remain distinct. This switch controls same-axis sharing between layers.
+  # A scalar true shares every layer after the first with its previous layer.
+  # Per-layer example: "false,true,false" shares layer 1 with layer 0 only.
+  share_metric_across_layers: [false]
   depth: [1]
   #classifier_type: ["mdm"]
   classifier_type: ["mdm"]
   pooling: ["weighted"]
+  # Factorized weights use T+F+R parameters instead of T*F*R. During training,
+  # pooling dropout drops tokens per sample and renormalizes the survivors.
+  pooling_weight_mode: ["factorized"]
+  pooling_dropout: [0.1]
+  pooling_uniform_mix: [0.1]
   dropout: [0.4]
-  attention_dropout: [0.0]   #   fix to 0.0 or 0.1
+  attention_dropout: [0.1]
+  head_dropout: [0.1]  # ignored for head_nums=1
   #use_position_bias: [true, false] # gated bias starts as an exact no-op
   use_position_bias: [true] # gated bias starts as an exact no-op
   position_bias_axes: ["time"] # gated bias; enable frequency/region only by ablation

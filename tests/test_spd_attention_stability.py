@@ -98,3 +98,24 @@ def test_non_finite_attention_input_is_not_silently_repaired():
         assert "finite=1/2" in str(error)
     else:
         raise AssertionError("A genuinely non-finite score must still fail.")
+
+
+def test_attention_dropout_renormalizes_each_query_row():
+    attention_layer = SingleHeadAttention(
+        spd_in_dim=3,
+        attention_dim=3,
+        metric="log-euclidean",
+        stage_transition=False,
+        attention_dropout=0.5,
+    )
+    attention_layer.train()
+    attention = torch.softmax(torch.randn(4, 5, 6), dim=-1)
+
+    torch.manual_seed(11)
+    regularized = attention_layer._dropout_and_renormalize_attention(attention)
+
+    assert torch.isfinite(regularized).all()
+    assert torch.allclose(
+        regularized.sum(dim=-1),
+        torch.ones_like(regularized[..., 0]),
+    )

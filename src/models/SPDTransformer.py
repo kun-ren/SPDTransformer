@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Literal
 
 import torch
@@ -12,10 +13,64 @@ from src.models.MultiHeadEncoder import (
 
 from src.models.SPDAttention import (
     SingleHeadAttention,
+    normalize_position_bias_axes,
     spd_exp,
     spd_log,
 )
 from src.models.SPDFeedForward import SPDFeedForward
+
+
+def _parse_bool_flag(value: object, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Cannot parse {name} boolean value {value!r}.")
+
+
+def normalize_layer_metric_sharing(
+        value: bool | str | Sequence[bool],
+        *,
+        depth: int,
+) -> list[bool]:
+    """Return whether each layer shares its metric with the previous layer."""
+    if isinstance(value, str):
+        values: list[object] = [
+            part.strip()
+            for part in value.replace(";", ",").split(",")
+            if part.strip()
+        ]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        values = list(value)
+    else:
+        values = [value]
+
+    if len(values) == 1:
+        enabled = _parse_bool_flag(values[0], "share_metric_across_layers")
+        return [False, *([enabled] * (depth - 1))]
+    if len(values) == depth - 1:
+        values = [False, *values]
+    if len(values) != depth:
+        raise ValueError(
+            "share_metric_across_layers must contain one value, one value for "
+            "each layer after the first, or one value per layer: "
+            f"depth={depth}, got {values}."
+        )
+    flags = [
+        _parse_bool_flag(item, "share_metric_across_layers")
+        for item in values
+    ]
+    if flags[0]:
+        raise ValueError(
+            "The first encoder layer cannot share a metric with a previous "
+            "layer; its share_metric_across_layers flag must be false."
+        )
+    return flags
 
 
 class SPDEncoder(nn.Module):
@@ -43,6 +98,10 @@ class SPDEncoder(nn.Module):
             dropout: float = 0.0,
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: AddNormType = "trace",
+            position_bias_axes: str | tuple[str, ...] | list[str] | None = None,
+            position_bias_max: float = 0.5,
+            attention_score_target_rms: float = 1.0,
+            attention_score_clip: float = 5.0,
     ):
         super().__init__()
         print("init single head encoder")
@@ -54,6 +113,10 @@ class SPDEncoder(nn.Module):
         self.debug_tensor_stats = debug_tensor_stats
         self.stage_transition = stage_transition
         self.eps = eps
+        enabled_position_bias_axes = normalize_position_bias_axes(
+            use_position_bias,
+            position_bias_axes,
+        )
 
         self.stage_projection = None
         if self.stage_transition and attention_dim != spd_in_dim:
@@ -80,8 +143,11 @@ class SPDEncoder(nn.Module):
             learnable_metric_score=learnable_metric_score,
             learnable_metric_rank=learnable_metric_rank,
             eps=eps,
-            use_position=use_position_bias,
+            use_position="time" in enabled_position_bias_axes,
             max_position=time_sequence_length,
+            position_bias_max=position_bias_max,
+            attention_score_target_rms=attention_score_target_rms,
+            attention_score_clip=attention_score_clip,
             debug_tensor_stats=debug_tensor_stats,
         )
 
@@ -121,8 +187,11 @@ class SPDEncoder(nn.Module):
             learnable_metric_score=learnable_metric_score,
             learnable_metric_rank=learnable_metric_rank,
             eps=eps,
-            use_position=use_position_bias,
+            use_position="frequency" in enabled_position_bias_axes,
             max_position=frequency_sequence_length,
+            position_bias_max=position_bias_max,
+            attention_score_target_rms=attention_score_target_rms,
+            attention_score_clip=attention_score_clip,
             debug_tensor_stats=debug_tensor_stats,
         )
         self.frequency_add_norm1 = _make_add_norm(
@@ -162,8 +231,11 @@ class SPDEncoder(nn.Module):
             learnable_metric_score=learnable_metric_score,
             learnable_metric_rank=learnable_metric_rank,
             eps=eps,
-            use_position=use_position_bias,
+            use_position="region" in enabled_position_bias_axes,
             max_position=brain_region_sequence_length,
+            position_bias_max=position_bias_max,
+            attention_score_target_rms=attention_score_target_rms,
+            attention_score_clip=attention_score_clip,
             debug_tensor_stats=debug_tensor_stats,
         )
         self.region_add_norm1 = _make_add_norm(
@@ -338,6 +410,12 @@ class SPDTransformer(nn.Module):
             dropout: float = 0.0,
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: AddNormType = "trace",
+            position_bias_axes: str | tuple[str, ...] | list[str] | None = None,
+            position_bias_max: float = 0.5,
+            attention_score_target_rms: float = 1.0,
+            attention_score_clip: float = 5.0,
+            share_metric_across_layers: bool | str | Sequence[bool] = False,
+            head_dropout: float = 0.0,
     ):
         super().__init__()
         if depth < 1:
@@ -348,6 +426,10 @@ class SPDTransformer(nn.Module):
         self.depth = depth
         self.debug_tensor_stats = debug_tensor_stats
         self.stage_transition = stage_transition
+        self.share_metric_across_layers_by_layer = normalize_layer_metric_sharing(
+            share_metric_across_layers,
+            depth=depth,
+        )
 
         if len(self.attention_dim) != depth:
             raise ValueError(
@@ -408,12 +490,16 @@ class SPDTransformer(nn.Module):
                 learnable_metric_rank=learnable_metric_rank,
                 eps=eps,
                 use_position_bias=use_position_bias,
+                position_bias_axes=position_bias_axes,
+                position_bias_max=position_bias_max,
+                attention_score_target_rms=attention_score_target_rms,
+                attention_score_clip=attention_score_clip,
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
             ) for index in range(self.depth)])
-        elif num_heads > 1:
+        else:
             self.layers = nn.ModuleList([SPDMultiHeadEncoder(
                 num_heads=num_heads,
                 spd_in_dim=self.layer_input_dims[index],
@@ -434,11 +520,54 @@ class SPDTransformer(nn.Module):
                 learnable_metric_rank=learnable_metric_rank,
                 eps=eps,
                 use_position_bias=use_position_bias,
+                position_bias_axes=position_bias_axes,
+                position_bias_max=position_bias_max,
+                attention_score_target_rms=attention_score_target_rms,
+                attention_score_clip=attention_score_clip,
                 layer_norm_affine=layer_norm_affine,
                 dropout=dropout,
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
+                head_dropout=head_dropout,
             ) for index in range(self.depth)])
+
+        self._share_metrics_between_encoder_layers()
+
+    @staticmethod
+    def _axis_attentions(
+            layer: SPDEncoder | SPDMultiHeadEncoder,
+            axis_name: str,
+    ) -> list[SingleHeadAttention]:
+        attention = getattr(layer, f"{axis_name}_attention")
+        if isinstance(attention, nn.ModuleList):
+            return list(attention)
+        return [attention]
+
+    def _share_metrics_between_encoder_layers(self) -> None:
+        for layer_index in range(1, self.depth):
+            if not self.share_metric_across_layers_by_layer[layer_index]:
+                continue
+
+            source_layer = self.layers[layer_index - 1]
+            target_layer = self.layers[layer_index]
+            for axis_name in ("time", "frequency", "region"):
+                source_attention = self._axis_attentions(
+                    source_layer,
+                    axis_name,
+                )[0]
+                try:
+                    for target_attention in self._axis_attentions(
+                            target_layer,
+                            axis_name,
+                    ):
+                        target_attention.share_metric_parameters_from(
+                            source_attention
+                        )
+                except ValueError as error:
+                    raise ValueError(
+                        f"Cannot share the {axis_name} metric from encoder layer "
+                        f"{layer_index - 1} with layer {layer_index}: {error}"
+                    ) from error
 
     def forward(
             self,

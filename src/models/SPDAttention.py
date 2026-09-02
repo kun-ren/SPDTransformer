@@ -439,6 +439,37 @@ class SingleHeadAttention(nn.Module):
         vector_scale[row != col] = math.sqrt(2.0)
         self.register_buffer("triu_scale", vector_scale, persistent=False)
 
+    def share_metric_parameters_from(
+            self,
+            source: "SingleHeadAttention",
+    ) -> None:
+        """Share only metric parameters; Q, K, V and position bias stay private."""
+        if self.metric != source.metric:
+            raise ValueError(
+                "Cannot share parameters between different attention metrics: "
+                f"{self.metric.value!r} and {source.metric.value!r}."
+            )
+        if self.tangent_feature_dim != source.tangent_feature_dim:
+            raise ValueError(
+                "Shared metrics require matching tangent dimensions, got "
+                f"{self.tangent_feature_dim} and {source.tangent_feature_dim}."
+            )
+        if (
+            self.learnable_metric_mode != source.learnable_metric_mode
+            or self.learnable_metric_score != source.learnable_metric_score
+        ):
+            raise ValueError("Shared metrics require identical metric configuration.")
+
+        if self.metric == MetricType.LearnableMetric:
+            self.metric_matrix = source.metric_matrix
+            self.metric_low_rank = source.metric_low_rank
+            self.requested_learnable_metric_rank = (
+                source.requested_learnable_metric_rank
+            )
+            self.learnable_metric_rank = source.learnable_metric_rank
+        elif self.metric == MetricType.LearnableAffineLogFunction:
+            self.affine_log_scale_raw = source.affine_log_scale_raw
+
     def forward(
             self,
             x: torch.Tensor,
@@ -471,11 +502,25 @@ class SingleHeadAttention(nn.Module):
         # explicit in case a caller supplies a higher-precision score tensor.
         attention = torch.softmax(score, dim=-1).to(dtype=log_v.dtype)
 
-        attention = self.attention_dropout(attention)
+        attention = self._dropout_and_renormalize_attention(attention)
 
         weighted_log_v = torch.einsum('...ij,...jmn->...imn', attention, log_v)
 
         return weighted_log_v, aux
+
+    def _dropout_and_renormalize_attention(
+            self,
+            attention: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.training or self.attention_dropout.p == 0.0:
+            return attention
+
+        dropped = self.attention_dropout(attention)
+        row_sums = dropped.sum(dim=-1, keepdim=True)
+        renormalized = dropped / row_sums.clamp_min(
+            torch.finfo(attention.dtype).tiny
+        )
+        return torch.where(row_sums > 0, renormalized, attention)
 
     def learnableRiemannianScore(self, log_q, log_k) -> torch.Tensor:
 
