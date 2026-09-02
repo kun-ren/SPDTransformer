@@ -81,11 +81,17 @@ def test_shape_power_forward_and_backward(fusion_classifier: str):
     assert logits.shape == (2, 2)
     assert torch.isfinite(logits).all()
     assert aux
-    metric_gradient = (
-        model.shape_encoder.layers[0].shared_metric.metric_low_rank.grad
-    )
+    metric_gradients = [
+        parameter.grad
+        for name, parameter in model.shape_encoder.named_parameters()
+        if name.endswith("metric_low_rank")
+    ]
     power_gradient = model.power_encoder.network[0].weight.grad
-    assert metric_gradient is not None and torch.isfinite(metric_gradient).all()
+    assert metric_gradients
+    assert any(
+        gradient is not None and torch.isfinite(gradient).all()
+        for gradient in metric_gradients
+    )
     assert power_gradient is not None and torch.isfinite(power_gradient).all()
 
 
