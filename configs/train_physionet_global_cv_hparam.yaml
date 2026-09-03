@@ -44,7 +44,7 @@ data:
 
 model:
   head_nums: [1]
-  attention_dim: ["8"]
+  attention_dim: ["8, 8"]
   # Required for the per-layer 8 -> 6 -> 4 -> 2 SPD reductions.
   stage_transition: [false]
   stage_projection_init: ["random"]
@@ -57,7 +57,7 @@ model:
   # because layers with attention dimensions 6, 4, and 2 have incompatible
   # tangent-space metric shapes.
   share_metric_across_layers: [True]
-  depth: [1]
+  depth: [2]
   classifier_type: ["mdm"]
   pooling: ["weighted"]
   pooling_weight_mode: ["factorized", "full"]
@@ -78,7 +78,7 @@ model:
   learnable_metric_mode: ["low-rank"]
   learnable_metric_score: ["distance"]
   # Per-layer upper bound: effective ranks are 4, 4, and 3 respectively.
-  learnable_metric_rank: [4]
+  learnable_metric_rank: [6]
   eps: [1.0e-6]
 
 training:
