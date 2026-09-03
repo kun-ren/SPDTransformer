@@ -43,8 +43,8 @@ data:
   baseline_window: [null]
 
 model:
-  head_nums: [1, 3]
-  attention_dim: ["8, 8"]
+  head_nums: [1]
+  attention_dim: ["8"]
   # Required for the per-layer 8 -> 6 -> 4 -> 2 SPD reductions.
   stage_transition: [false]
   stage_projection_init: ["random"]
@@ -57,7 +57,7 @@ model:
   # because layers with attention dimensions 6, 4, and 2 have incompatible
   # tangent-space metric shapes.
   share_metric_across_layers: [True]
-  depth: [2]
+  depth: [1]
   classifier_type: ["mdm"]
   pooling: ["weighted"]
   pooling_weight_mode: ["factorized", "full"]
