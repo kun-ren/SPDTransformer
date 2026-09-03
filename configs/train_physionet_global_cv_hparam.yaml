@@ -65,9 +65,9 @@ model:
   pooling_uniform_mix: [0.1, 0.4]
 
   # Hyperparameter search values. Two values create two model candidates.
-  dropout: [0.2, 0.4]
+  dropout: [0.2]
 
-  attention_dropout: [0.0,0.2]
+  attention_dropout: [0.2]
   head_dropout: [0.0]
   use_position_bias: [true]
   position_bias_axes: ["time"]
@@ -78,7 +78,7 @@ model:
   learnable_metric_mode: ["low-rank"]
   learnable_metric_score: ["distance"]
   # Per-layer upper bound: effective ranks are 4, 4, and 3 respectively.
-  learnable_metric_rank: [4, 8]
+  learnable_metric_rank: [4]
   eps: [1.0e-6]
 
 training:
