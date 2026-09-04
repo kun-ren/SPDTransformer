@@ -54,6 +54,8 @@ model:
   add_norm_type: ["sequence_add_norm"]
   # SPDFeedForward applies activation directly without hidden expansion.
   ffn_hidden_spd_dim: [null]
+  # Low-rank feature mixing in the same tangent dimension; 0 disables it.
+  ffn_tangent_mixer_rank: [4]
   tau: [1.3]
   metric: ["learnable-metric"]
   # Heads within one axis always share a metric; axes and Q/K/V stay distinct.
@@ -65,6 +67,8 @@ model:
   pooling_weight_mode: ["factorized"]
   pooling_dropout: [0.1]
   pooling_uniform_mix: [0.1]
+  # The same gate is trained globally and retained during subject fine-tuning.
+  pooling_mean_anchor: [true]
   dropout: [0.4]
   attention_dropout: [0.1]
   head_dropout: [0.1]
@@ -113,6 +117,9 @@ pretrain:
   early_stopping_patience: [9]
   early_stopping_min_delta: [0.0008]
   condition_regularization_weight: [0.0]
+  prototype_intra_weight: [0.001]
+  prototype_inter_weight: [0.01]
+  prototype_margin: [1.0]
   seed: [42]
   num_workers: [0]
   pin_memory: [true]
@@ -135,6 +142,9 @@ fine_tune:
   apply_weight_decay_to_special_parameters: [true]
   gradient_clip_norm: [0.8]
   condition_regularization_weight: [0.0]
+  prototype_intra_weight: [0.001]
+  prototype_inter_weight: [0.01]
+  prototype_margin: [1.0]
   num_workers: [0]
   pin_memory: [true]
   allow_tf32: [false]

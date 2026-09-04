@@ -42,6 +42,8 @@ model:
   stage_projection_init: ["random"]
   add_norm_type: ["sequence_add_norm"]
   ffn_hidden_spd_dim: [32]
+  # Low-rank feature mixing in the same tangent dimension; 0 disables it.
+  ffn_tangent_mixer_rank: [4]
   tau: [1.3]
   metric: ["learnable-metric"]
   # Heads within one axis share a metric; axes remain distinct. Cross-layer
@@ -53,6 +55,7 @@ model:
   pooling_weight_mode: ["factorized"]
   pooling_dropout: [0.1]
   pooling_uniform_mix: [0.1]
+  pooling_mean_anchor: [true]
   dropout: [0.4]
   attention_dropout: [0.1]
   head_dropout: [0.1]
@@ -88,6 +91,9 @@ training:
   early_stopping_patience: [11]
   early_stopping_min_delta: [0.0008]
   condition_regularization_weight: [0.0]
+  prototype_intra_weight: [0.001]
+  prototype_inter_weight: [0.01]
+  prototype_margin: [1.0]
   num_workers: [0]
   pin_memory: [true]
   allow_tf32: [true]

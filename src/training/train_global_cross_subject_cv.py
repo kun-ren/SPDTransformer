@@ -34,6 +34,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.models.MotorImageryDataset import MotorImageryDataset  # noqa: E402
 from src.training.config_grid import expand_data_grid, expand_grid  # noqa: E402
+from src.training.losses import (  # noqa: E402
+    compute_training_objective,
+    prototype_loss_settings,
+)
 
 
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_physionet_global_cv_hparam.yaml"
@@ -145,6 +149,7 @@ def split_params(model: nn.Module):
             "norm" in name.lower()
             or "metric_low_rank" in name.lower()
             or "metric_matrix" in name.lower()
+            or "pooling_gate_logit" in name.lower()
         ):
             no_decay_params.append(parameter)
         else:
@@ -270,9 +275,18 @@ def train_one_epoch(
     *,
     gradient_clip_norm: float | None,
     condition_regularization_weight: float,
+    prototype_intra_weight: float = 0.0,
+    prototype_inter_weight: float = 0.0,
+    prototype_margin: float = 1.0,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
+    component_totals = {
+        "cross_entropy": 0.0,
+        "condition_loss": 0.0,
+        "prototype_intra_loss": 0.0,
+        "prototype_inter_loss": 0.0,
+    }
     y_true = []
     y_pred = []
     optimizers = [optimizer_euclid]
@@ -281,19 +295,18 @@ def train_one_epoch(
     for x_batch, y_batch in loader:
         x_batch = x_batch.to(device, non_blocking=device.type == "cuda")
         y_batch = y_batch.to(device, non_blocking=device.type == "cuda")
-        use_condition_regularization = condition_regularization_weight > 0
-        logits, aux = model(
+        logits, _aux, losses = compute_training_objective(
+            model,
             x_batch,
-            return_aux=use_condition_regularization,
+            y_batch,
+            criterion,
+            condition_regularization_weight=condition_regularization_weight,
+            condition_regularization_fn=condition_regularization,
+            prototype_intra_weight=prototype_intra_weight,
+            prototype_inter_weight=prototype_inter_weight,
+            prototype_margin=prototype_margin,
         )
-        condition_loss = logits.new_tensor(0.0)
-        if use_condition_regularization and aux:
-            condition_loss = torch.stack(
-                [condition_regularization(matrix) for matrix in aux.values()]
-            ).mean()
-        loss = criterion(logits, y_batch) + (
-            condition_regularization_weight * condition_loss
-        )
+        loss = losses["loss"]
         if not torch.isfinite(loss):
             raise RuntimeError(f"Non-finite training loss: {loss.item():.6e}")
         for optimizer in optimizers:
@@ -313,10 +326,16 @@ def train_one_epoch(
             optimizer.step()
         assert_model_finite(model, "optimizer step")
         total_loss += loss.item() * y_batch.size(0)
+        for name in component_totals:
+            component_totals[name] += losses[name].item() * y_batch.size(0)
         y_true.extend(y_batch.detach().cpu().numpy().tolist())
         y_pred.extend(logits.argmax(dim=1).detach().cpu().numpy().tolist())
     return {
         "loss": total_loss / len(y_true),
+        **{
+            name: value / len(y_true)
+            for name, value in component_totals.items()
+        },
         "accuracy": float(np.mean(np.asarray(y_true) == np.asarray(y_pred))),
         "macro_f1": classification_metrics(
             np.asarray(y_true),
@@ -346,6 +365,9 @@ def train_fixed_epochs(
     if gradient_clip_norm is not None:
         gradient_clip_norm = float(gradient_clip_norm)
     condition_weight = float(cfg.get("condition_regularization_weight", 0.0))
+    prototype_intra_weight, prototype_inter_weight, prototype_margin = (
+        prototype_loss_settings(cfg)
+    )
     history = []
     scheduler_name = str(cfg.get("lr_scheduler", "none")).strip().lower()
     print(
@@ -353,6 +375,12 @@ def train_fixed_epochs(
         f"euclid_lr={optimizer_lr_values(optimizer)[0]:.6g}, "
         f"stiefel_lr="
         f"{optimizer_lr_values(optimizer_stiefel)[0] if optimizer_stiefel is not None else None}."
+    )
+    print(
+        f"    {stage_name} objective=cross_entropy "
+        f"+ {prototype_intra_weight:g}*prototype_intra "
+        f"+ {prototype_inter_weight:g}*prototype_inter_margin "
+        f"(margin={prototype_margin:g})."
     )
     for epoch in range(1, int(cfg["epochs"]) + 1):
         metrics = train_one_epoch(
@@ -364,10 +392,20 @@ def train_fixed_epochs(
             device,
             gradient_clip_norm=gradient_clip_norm,
             condition_regularization_weight=condition_weight,
+            prototype_intra_weight=prototype_intra_weight,
+            prototype_inter_weight=prototype_inter_weight,
+            prototype_margin=prototype_margin,
         )
         row = {
             "epoch": epoch,
             "train_loss": float(metrics["loss"]),
+            "train_cross_entropy": float(metrics["cross_entropy"]),
+            "train_prototype_intra_loss": float(
+                metrics["prototype_intra_loss"]
+            ),
+            "train_prototype_inter_loss": float(
+                metrics["prototype_inter_loss"]
+            ),
             "train_accuracy": float(metrics["accuracy"]),
             "train_macro_f1": float(metrics["macro_f1"]),
             "euclid_lr": optimizer_lr_values(optimizer)[0],
@@ -385,6 +423,9 @@ def train_fixed_epochs(
         print(
             f"    {stage_name} epoch {epoch:03d}/{int(cfg['epochs'])}: "
             f"loss={row['train_loss']:.4f}, accuracy={row['train_accuracy']:.4f}, "
+            f"ce={row['train_cross_entropy']:.4f}, "
+            f"intra={row['train_prototype_intra_loss']:.4f}, "
+            f"inter={row['train_prototype_inter_loss']:.4f}, "
             f"macro-F1={row['train_macro_f1']:.4f}, "
             f"euclid_lr={row['euclid_lr']:.6g}, "
             f"stiefel_lr={row['stiefel_lr']}."
@@ -403,35 +444,49 @@ def predict_loader(
     device: torch.device,
     *,
     condition_regularization_weight: float,
+    prototype_intra_weight: float = 0.0,
+    prototype_inter_weight: float = 0.0,
+    prototype_margin: float = 1.0,
 ) -> dict[str, Any]:
     model.eval()
     total_loss = 0.0
+    component_totals = {
+        "cross_entropy": 0.0,
+        "condition_loss": 0.0,
+        "prototype_intra_loss": 0.0,
+        "prototype_inter_loss": 0.0,
+    }
     y_true = []
     y_pred = []
     with torch.no_grad():
         for x_batch, y_batch in loader:
             x_batch = x_batch.to(device, non_blocking=device.type == "cuda")
             y_batch = y_batch.to(device, non_blocking=device.type == "cuda")
-            use_condition_regularization = condition_regularization_weight > 0
-            logits, aux = model(
+            logits, _aux, losses = compute_training_objective(
+                model,
                 x_batch,
-                return_aux=use_condition_regularization,
+                y_batch,
+                criterion,
+                condition_regularization_weight=condition_regularization_weight,
+                condition_regularization_fn=condition_regularization,
+                prototype_intra_weight=prototype_intra_weight,
+                prototype_inter_weight=prototype_inter_weight,
+                prototype_margin=prototype_margin,
             )
-            condition_loss = logits.new_tensor(0.0)
-            if use_condition_regularization and aux:
-                condition_loss = torch.stack(
-                    [condition_regularization(matrix) for matrix in aux.values()]
-                ).mean()
-            loss = criterion(logits, y_batch) + (
-                condition_regularization_weight * condition_loss
-            )
+            loss = losses["loss"]
             total_loss += loss.item() * y_batch.size(0)
+            for name in component_totals:
+                component_totals[name] += losses[name].item() * y_batch.size(0)
             y_true.extend(y_batch.cpu().numpy().tolist())
             y_pred.extend(logits.argmax(dim=1).cpu().numpy().tolist())
     true_array = np.asarray(y_true, dtype=np.int64)
     pred_array = np.asarray(y_pred, dtype=np.int64)
     return {
         "loss": total_loss / len(true_array),
+        **{
+            name: value / len(true_array)
+            for name, value in component_totals.items()
+        },
         "accuracy": float((true_array == pred_array).mean()),
         "macro_f1": classification_metrics(
             true_array,
@@ -884,6 +939,9 @@ def main(argv: list[str] | None = None) -> int:
         condition_weight = float(
             training_cfg.get("condition_regularization_weight", 0.0)
         )
+        prototype_intra_weight, prototype_inter_weight, prototype_margin = (
+            prototype_loss_settings(training_cfg)
+        )
         criterion = nn.CrossEntropyLoss()
         print(
             f"\n[{config_index}/{len(combinations)}] {config_id}\n"
@@ -964,6 +1022,9 @@ def main(argv: list[str] | None = None) -> int:
                 criterion,
                 device,
                 condition_regularization_weight=condition_weight,
+                prototype_intra_weight=prototype_intra_weight,
+                prototype_inter_weight=prototype_inter_weight,
+                prototype_margin=prototype_margin,
             )
             test_predictions = predict_loader(
                 model,
@@ -971,6 +1032,9 @@ def main(argv: list[str] | None = None) -> int:
                 criterion,
                 device,
                 condition_regularization_weight=condition_weight,
+                prototype_intra_weight=prototype_intra_weight,
+                prototype_inter_weight=prototype_inter_weight,
+                prototype_margin=prototype_margin,
             )
             train_metrics = metrics_from_arrays(
                 train_predictions["y_true"],

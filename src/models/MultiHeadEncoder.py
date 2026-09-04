@@ -116,6 +116,7 @@ class SPDMultiHeadEncoder(nn.Module):
             num_heads=4,
             tau=1.0,
             ffn_hidden_spd_dim=None,
+            ffn_tangent_mixer_rank: int = 0,
             stage_transition=True,
             metric='log-euclidean',
             attention_dropout: float = 0.0,
@@ -211,6 +212,7 @@ class SPDMultiHeadEncoder(nn.Module):
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
             dropout=dropout,
+            tangent_mixer_rank=ffn_tangent_mixer_rank,
             eps=eps
         )
         self.time_add_norm2 = _make_add_norm(
@@ -263,6 +265,7 @@ class SPDMultiHeadEncoder(nn.Module):
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
             dropout=dropout,
+            tangent_mixer_rank=ffn_tangent_mixer_rank,
             eps=eps
         )
         self.frequency_add_norm2 = _make_add_norm(
@@ -315,6 +318,7 @@ class SPDMultiHeadEncoder(nn.Module):
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
             dropout=dropout,
+            tangent_mixer_rank=ffn_tangent_mixer_rank,
             eps=eps
         )
         self.region_add_norm2 = _make_add_norm(

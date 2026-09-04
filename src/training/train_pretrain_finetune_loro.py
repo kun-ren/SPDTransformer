@@ -46,6 +46,7 @@ from src.datasets.PhysioNetMI_pretrain_finetune_preprocess import (  # noqa: E40
 )
 from src.models.MotorImageryDataset import MotorImageryDataset  # noqa: E402
 from src.training.config_grid import expand_data_grid, expand_grid  # noqa: E402
+from src.training.losses import prototype_loss_settings  # noqa: E402
 from src.training.train import (  # noqa: E402
     build_lr_schedulers,
     build_model,
@@ -226,6 +227,9 @@ def train_with_early_stopping(
     if gradient_clip_norm is not None:
         gradient_clip_norm = float(gradient_clip_norm)
     condition_weight = float(cfg.get("condition_regularization_weight", 0.0))
+    prototype_intra_weight, prototype_inter_weight, prototype_margin = (
+        prototype_loss_settings(cfg)
+    )
     patience = int(cfg.get("early_stopping_patience", 10))
     min_delta = float(cfg.get("early_stopping_min_delta", 0.0))
     if patience < 1:
@@ -234,6 +238,12 @@ def train_with_early_stopping(
     best_epoch = 0
     best_state: dict[str, torch.Tensor] | None = None
     history: list[dict[str, Any]] = []
+    print(
+        f"    {stage_name} objective=cross_entropy "
+        f"+ {prototype_intra_weight:g}*prototype_intra "
+        f"+ {prototype_inter_weight:g}*prototype_inter_margin "
+        f"(margin={prototype_margin:g})."
+    )
     for epoch in range(1, epochs + 1):
         metrics = train_one_epoch(
             model,
@@ -244,6 +254,9 @@ def train_with_early_stopping(
             device,
             gradient_clip_norm=gradient_clip_norm,
             condition_regularization_weight=condition_weight,
+            prototype_intra_weight=prototype_intra_weight,
+            prototype_inter_weight=prototype_inter_weight,
+            prototype_margin=prototype_margin,
         )
         validation_metrics = evaluate(
             model,
@@ -251,6 +264,9 @@ def train_with_early_stopping(
             criterion,
             device,
             condition_regularization_weight=condition_weight,
+            prototype_intra_weight=prototype_intra_weight,
+            prototype_inter_weight=prototype_inter_weight,
+            prototype_margin=prototype_margin,
         )
         if scheduler_name is not None:
             metric_name = str(scheduler_metric or "validation_macro_f1")
@@ -271,9 +287,25 @@ def train_with_early_stopping(
         row = {
             "epoch": epoch,
             "train_loss": float(metrics["loss"]),
+            "train_cross_entropy": float(metrics["cross_entropy"]),
+            "train_prototype_intra_loss": float(
+                metrics["prototype_intra_loss"]
+            ),
+            "train_prototype_inter_loss": float(
+                metrics["prototype_inter_loss"]
+            ),
             "train_accuracy": float(metrics["accuracy"]),
             "train_macro_f1": float(metrics["macro_f1"]),
             "validation_loss": float(validation_metrics["loss"]),
+            "validation_cross_entropy": float(
+                validation_metrics["cross_entropy"]
+            ),
+            "validation_prototype_intra_loss": float(
+                validation_metrics["prototype_intra_loss"]
+            ),
+            "validation_prototype_inter_loss": float(
+                validation_metrics["prototype_inter_loss"]
+            ),
             "validation_accuracy": float(validation_metrics["accuracy"]),
             "validation_macro_f1": float(validation_metrics["macro_f1"]),
             "euclid_lr": optimizer_lr_values(optimizer)[0],
@@ -298,6 +330,9 @@ def train_with_early_stopping(
         print(
             f"    {stage_name} epoch {epoch:03d}/{epochs}: "
             f"train loss={row['train_loss']:.4f}, "
+            f"ce={row['train_cross_entropy']:.4f}, "
+            f"intra={row['train_prototype_intra_loss']:.4f}, "
+            f"inter={row['train_prototype_inter_loss']:.4f}, "
             f"accuracy={row['train_accuracy']:.4f}, "
             f"mf1={row['train_macro_f1']:.4f} | "
             f"validation loss={row['validation_loss']:.4f}, "
@@ -346,7 +381,16 @@ def train_fixed_epochs(
     if gradient_clip_norm is not None:
         gradient_clip_norm = float(gradient_clip_norm)
     condition_weight = float(cfg.get("condition_regularization_weight", 0.0))
+    prototype_intra_weight, prototype_inter_weight, prototype_margin = (
+        prototype_loss_settings(cfg)
+    )
     history: list[dict[str, Any]] = []
+    print(
+        f"    {stage_name} objective=cross_entropy "
+        f"+ {prototype_intra_weight:g}*prototype_intra "
+        f"+ {prototype_inter_weight:g}*prototype_inter_margin "
+        f"(margin={prototype_margin:g})."
+    )
     for epoch in range(1, epochs + 1):
         metrics = train_one_epoch(
             model,
@@ -357,10 +401,20 @@ def train_fixed_epochs(
             device,
             gradient_clip_norm=gradient_clip_norm,
             condition_regularization_weight=condition_weight,
+            prototype_intra_weight=prototype_intra_weight,
+            prototype_inter_weight=prototype_inter_weight,
+            prototype_margin=prototype_margin,
         )
         row = {
             "epoch": epoch,
             "train_loss": float(metrics["loss"]),
+            "train_cross_entropy": float(metrics["cross_entropy"]),
+            "train_prototype_intra_loss": float(
+                metrics["prototype_intra_loss"]
+            ),
+            "train_prototype_inter_loss": float(
+                metrics["prototype_inter_loss"]
+            ),
             "train_accuracy": float(metrics["accuracy"]),
             "train_macro_f1": float(metrics["macro_f1"]),
             "euclid_lr": optimizer_lr_values(optimizer)[0],
@@ -377,6 +431,9 @@ def train_fixed_epochs(
         print(
             f"    {stage_name} epoch {epoch:03d}/{epochs}: "
             f"train loss={row['train_loss']:.4f}, "
+            f"ce={row['train_cross_entropy']:.4f}, "
+            f"intra={row['train_prototype_intra_loss']:.4f}, "
+            f"inter={row['train_prototype_inter_loss']:.4f}, "
             f"accuracy={row['train_accuracy']:.4f}, "
             f"mf1={row['train_macro_f1']:.4f} | {lr_text}"
         )
@@ -863,12 +920,18 @@ def main(argv: list[str] | None = None) -> int:
     condition_weight = float(
         pretrain_cfg.get("condition_regularization_weight", 0.0)
     )
+    pretrain_intra_weight, pretrain_inter_weight, pretrain_margin = (
+        prototype_loss_settings(pretrain_cfg)
+    )
     validation_predictions = predict_loader(
         global_model,
         global_validation_loader,
         criterion,
         device,
         condition_regularization_weight=condition_weight,
+        prototype_intra_weight=pretrain_intra_weight,
+        prototype_inter_weight=pretrain_inter_weight,
+        prototype_margin=pretrain_margin,
     )
     global_test_loader = make_loader(
         full_dataset,
@@ -884,6 +947,9 @@ def main(argv: list[str] | None = None) -> int:
         criterion,
         device,
         condition_regularization_weight=condition_weight,
+        prototype_intra_weight=pretrain_intra_weight,
+        prototype_inter_weight=pretrain_inter_weight,
+        prototype_margin=pretrain_margin,
     )
     global_metrics = metrics_from_arrays(
         global_predictions["y_true"],
@@ -1050,6 +1116,9 @@ def main(argv: list[str] | None = None) -> int:
             num_workers=fine_tune_num_workers,
             pin_memory=fine_tune_pin_memory,
         )
+        fine_tune_intra_weight, fine_tune_inter_weight, fine_tune_margin = (
+            prototype_loss_settings(fine_tune_cfg)
+        )
         predictions = predict_loader(
             model,
             test_loader,
@@ -1058,6 +1127,9 @@ def main(argv: list[str] | None = None) -> int:
             condition_regularization_weight=float(
                 fine_tune_cfg.get("condition_regularization_weight", 0.0)
             ),
+            prototype_intra_weight=fine_tune_intra_weight,
+            prototype_inter_weight=fine_tune_inter_weight,
+            prototype_margin=fine_tune_margin,
         )
         after_metrics = metrics_from_arrays(
             predictions["y_true"],

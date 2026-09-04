@@ -83,6 +83,7 @@ class SPDEncoder(nn.Module):
             brain_region_sequence_length=1,
             tau=1.0,
             ffn_hidden_spd_dim=None,
+            ffn_tangent_mixer_rank: int = 0,
             stage_transition=True,
             metric='log-euclidean',
             attention_dropout: float = 0.0,
@@ -164,6 +165,7 @@ class SPDEncoder(nn.Module):
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
             dropout=dropout,
+            tangent_mixer_rank=ffn_tangent_mixer_rank,
             eps=eps
         )
         self.time_add_norm2 = _make_add_norm(
@@ -208,6 +210,7 @@ class SPDEncoder(nn.Module):
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
             dropout=dropout,
+            tangent_mixer_rank=ffn_tangent_mixer_rank,
             eps=eps
         )
         self.frequency_add_norm2 = _make_add_norm(
@@ -251,6 +254,7 @@ class SPDEncoder(nn.Module):
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
             dropout=dropout,
+            tangent_mixer_rank=ffn_tangent_mixer_rank,
             eps=eps
         )
         self.region_add_norm2 = _make_add_norm(
@@ -396,6 +400,7 @@ class SPDTransformer(nn.Module):
             tau=1.0,
             depth: int = 1,
             ffn_hidden_spd_dim=None,
+            ffn_tangent_mixer_rank: int = 0,
             metric: str = "log-euclidean",
             attention_dropout: float = 0.0,
             debug_attention_dropout: bool = False,
@@ -480,6 +485,7 @@ class SPDTransformer(nn.Module):
                 brain_region_sequence_length=brain_region_sequence_length,
                 tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                ffn_tangent_mixer_rank=ffn_tangent_mixer_rank,
                 metric=metric,
                 attention_dropout=attention_dropout,
                 debug_attention_dropout=debug_attention_dropout,
@@ -510,6 +516,7 @@ class SPDTransformer(nn.Module):
                 brain_region_sequence_length=brain_region_sequence_length,
                 tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                ffn_tangent_mixer_rank=ffn_tangent_mixer_rank,
                 metric=metric,
                 attention_dropout=attention_dropout,
                 debug_attention_dropout=debug_attention_dropout,

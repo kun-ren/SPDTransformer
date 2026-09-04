@@ -40,6 +40,7 @@ class SPDTransformerClassifier(nn.Module):
             brain_region_sequence_length=1,
             tau=1.0,
             ffn_hidden_spd_dim=None,
+            ffn_tangent_mixer_rank: int = 0,
             metric: str = "log-euclidean",
             depth: int = 1,
             classifier_type: ClassifierType = "pooling",
@@ -74,6 +75,7 @@ class SPDTransformerClassifier(nn.Module):
             pooling_weight_mode: Literal["full", "factorized"] = "full",
             pooling_dropout: float = 0.0,
             pooling_uniform_mix: float = 0.0,
+            pooling_mean_anchor: bool = False,
     ):
         super().__init__()
         self.debug_tensor_stats = debug_tensor_stats
@@ -139,6 +141,7 @@ class SPDTransformerClassifier(nn.Module):
                 brain_region_sequence_length=brain_region_sequence_length,
                 tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                ffn_tangent_mixer_rank=ffn_tangent_mixer_rank,
                 metric=metric,
                 depth=depth,
                 pooling=pooling,
@@ -164,6 +167,7 @@ class SPDTransformerClassifier(nn.Module):
                 pooling_weight_mode=pooling_weight_mode,
                 pooling_dropout=pooling_dropout,
                 pooling_uniform_mix=pooling_uniform_mix,
+                pooling_mean_anchor=pooling_mean_anchor,
             )
         elif classifier_type == "mdm":
             self.model = SPDMDMClassifier(
@@ -177,6 +181,7 @@ class SPDTransformerClassifier(nn.Module):
                 brain_region_sequence_length=brain_region_sequence_length,
                 tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                ffn_tangent_mixer_rank=ffn_tangent_mixer_rank,
                 metric=metric,
                 depth=depth,
                 pooling=pooling,
@@ -202,6 +207,7 @@ class SPDTransformerClassifier(nn.Module):
                 pooling_weight_mode=pooling_weight_mode,
                 pooling_dropout=pooling_dropout,
                 pooling_uniform_mix=pooling_uniform_mix,
+                pooling_mean_anchor=pooling_mean_anchor,
             )
         else:
             self.model = None
@@ -215,3 +221,23 @@ class SPDTransformerClassifier(nn.Module):
             logits = self.model(x, return_aux=False)
             return logits, {}
         return self.model(x, return_aux=return_aux)
+
+    def forward_with_prototype_losses(
+            self,
+            x: torch.Tensor,
+            targets: torch.Tensor,
+            *,
+            prototype_margin: float,
+            return_aux: bool = True,
+    ) -> tuple[torch.Tensor, dict, torch.Tensor, torch.Tensor]:
+        if self.encoder_type != "spd" or self.classifier_type != "mdm":
+            raise ValueError(
+                "Prototype losses require encoder_type='spd' and "
+                "classifier_type='mdm'."
+            )
+        return self.model.forward_with_prototype_losses(
+            x,
+            targets,
+            prototype_margin=prototype_margin,
+            return_aux=return_aux,
+        )

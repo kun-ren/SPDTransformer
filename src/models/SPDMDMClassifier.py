@@ -45,7 +45,10 @@ class LogEuclideanMDMHead(nn.Module):
         self.class_log_prototypes = nn.Parameter(prototypes)
         self.logit_scale_raw = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, pooled_log: torch.Tensor) -> torch.Tensor:
+    def _prepare_inputs(
+            self,
+            pooled_log: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if pooled_log.shape[-2:] != (self.spd_dim, self.spd_dim):
             raise ValueError(
                 f"Expected log-SPD matrix shape (..., {self.spd_dim}, "
@@ -57,10 +60,70 @@ class LogEuclideanMDMHead(nn.Module):
             self.class_log_prototypes
             + self.class_log_prototypes.transpose(-1, -2)
         )
+        return pooled_log, prototypes
+
+    def squared_distances(self, pooled_log: torch.Tensor) -> torch.Tensor:
+        pooled_log, prototypes = self._prepare_inputs(pooled_log)
         diff = pooled_log.unsqueeze(-3) - prototypes
-        distances = diff.square().sum(dim=(-2, -1))
+        return diff.square().sum(dim=(-2, -1))
+
+    def forward(self, pooled_log: torch.Tensor) -> torch.Tensor:
+        distances = self.squared_distances(pooled_log)
         scale = F.softplus(self.logit_scale_raw) + self.eps
         return -scale * distances
+
+    def prototype_losses(
+            self,
+            pooled_log: torch.Tensor,
+            targets: torch.Tensor,
+            margin: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return intra-class distance and inter-class margin penalties."""
+        if margin < 0:
+            raise ValueError(f"prototype margin must be non-negative, got {margin}.")
+        expected_target_shape = pooled_log.shape[:-2]
+        if tuple(targets.shape) != tuple(expected_target_shape):
+            raise ValueError(
+                "Prototype targets must match pooled feature leading dimensions: "
+                f"expected {tuple(expected_target_shape)}, got {tuple(targets.shape)}."
+            )
+        if targets.dtype != torch.long:
+            targets = targets.long()
+        if targets.numel() == 0:
+            raise ValueError("Prototype losses require at least one target.")
+        if int(targets.min()) < 0 or int(targets.max()) >= self.num_classes:
+            raise ValueError(
+                f"Prototype targets must be in [0, {self.num_classes - 1}]."
+            )
+
+        sample_distances = self.squared_distances(pooled_log)
+        intra_loss = sample_distances.gather(
+            dim=-1,
+            index=targets.unsqueeze(-1),
+        ).mean()
+
+        _, prototypes = self._prepare_inputs(pooled_log)
+        prototype_diff = (
+            prototypes.unsqueeze(1) - prototypes.unsqueeze(0)
+        )
+        pairwise_squared_distance = prototype_diff.square().sum(dim=(-2, -1))
+        pairwise_distance = torch.sqrt(
+            pairwise_squared_distance.clamp_min(self.eps)
+        )
+        pair_mask = torch.triu(
+            torch.ones(
+                self.num_classes,
+                self.num_classes,
+                device=prototypes.device,
+                dtype=torch.bool,
+            ),
+            diagonal=1,
+        )
+        inter_loss = F.relu(
+            pairwise_distance.new_tensor(float(margin))
+            - pairwise_distance[pair_mask]
+        ).square().mean()
+        return intra_loss, inter_loss
 
 
 class LogEuclideanPrototypeClassifier(nn.Module):
@@ -185,6 +248,7 @@ class SPDMDMClassifier(nn.Module):
             brain_region_sequence_length: int = 1,
             tau=1.0,
             ffn_hidden_spd_dim=None,
+            ffn_tangent_mixer_rank: int = 0,
             metric: str = "log-euclidean",
             depth: int = 1,
             pooling: MDMPoolingMode = "mean",
@@ -210,6 +274,7 @@ class SPDMDMClassifier(nn.Module):
             pooling_weight_mode: PoolingWeightMode = "full",
             pooling_dropout: float = 0.0,
             pooling_uniform_mix: float = 0.0,
+            pooling_mean_anchor: bool = False,
     ):
         super().__init__()
         pooling = self._normalize_pooling(pooling)
@@ -228,6 +293,12 @@ class SPDMDMClassifier(nn.Module):
             pooling_uniform_mix,
             "pooling_uniform_mix",
         )
+        if not isinstance(pooling_mean_anchor, bool):
+            raise TypeError(
+                "pooling_mean_anchor must be a bool, "
+                f"got {type(pooling_mean_anchor).__name__}."
+            )
+        self.pooling_mean_anchor = pooling_mean_anchor
         self.debug_tensor_stats = debug_tensor_stats
         self.transformer_out_dim = attention_dim[-1] if stage_transition else spd_in_dim
         self.eps = eps
@@ -243,6 +314,7 @@ class SPDMDMClassifier(nn.Module):
             brain_region_sequence_length=brain_region_sequence_length,
             tau=tau,
             ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+            ffn_tangent_mixer_rank=ffn_tangent_mixer_rank,
             metric=metric,
             attention_dropout=attention_dropout,
             debug_attention_dropout=debug_attention_dropout,
@@ -279,9 +351,15 @@ class SPDMDMClassifier(nn.Module):
                 self.token_axis_weight_logits = nn.ParameterList(
                     [nn.Parameter(torch.zeros(size)) for size in token_shape]
                 )
+            if self.pooling_mean_anchor:
+                initial_gate = torch.tensor(0.1)
+                self.pooling_gate_logit = nn.Parameter(torch.logit(initial_gate))
+            else:
+                self.register_parameter("pooling_gate_logit", None)
         else:
             self.register_parameter("token_weight_logits", None)
             self.token_axis_weight_logits = nn.ParameterList()
+            self.register_parameter("pooling_gate_logit", None)
 
         self.mdm_head = LogEuclideanMDMHead(
             spd_dim=self.transformer_out_dim,
@@ -306,6 +384,33 @@ class SPDMDMClassifier(nn.Module):
             x: torch.Tensor,
             return_aux: bool = True,
     ) -> tuple[Any, Any]:
+        pooled_log, aux = self._encode_and_pool(x, return_aux=return_aux)
+        logits = self._mdm_logits(pooled_log)
+        return logits, aux
+
+    def forward_with_prototype_losses(
+            self,
+            x: torch.Tensor,
+            targets: torch.Tensor,
+            *,
+            prototype_margin: float,
+            return_aux: bool = True,
+    ) -> tuple[torch.Tensor, dict, torch.Tensor, torch.Tensor]:
+        pooled_log, aux = self._encode_and_pool(x, return_aux=return_aux)
+        logits = self._mdm_logits(pooled_log)
+        intra_loss, inter_loss = self.mdm_head.prototype_losses(
+            pooled_log,
+            targets,
+            margin=prototype_margin,
+        )
+        return logits, aux, intra_loss, inter_loss
+
+    def _encode_and_pool(
+            self,
+            x: torch.Tensor,
+            *,
+            return_aux: bool,
+    ) -> tuple[torch.Tensor, dict]:
         x_log, aux = self.encoder(
             x,
             return_log=True,
@@ -316,9 +421,7 @@ class SPDMDMClassifier(nn.Module):
             pooled_log = self._mean_pool(x_log)
         else:
             pooled_log = self._weighted_pool(x_log)
-
-        logits = self._mdm_logits(pooled_log)
-        return logits, aux
+        return pooled_log, aux
 
     def _mean_pool(self, x_log: torch.Tensor) -> torch.Tensor:
         token_dims = tuple(range(1, x_log.ndim - 2))
@@ -352,7 +455,13 @@ class SPDMDMClassifier(nn.Module):
         ).reshape(-1, *token_shape)
         view_shape = (weights.shape[0], *token_shape, 1, 1)
         token_dims = tuple(range(1, x_log.ndim - 2))
-        return (x_log * weights.view(view_shape)).sum(dim=token_dims)
+        weighted_log = (x_log * weights.view(view_shape)).sum(dim=token_dims)
+        if self.pooling_gate_logit is None:
+            return weighted_log
+
+        mean_log = self._mean_pool(x_log)
+        gate = torch.sigmoid(self.pooling_gate_logit).to(weighted_log.dtype)
+        return torch.lerp(mean_log, weighted_log, gate)
 
 
     def _token_logits_for_shape(self, token_shape: tuple[int, ...]) -> torch.Tensor:

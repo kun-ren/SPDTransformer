@@ -47,6 +47,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             brain_region_sequence_length: int = 1,
             tau=1.0,
             ffn_hidden_spd_dim=None,
+            ffn_tangent_mixer_rank: int = 0,
             metric: str = "log-euclidean",
             depth: int = 1,
             pooling: SPDPoolingMode = "weighted",
@@ -72,6 +73,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             pooling_weight_mode: PoolingWeightMode = "full",
             pooling_dropout: float = 0.0,
             pooling_uniform_mix: float = 0.0,
+            pooling_mean_anchor: bool = False,
     ):
         super().__init__()
         pooling = self._normalize_pooling(pooling)
@@ -90,6 +92,12 @@ class SPDPoolingClassifier(SPDClassifierBase):
             pooling_uniform_mix,
             "pooling_uniform_mix",
         )
+        if not isinstance(pooling_mean_anchor, bool):
+            raise TypeError(
+                "pooling_mean_anchor must be a bool, "
+                f"got {type(pooling_mean_anchor).__name__}."
+            )
+        self.pooling_mean_anchor = pooling_mean_anchor
         self.debug_tensor_stats = debug_tensor_stats
         self.transformer_out_dim = attention_dim[-1] if stage_transition else spd_in_dim
         self.feature_dim = self.transformer_out_dim * (self.transformer_out_dim + 1) // 2
@@ -106,6 +114,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             brain_region_sequence_length=brain_region_sequence_length,
             tau=tau,
             ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+            ffn_tangent_mixer_rank=ffn_tangent_mixer_rank,
             metric=metric,
             attention_dropout=attention_dropout,
             debug_attention_dropout=debug_attention_dropout,
@@ -142,9 +151,15 @@ class SPDPoolingClassifier(SPDClassifierBase):
                 self.token_axis_weight_logits = nn.ParameterList(
                     [nn.Parameter(torch.zeros(size)) for size in token_shape]
                 )
+            if self.pooling_mean_anchor:
+                initial_gate = torch.tensor(0.1)
+                self.pooling_gate_logit = nn.Parameter(torch.logit(initial_gate))
+            else:
+                self.register_parameter("pooling_gate_logit", None)
         else:
             self.register_parameter("token_weight_logits", None)
             self.token_axis_weight_logits = nn.ParameterList()
+            self.register_parameter("pooling_gate_logit", None)
 
         self.classifier = self.build_linear_classifier(
             feature_dim=self.classifier_feature_dim,
@@ -211,7 +226,13 @@ class SPDPoolingClassifier(SPDClassifierBase):
         ).reshape(-1, *token_shape)
         view_shape = (weights.shape[0], *token_shape, 1, 1)
         token_dims = tuple(range(1, x_log.ndim - 2))
-        return (x_log * weights.view(view_shape)).sum(dim=token_dims)
+        weighted_log = (x_log * weights.view(view_shape)).sum(dim=token_dims)
+        if self.pooling_gate_logit is None:
+            return weighted_log
+
+        mean_log = self._mean_pool(x_log)
+        gate = torch.sigmoid(self.pooling_gate_logit).to(weighted_log.dtype)
+        return torch.lerp(mean_log, weighted_log, gate)
 
     def _token_logits_for_shape(self, token_shape: tuple[int, ...]) -> torch.Tensor:
         if not 1 <= len(token_shape) <= 3:

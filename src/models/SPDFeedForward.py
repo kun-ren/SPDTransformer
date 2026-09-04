@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 import torch
@@ -55,6 +56,7 @@ class SPDFeedForward(nn.Module):
     feature dimension:
 
         log(SPD) -> upper triangular vector
+            -> dimension-preserving low-rank tangent mixer
             -> activation -> dropout
             -> symmetric matrix -> residual in log domain
 
@@ -68,6 +70,7 @@ class SPDFeedForward(nn.Module):
             hidden_spd_dim: int | None = None,
             activation: Literal["relu", "gelu", "softplus"] = "gelu",
             dropout: float = 0.0,
+            tangent_mixer_rank: int = 0,
             eps: float = 1e-4,
             debug_tensor_stats: bool = False,
     ) -> None:
@@ -84,6 +87,22 @@ class SPDFeedForward(nn.Module):
         # the block no longer creates a hidden expansion dimension.
         self.hidden_feature_dim = self.feature_dim
         self.configured_hidden_spd_dim = hidden_spd_dim
+
+        requested_mixer_rank = int(tangent_mixer_rank)
+        if requested_mixer_rank < 0:
+            raise ValueError(
+                "tangent_mixer_rank must be non-negative, got "
+                f"{tangent_mixer_rank}."
+            )
+        self.requested_tangent_mixer_rank = requested_mixer_rank
+        self.tangent_mixer_rank = min(requested_mixer_rank, self.feature_dim)
+        if self.tangent_mixer_rank > 0:
+            factor = torch.empty(self.feature_dim, self.tangent_mixer_rank)
+            nn.init.orthogonal_(factor)
+            factor.mul_(0.02)
+            self.tangent_mixer_factor = nn.Parameter(factor)
+        else:
+            self.register_parameter("tangent_mixer_factor", None)
 
         self.activation = activation
         self.dropout = nn.Dropout(dropout)
@@ -113,7 +132,8 @@ class SPDFeedForward(nn.Module):
         #x_log = _sym(x_log)
         vector = x_log[..., self.triu_row, self.triu_col]
 
-        delta_vector = _apply_activation(vector, self.activation)
+        mixed_vector = self._mix_tangent_features(vector)
+        delta_vector = _apply_activation(mixed_vector, self.activation)
         delta_vector = self.dropout(delta_vector)
 
         delta_log = self._upper_triangular_unvectorize(delta_vector)
@@ -121,6 +141,14 @@ class SPDFeedForward(nn.Module):
         out_log = x_log + gate * delta_log
 
         return out_log
+
+    def _mix_tangent_features(self, vector: torch.Tensor) -> torch.Tensor:
+        if self.tangent_mixer_factor is None:
+            return vector
+
+        factor = self.tangent_mixer_factor.to(dtype=vector.dtype)
+        low_rank = (vector @ factor) @ factor.transpose(-1, -2)
+        return vector + low_rank / math.sqrt(self.tangent_mixer_rank)
 
     def _upper_triangular_unvectorize(self, vector: torch.Tensor) -> torch.Tensor:
         if vector.shape[-1] != self.feature_dim:
