@@ -43,7 +43,7 @@ data:
   baseline_window: [null]
 
 model:
-  head_nums: [1]
+  head_nums: [4,6]
   attention_dim: ["8, 8"]
   # Both encoder layers preserve the 8x8 SPD dimension.
   stage_transition: [false]
@@ -57,15 +57,15 @@ model:
   metric: ["learnable-metric"]
   # Heads within each axis share its metric. Matching 8x8 layer dimensions
   # also allow the corresponding axis metric to be shared across layers.
-  share_metric_across_layers: [True]
+  share_metric_across_layers: [False, True]
   depth: [2]
   classifier_type: ["mdm"]
   pooling: ["weighted"]
-  pooling_weight_mode: ["factorized", "full"]
-  pooling_dropout: [0.0, 0.2, 0.4]
-  pooling_uniform_mix: [0.1, 0.4]
+  pooling_weight_mode: ["factorized"]
+  pooling_dropout: [0.2,]
+  pooling_uniform_mix: [0.1]
   # Set false to recover the original pure weighted-pooling path.
-  pooling_mean_anchor: [true]
+  pooling_mean_anchor: [true, false]
 
   # Hyperparameter search values. Two values create two model candidates.
   dropout: [0.2]
@@ -81,7 +81,7 @@ model:
   learnable_metric_mode: ["low-rank"]
   learnable_metric_score: ["distance"]
   # Shared upper bound for the learnable axis metrics.
-  learnable_metric_rank: [6]
+  learnable_metric_rank: [4, 6, 8]
   eps: [1.0e-6]
 
 training:
@@ -92,7 +92,7 @@ training:
   cv_seed: [42]
 
   # Fixed training only. Test data never controls epochs or learning rate.
-  epochs: [130]
+  epochs: [200]
   batch_size: [128]
   precision: ["float32"]
 
@@ -105,7 +105,7 @@ training:
   # not leak test-subject information into training. Set ["none"] to disable.
   lr_scheduler: [ "multistep" ]
   lr_scheduler_gamma: 0.5
-  lr_scheduler_milestones: [ [ 40, 70, 90 ] ]
+  lr_scheduler_milestones: [ [ 40, 90, 130, 160 ] ]
   lr_scheduler_min_lr: [1.0e-5]
   stiefel_lr_scheduler_min_lr: [1.0e-6]
   weight_decay: [0.01]
