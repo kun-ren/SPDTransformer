@@ -45,8 +45,9 @@ model:
   ffn_tangent_mixer_rank: [4]
   tau: [1.3]
   metric: ["learnable-metric"]
-  # Heads within one axis share a metric; axes remain distinct. Cross-layer
-  # sharing has no effect for this single-layer model.
+  # Set false to share one metric across time/frequency/region per layer.
+  independent_metric_per_axis: [true]
+  # Cross-layer sharing has no effect for this single-layer model.
   share_metric_across_layers: [false]
   depth: [1]
   classifier_type: ["mdm"]

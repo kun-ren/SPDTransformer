@@ -43,8 +43,8 @@ data:
   baseline_window: [null]
 
 model:
-  head_nums: [4,6]
-  attention_dim: ["8, 8"]
+  head_nums: [1]
+  attention_dim: ["8, 8, 8, 6, 6, 4"]
   # Both encoder layers preserve the 8x8 SPD dimension.
   stage_transition: [false]
   stage_projection_init: ["random"]
@@ -55,22 +55,24 @@ model:
   ffn_tangent_mixer_rank: [4]
   tau: [1.3]
   metric: ["learnable-metric"]
-  # Heads within each axis share its metric. Matching 8x8 layer dimensions
-  # also allow the corresponding axis metric to be shared across layers.
-  share_metric_across_layers: [False, True]
-  depth: [2]
+  # Set false to share one metric across time/frequency/region per layer.
+  independent_metric_per_axis: [true]
+  # Matching 8x8 layers can share corresponding axis metrics across layers.
+  # With shared axes, all axes in shared layers use one common metric.
+  share_metric_across_layers: [False]
+  depth: [5]
   classifier_type: ["mdm"]
   pooling: ["weighted"]
   pooling_weight_mode: ["factorized"]
   pooling_dropout: [0.2,]
   pooling_uniform_mix: [0.1]
   # Set false to recover the original pure weighted-pooling path.
-  pooling_mean_anchor: [true, false]
+  pooling_mean_anchor: [true]
 
   # Hyperparameter search values. Two values create two model candidates.
   dropout: [0.2]
 
-  attention_dropout: [0.2]
+  attention_dropout: [0.1]
   head_dropout: [0.0]
   use_position_bias: [true]
   position_bias_axes: ["time"]
@@ -81,7 +83,7 @@ model:
   learnable_metric_mode: ["low-rank"]
   learnable_metric_score: ["distance"]
   # Shared upper bound for the learnable axis metrics.
-  learnable_metric_rank: [4, 6, 8]
+  learnable_metric_rank: [4,]
   eps: [1.0e-6]
 
 training:
@@ -92,7 +94,7 @@ training:
   cv_seed: [42]
 
   # Fixed training only. Test data never controls epochs or learning rate.
-  epochs: [200]
+  epochs: [150]
   batch_size: [128]
   precision: ["float32"]
 
@@ -105,7 +107,7 @@ training:
   # not leak test-subject information into training. Set ["none"] to disable.
   lr_scheduler: [ "multistep" ]
   lr_scheduler_gamma: 0.5
-  lr_scheduler_milestones: [ [ 40, 90, 130, 160 ] ]
+  lr_scheduler_milestones: [ [ 30, 55, 80, 110 ] ]
   lr_scheduler_min_lr: [1.0e-5]
   stiefel_lr_scheduler_min_lr: [1.0e-6]
   weight_decay: [0.01]

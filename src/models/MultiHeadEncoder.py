@@ -137,6 +137,7 @@ class SPDMultiHeadEncoder(nn.Module):
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: AddNormType = "trace",
             head_dropout: float = 0.0,
+            independent_metric_per_axis: bool = True,
     ):
         super().__init__()
         if num_heads < 1:
@@ -153,6 +154,12 @@ class SPDMultiHeadEncoder(nn.Module):
         self.stage_transition = stage_transition
         self.eps = eps
         self.head_dropout = validate_probability(head_dropout, "head_dropout")
+        if not isinstance(independent_metric_per_axis, bool):
+            raise TypeError(
+                "independent_metric_per_axis must be a bool, "
+                f"got {type(independent_metric_per_axis).__name__}."
+            )
+        self.independent_metric_per_axis = independent_metric_per_axis
         enabled_position_bias_axes = normalize_position_bias_axes(
             use_position_bias,
             position_bias_axes,
@@ -300,6 +307,8 @@ class SPDMultiHeadEncoder(nn.Module):
             for _ in range(num_heads)
         ])
         self._share_axis_metric(self.region_attention)
+        if not self.independent_metric_per_axis:
+            self._share_metrics_across_axes()
         if num_heads > 1:
             self.region_head_logits = nn.Parameter(torch.zeros(num_heads))
         else:
@@ -342,6 +351,15 @@ class SPDMultiHeadEncoder(nn.Module):
         source = attention_heads[0]
         for attention_head in attention_heads[1:]:
             attention_head.share_metric_parameters_from(source)
+
+    def _share_metrics_across_axes(self) -> None:
+        source = self.time_attention[0]
+        for attention_heads in (
+                self.frequency_attention,
+                self.region_attention,
+        ):
+            for attention_head in attention_heads:
+                attention_head.share_metric_parameters_from(source)
 
     def _combine_head_logs(
             self,

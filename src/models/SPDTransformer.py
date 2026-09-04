@@ -103,6 +103,7 @@ class SPDEncoder(nn.Module):
             position_bias_max: float = 0.5,
             attention_score_target_rms: float = 1.0,
             attention_score_clip: float = 5.0,
+            independent_metric_per_axis: bool = True,
     ):
         super().__init__()
         print("init single head encoder")
@@ -114,6 +115,12 @@ class SPDEncoder(nn.Module):
         self.debug_tensor_stats = debug_tensor_stats
         self.stage_transition = stage_transition
         self.eps = eps
+        if not isinstance(independent_metric_per_axis, bool):
+            raise TypeError(
+                "independent_metric_per_axis must be a bool, "
+                f"got {type(independent_metric_per_axis).__name__}."
+            )
+        self.independent_metric_per_axis = independent_metric_per_axis
         enabled_position_bias_axes = normalize_position_bias_axes(
             use_position_bias,
             position_bias_axes,
@@ -241,6 +248,13 @@ class SPDEncoder(nn.Module):
             attention_score_clip=attention_score_clip,
             debug_tensor_stats=debug_tensor_stats,
         )
+        if not self.independent_metric_per_axis:
+            self.frequency_attention.share_metric_parameters_from(
+                self.time_attention
+            )
+            self.region_attention.share_metric_parameters_from(
+                self.time_attention
+            )
         self.region_add_norm1 = _make_add_norm(
             add_norm_type,
             spd_out_dim,
@@ -421,6 +435,7 @@ class SPDTransformer(nn.Module):
             attention_score_clip: float = 5.0,
             share_metric_across_layers: bool | str | Sequence[bool] = False,
             head_dropout: float = 0.0,
+            independent_metric_per_axis: bool | str = True,
     ):
         super().__init__()
         if depth < 1:
@@ -431,6 +446,10 @@ class SPDTransformer(nn.Module):
         self.depth = depth
         self.debug_tensor_stats = debug_tensor_stats
         self.stage_transition = stage_transition
+        self.independent_metric_per_axis = _parse_bool_flag(
+            independent_metric_per_axis,
+            "independent_metric_per_axis",
+        )
         self.share_metric_across_layers_by_layer = normalize_layer_metric_sharing(
             share_metric_across_layers,
             depth=depth,
@@ -504,6 +523,7 @@ class SPDTransformer(nn.Module):
                 dropout=dropout,
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
+                independent_metric_per_axis=self.independent_metric_per_axis,
             ) for index in range(self.depth)])
         else:
             self.layers = nn.ModuleList([SPDMultiHeadEncoder(
@@ -536,6 +556,7 @@ class SPDTransformer(nn.Module):
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
                 head_dropout=head_dropout,
+                independent_metric_per_axis=self.independent_metric_per_axis,
             ) for index in range(self.depth)])
 
         self._share_metrics_between_encoder_layers()

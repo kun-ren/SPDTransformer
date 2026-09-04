@@ -584,6 +584,10 @@ def build_model(
             "share_metric_across_layers",
             False,
         ),
+        independent_metric_per_axis=parse_bool(
+            model_cfg.get("independent_metric_per_axis", True),
+            default=True,
+        ),
         head_dropout=float(model_cfg.get("head_dropout", 0.0)),
         pooling_weight_mode=str(model_cfg.get("pooling_weight_mode", "full")),
         pooling_dropout=float(model_cfg.get("pooling_dropout", 0.0)),

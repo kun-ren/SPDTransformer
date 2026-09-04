@@ -270,6 +270,7 @@ class SPDMDMClassifier(nn.Module):
             attention_score_target_rms: float = 1.0,
             attention_score_clip: float = 5.0,
             share_metric_across_layers: bool | str | list[bool] = False,
+            independent_metric_per_axis: bool | str = True,
             head_dropout: float = 0.0,
             pooling_weight_mode: PoolingWeightMode = "full",
             pooling_dropout: float = 0.0,
@@ -334,6 +335,7 @@ class SPDMDMClassifier(nn.Module):
             stage_projection_init=stage_projection_init,
             add_norm_type=add_norm_type,
             share_metric_across_layers=share_metric_across_layers,
+            independent_metric_per_axis=independent_metric_per_axis,
             head_dropout=head_dropout,
         )
 
