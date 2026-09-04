@@ -44,7 +44,7 @@ data:
 
 model:
   head_nums: [1]
-  attention_dim: ["8, 8, 8, 6, 6, 4"]
+  attention_dim: ["8, 8, 8, 6, 6"]
   # Both encoder layers preserve the 8x8 SPD dimension.
   stage_transition: [false]
   stage_projection_init: ["random"]
@@ -83,7 +83,7 @@ model:
   learnable_metric_mode: ["low-rank"]
   learnable_metric_score: ["distance"]
   # Shared upper bound for the learnable axis metrics.
-  learnable_metric_rank: [4,]
+  learnable_metric_rank: [4]
   eps: [1.0e-6]
 
 training:
