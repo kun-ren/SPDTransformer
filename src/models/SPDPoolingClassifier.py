@@ -55,6 +55,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             layer_norm_affine: bool = True,
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: str = "trace",
+            share_metric_across_layers: bool = False,
     ):
         super().__init__()
         pooling = self._normalize_pooling(pooling)
@@ -92,6 +93,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
             dropout=dropout,
             stage_projection_init=stage_projection_init,
             add_norm_type=add_norm_type,
+            share_metric_across_layers=share_metric_across_layers,
         )
 
         if pooling == "weighted":
@@ -116,6 +118,15 @@ class SPDPoolingClassifier(SPDClassifierBase):
             x: torch.Tensor,
             return_aux: bool = True,
     ) -> tuple[Any, Any]:
+        logits, aux, _pooled_log = self.forward_with_pooled(x, return_aux=return_aux)
+        return logits, aux
+
+    def forward_with_pooled(
+            self,
+            x: torch.Tensor,
+            *,
+            return_aux: bool = True,
+    ) -> tuple[torch.Tensor, dict, torch.Tensor]:
 
         x_log, aux = self.encoder(
             x,
@@ -132,7 +143,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
 
         logits = self.classifier(features)
 
-        return logits, aux
+        return logits, aux, pooled_log
 
     def _mean_pool(self, x_log: torch.Tensor) -> torch.Tensor:
         """

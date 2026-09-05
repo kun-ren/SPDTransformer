@@ -2,6 +2,7 @@ from typing import Literal
 
 import torch
 from torch import nn
+from src.models.AxisMetricSharing import share_axis_metrics
 from src.models.GeooptBiMap import GeooptBiMap
 from src.models.MultiHeadEncoder import (
     AddNormType,
@@ -337,6 +338,7 @@ class SPDTransformer(nn.Module):
             dropout: float = 0.0,
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: AddNormType = "trace",
+            share_metric_across_layers: bool = False,
     ):
         super().__init__()
         if depth < 1:
@@ -402,6 +404,8 @@ class SPDTransformer(nn.Module):
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
             ) for index, dim in enumerate(self.attention_dim[:-1])])
+
+        share_axis_metrics(self.layers, across_layers=share_metric_across_layers)
 
     def forward(
             self,

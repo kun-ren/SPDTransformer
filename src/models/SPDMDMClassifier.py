@@ -37,7 +37,10 @@ class LogEuclideanMDMHead(nn.Module):
         self.class_log_prototypes = nn.Parameter(prototypes)
         self.logit_scale_raw = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, pooled_log: torch.Tensor) -> torch.Tensor:
+    def _prepare_inputs(
+            self,
+            pooled_log: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if pooled_log.shape[-2:] != (self.spd_dim, self.spd_dim):
             raise ValueError(
                 f"Expected log-SPD matrix shape (..., {self.spd_dim}, "
@@ -49,10 +52,70 @@ class LogEuclideanMDMHead(nn.Module):
             self.class_log_prototypes
             + self.class_log_prototypes.transpose(-1, -2)
         )
+        return pooled_log, prototypes
+
+    def squared_distances(self, pooled_log: torch.Tensor) -> torch.Tensor:
+        pooled_log, prototypes = self._prepare_inputs(pooled_log)
         diff = pooled_log.unsqueeze(-3) - prototypes
-        distances = diff.square().sum(dim=(-2, -1))
+        return diff.square().sum(dim=(-2, -1))
+
+    def forward(self, pooled_log: torch.Tensor) -> torch.Tensor:
+        distances = self.squared_distances(pooled_log)
         scale = F.softplus(self.logit_scale_raw) + self.eps
         return -scale * distances
+
+    def prototype_losses(
+            self,
+            pooled_log: torch.Tensor,
+            targets: torch.Tensor,
+            margin: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return intra-class distance and inter-class margin penalties."""
+        if margin < 0:
+            raise ValueError(f"prototype margin must be non-negative, got {margin}.")
+        expected_target_shape = pooled_log.shape[:-2]
+        if tuple(targets.shape) != tuple(expected_target_shape):
+            raise ValueError(
+                "Prototype targets must match pooled feature leading dimensions: "
+                f"expected {tuple(expected_target_shape)}, got {tuple(targets.shape)}."
+            )
+        if targets.dtype != torch.long:
+            targets = targets.long()
+        if targets.numel() == 0:
+            raise ValueError("Prototype losses require at least one target.")
+        if int(targets.min()) < 0 or int(targets.max()) >= self.num_classes:
+            raise ValueError(
+                f"Prototype targets must be in [0, {self.num_classes - 1}]."
+            )
+
+        sample_distances = self.squared_distances(pooled_log)
+        intra_loss = sample_distances.gather(
+            dim=-1,
+            index=targets.unsqueeze(-1),
+        ).mean()
+
+        _, prototypes = self._prepare_inputs(pooled_log)
+        prototype_diff = (
+            prototypes.unsqueeze(1) - prototypes.unsqueeze(0)
+        )
+        pairwise_squared_distance = prototype_diff.square().sum(dim=(-2, -1))
+        pairwise_distance = torch.sqrt(
+            pairwise_squared_distance.clamp_min(self.eps)
+        )
+        pair_mask = torch.triu(
+            torch.ones(
+                self.num_classes,
+                self.num_classes,
+                device=prototypes.device,
+                dtype=torch.bool,
+            ),
+            diagonal=1,
+        )
+        inter_loss = F.relu(
+            pairwise_distance.new_tensor(float(margin))
+            - pairwise_distance[pair_mask]
+        ).square().mean()
+        return intra_loss, inter_loss
 
 
 class LogEuclideanPrototypeClassifier(nn.Module):
@@ -193,6 +256,7 @@ class SPDMDMClassifier(nn.Module):
             layer_norm_affine: bool = True,
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: str = "trace",
+            share_metric_across_layers: bool = False,
     ):
         super().__init__()
         pooling = self._normalize_pooling(pooling)
@@ -229,6 +293,7 @@ class SPDMDMClassifier(nn.Module):
             dropout=dropout,
             stage_projection_init=stage_projection_init,
             add_norm_type=add_norm_type,
+            share_metric_across_layers=share_metric_across_layers,
         )
 
         if pooling == "weighted":
@@ -265,6 +330,15 @@ class SPDMDMClassifier(nn.Module):
             x: torch.Tensor,
             return_aux: bool = True,
     ) -> tuple[Any, Any]:
+        logits, aux, _pooled_log = self.forward_with_pooled(x, return_aux=return_aux)
+        return logits, aux
+
+    def forward_with_pooled(
+            self,
+            x: torch.Tensor,
+            *,
+            return_aux: bool = True,
+    ) -> tuple[torch.Tensor, dict, torch.Tensor]:
         x_log, aux = self.encoder(
             x,
             return_log=True,
@@ -277,7 +351,7 @@ class SPDMDMClassifier(nn.Module):
             pooled_log = self._weighted_pool(x_log)
 
         logits = self._mdm_logits(pooled_log)
-        return logits, aux
+        return logits, aux, pooled_log
 
     def _mean_pool(self, x_log: torch.Tensor) -> torch.Tensor:
         token_dims = tuple(range(1, x_log.ndim - 2))

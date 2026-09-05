@@ -49,6 +49,12 @@ from src.datasets.PhysioNetMI_pretrain_finetune_preprocess import (  # noqa: E40
     selected_run_ids,
 )
 from src.models.MotorImageryDataset import MotorImageryDataset  # noqa: E402
+from src.training.domain_adversarial import (  # noqa: E402
+    SubjectDomainDataset, encode_subject_domains, domain_epoch_options,
+)
+from src.training.losses import (  # noqa: E402
+    prototype_loss_options, auxiliary_loss_history, format_auxiliary_losses,
+)
 from src.training.config_grid import expand_data_grid, expand_grid  # noqa: E402
 from src.training.train import (  # noqa: E402
     build_lr_schedulers,
@@ -159,6 +165,7 @@ def make_model(
     *,
     device: torch.device,
     dtype: torch.dtype,
+    num_domains: int | None = None,
 ) -> nn.Module:
     model = build_model(
         model_cfg=copy.deepcopy(model_cfg),
@@ -167,6 +174,7 @@ def make_model(
         time_sequence_length=int(x.shape[1]),
         frequency_sequence_length=int(x.shape[2]) if x.ndim >= 5 else 1,
         brain_region_sequence_length=int(x.shape[3]) if x.ndim >= 6 else 1,
+        num_domains=num_domains,
     )
     return model.to(device=device, dtype=dtype)
 
@@ -239,6 +247,7 @@ def train_with_early_stopping(
     if gradient_clip_norm is not None:
         gradient_clip_norm = float(gradient_clip_norm)
     condition_weight = float(cfg.get("condition_regularization_weight", 0.0))
+    loss_options = prototype_loss_options(cfg)
     patience = int(cfg.get("early_stopping_patience", 10))
     min_delta = float(cfg.get("early_stopping_min_delta", 0.0))
     if patience < 1:
@@ -247,6 +256,11 @@ def train_with_early_stopping(
     best_epoch = 0
     best_state: dict[str, torch.Tensor] | None = None
     history: list[dict[str, Any]] = []
+    print(f"    {stage_name} prototype_objective={loss_options}")
+    head = getattr(model, "domain_head", None)
+    if head is not None:
+        active = any(p.requires_grad for p in head.parameters())
+        print(f"    {stage_name} domain_adversarial={active}, source domains={head.num_domains}")
     for epoch in range(1, epochs + 1):
         metrics = train_one_epoch(
             model,
@@ -256,7 +270,9 @@ def train_with_early_stopping(
             optimizer_stiefel,
             device,
             gradient_clip_norm=gradient_clip_norm,
+            **domain_epoch_options(model, cfg, epoch, epochs),
             condition_regularization_weight=condition_weight,
+            **loss_options,
         )
         validation_metrics = evaluate(
             model,
@@ -264,6 +280,7 @@ def train_with_early_stopping(
             criterion,
             device,
             condition_regularization_weight=condition_weight,
+            **loss_options,
         )
         if scheduler_name is not None:
             metric_name = str(scheduler_metric or "validation_macro_f1")
@@ -284,6 +301,8 @@ def train_with_early_stopping(
         row = {
             "epoch": epoch,
             "train_loss": float(metrics["loss"]),
+            **auxiliary_loss_history(metrics),
+            **auxiliary_loss_history(validation_metrics, "validation"),
             "train_accuracy": float(metrics["accuracy"]),
             "train_macro_f1": float(metrics["macro_f1"]),
             "validation_loss": float(validation_metrics["loss"]),
@@ -311,6 +330,7 @@ def train_with_early_stopping(
         print(
             f"    {stage_name} epoch {epoch:03d}/{epochs}: "
             f"train loss={row['train_loss']:.4f}, "
+            f"{format_auxiliary_losses(metrics)} | "
             f"accuracy={row['train_accuracy']:.4f}, "
             f"mf1={row['train_macro_f1']:.4f} | "
             f"validation loss={row['validation_loss']:.4f}, "
@@ -683,6 +703,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     seed = int(pretrain_cfg.get("seed", 42))
     run_rows: list[dict[str, Any]] = []
+    domain_enabled = parse_bool(config["model"].get("domain_adversarial", False))
 
     for target_position, target_number in enumerate(target_subjects, start=1):
         target = format_subject_id(target_number, dataset_name)
@@ -708,6 +729,13 @@ def main(argv: list[str] | None = None) -> int:
             f"(train/validation/test={len(pretrain_train_idx)}/"
             f"{len(pretrain_validation_idx)}/{len(pretrain_test_idx)})."
         )
+        domain_subject_mapping = {}
+        source_dataset = full_dataset
+        if domain_enabled:
+            domain_labels, domain_subject_mapping = encode_subject_domains(
+                subject_labels, sorted(set(subject_labels[pretrain_train_idx].tolist())),
+            )
+            source_dataset = SubjectDomainDataset(full_dataset, domain_labels)
         set_seed(seed + target_number)
         base_model = make_model(
             config["model"],
@@ -715,9 +743,10 @@ def main(argv: list[str] | None = None) -> int:
             num_classes,
             device=device,
             dtype=dtype,
+            num_domains=len(domain_subject_mapping) if domain_enabled else None,
         )
         pretrain_loader = make_loader(
-            full_dataset,
+            source_dataset,
             pretrain_train_idx,
             batch_size=int(pretrain_cfg.get("batch_size", 128)),
             shuffle=True,
@@ -759,6 +788,7 @@ def main(argv: list[str] | None = None) -> int:
             condition_regularization_weight=float(
                 pretrain_cfg.get("condition_regularization_weight", 0.0)
             ),
+            **prototype_loss_options(pretrain_cfg),
         )
         # train_with_early_stopping has already restored the best checkpoint.
         # Re-evaluate it so the reported validation accuracy and Macro-F1 are
@@ -771,6 +801,7 @@ def main(argv: list[str] | None = None) -> int:
             condition_regularization_weight=float(
                 pretrain_cfg.get("condition_regularization_weight", 0.0)
             ),
+            **prototype_loss_options(pretrain_cfg),
         )
         print(
             f"    pretrain best checkpoint epoch {pretrain_best_epoch:03d}: "
@@ -806,6 +837,7 @@ def main(argv: list[str] | None = None) -> int:
             json.dump(
                 {
                     "excluded_target_subject": target,
+                    "domain_subject_mapping": domain_subject_mapping,
                     "train_indices": pretrain_train_idx.astype(int).tolist(),
                     "validation_indices": pretrain_validation_idx.astype(int).tolist(),
                     "test_indices": pretrain_test_idx.astype(int).tolist(),
@@ -827,6 +859,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "model_state_dict": pretrained_state,
                     "excluded_target_subject": target,
+                    "domain_subject_mapping": domain_subject_mapping,
                     "class_names": class_names,
                     "best_epoch": pretrain_best_epoch,
                     "best_validation_macro_f1": pretrain_best_validation_mf1,
@@ -878,8 +911,10 @@ def main(argv: list[str] | None = None) -> int:
                 num_classes,
                 device=device,
                 dtype=dtype,
+                num_domains=len(domain_subject_mapping) if domain_enabled else None,
             )
             model.load_state_dict(pretrained_state)
+            model.set_domain_head_trainable(False)
             fine_tune_loader = make_loader(
                 full_dataset,
                 fine_tune_indices,
@@ -930,6 +965,7 @@ def main(argv: list[str] | None = None) -> int:
                 condition_regularization_weight=float(
                     fine_tune_cfg.get("condition_regularization_weight", 0.0)
                 ),
+                **prototype_loss_options(fine_tune_cfg),
             )
             validation_predictions = predict_loader(
                 model,
@@ -939,6 +975,7 @@ def main(argv: list[str] | None = None) -> int:
                 condition_regularization_weight=float(
                     fine_tune_cfg.get("condition_regularization_weight", 0.0)
                 ),
+                **prototype_loss_options(fine_tune_cfg),
             )
             metrics = _run_metrics(predictions, num_classes=num_classes)
             present_names = [
@@ -1002,6 +1039,7 @@ def main(argv: list[str] | None = None) -> int:
                 torch.save(
                     {
                         "model_state_dict": _cpu_state_dict(model),
+                        "domain_subject_mapping": domain_subject_mapping,
                         "target_subject": target,
                         "test_run": int(test_run),
                         "class_names": class_names,

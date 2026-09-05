@@ -1,0 +1,136 @@
+# Based on main (202d37c). Preprocessing and split settings match that baseline.
+data:
+  # Dataset choices: "physionet_mi" or "bnci2014_001" (BCI Competition IV-2a).
+  dataset: ["physionet_mi"]
+  # dataset: ["bnci2014_001"]    # BCI Competition IV-2a
+  root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
+#  filter_bank:
+#    - [8, 13]
+#    - [13, 20]
+#    - [20, 30]
+  # Multiple filter-bank candidates need one more list level, for example:
+  filter_bank: [[[8, 13], [13, 20], [20, 30]]]
+  #estimator: ["lwf", "oas", "mcd"]
+  estimator: ["lwf"]
+  sfreq: [160]
+  eps: [1.0e-6]
+  covariance_signal_scale: ["auto"]
+  replace_covariance_diagonal_with_raw_energy: [true]
+  brain_region_mode: ["physionet_8x8"]
+  # Exclude S088, S089, S092, S100, S104, and S106.
+  subjects: 1-87,90-91,93-99,101-103,105,107-109
+  # BCI Competition IV-2a / MOABB BNCI2014_001 example:
+  # dataset: ["bnci2014_001"]
+  # root_dir: ["data"]
+  # subjects: 1-9
+  # sfreq: [250]
+  # events: "left_hand,right_hand,feet,tongue"
+  # sessions: "all"  # "train", "test", or "all"
+  # moabb_accept_terms: [true]
+  #channels: "FC5, FC3, FC1, FCz, FC2, FC4, FC6, C5, C3, C1, Cz, C2, C4, C6, CP5, CP3, CP1, CPz, CP2, CP4, CP6"
+  channels:
+  reject_threshold_uv: [null]  # set e.g. 500 to enable peak-to-peak epoch rejection
+  use_ica: [false]
+  ica_n_components: [13]
+  ica_random_state: [42]
+  ica_eog_channels: [""]
+  use_autoreject: [false]
+  autoreject_random_state: [42]
+  autoreject_n_jobs: [8]
+  autoreject_cv: [10]
+  # AutoReject is fitted once per subject/artifact configuration and reused
+  # across filter_bank, estimator, segment_slice, and split grid values.
+  autoreject_cache_dir: "experiments/cache/autoreject_masks"
+  autoreject_force_rebuild: false
+  baseline_correction: [null]
+  baseline_window: "-3,0"
+  # Each inner pair is one grid candidate.
+  epoch_slice: [[-2.0, 4.0]]
+  # null means non-overlapping windows (stride equals segment duration).
+  #segment_slice: [[1.0, 0.5], [0.5, 0.25], [0.25, null]]  # [segment_duration, stride_duration]
+  segment_slice: [[0.5, 0.25]]  # [segment_duration, stride_duration]
+  imaged: True
+  executed: False
+  # A flat list creates separate runs; a nested list groups tasks in one run.
+  # task_types: [unilateral_fist, both]
+  # task_types: [[unilateral_fist, both]]
+  task_types: [unilateral_fist]
+  seed: [42]
+  test_size: [0.2]
+  allow_subject_overlap: [true, false]  # use [true, false] to compare both splits
+
+model:
+  # Independent axis metrics; Q/K/V projections always remain independent.
+  # true shares same-axis metrics across layers with matching dimensions.
+  share_metric_across_layers: [false]
+  domain_adversarial: [true]
+  domain_hidden_dim: [32]
+  domain_dropout: [0.3]
+  #   16, 64 is also high
+  #head_nums: [1,4] # 4 is better than 1
+  head_nums: [4] # 4 is better than 2,6
+  attention_dim: ["8"]
+  stage_transition: [True]
+  stage_projection_init: ["random"] # "random" is much better than indentity
+  add_norm_type: ["sequence_add_norm"]
+  ffn_hidden_spd_dim: [64]
+  tau: [1.3]
+  metric: ["learnable-metric"]
+  depth: [1]
+  #classifier_type: ["mdm"]
+  classifier_type: ["mdm"]
+  pooling: ["weighted"]
+  dropout: [0.4]
+  attention_dropout: [0.0]   #   fix to 0.0 or 0.1
+  #use_position_bias: [true, false] # gated bias starts as an exact no-op
+  use_position_bias: [true] # gated bias starts as an exact no-op
+  position_bias_axes: ["time"] # gated bias; enable frequency/region only by ablation
+  position_bias_max: [0.5]
+  attention_score_target_rms: [1.0] # caps contrast without amplifying flat rows
+  attention_score_clip: [5.0]
+  layer_norm_affine: [false] # shou
+  learnable_metric_mode: ["low-rank"]
+  #learnable_metric_score: ["qgk", "distance"] # alternatives: qgk, distance
+  learnable_metric_score: ["distance"] # alternatives: qgk, distance
+  #learnable_metric_rank: [2,4] # 0=auto; ignored when mode=full
+  learnable_metric_rank: [4] # 0=auto; ignored when mode=full
+  eps: [1.0e-6]
+
+training:
+  # CE + lambda1 * class-conditional distance + lambda2 * prototype margin.
+  # Both zero disables prototype regularization.
+  prototype_intra_weight: [0.001]
+  prototype_inter_weight: [0.01]
+  prototype_margin: [1.0]
+  # GRL ramps up after warmup; subject classification trains during warmup.
+  domain_adversarial_max_weight: [0.03]
+  domain_adversarial_warmup_epochs: [10]
+  domain_adversarial_schedule: ["dann"]
+  domain_loss_normalize: [true]
+  n_splits: [5]
+  precision: ["float32"]
+  epochs: [150]
+  batch_size: [128]
+  learning_rate: [0.0022] #  0.0022 is better than 0.0020 and 0.0018
+  stiefel_learning_rate: [0.0003]  #  0.0003 best
+  lr_scheduler: ["plateau"]
+  lr_scheduler_metric: ["test_macro_f1"]
+  lr_scheduler_factor: [0.5]
+  lr_scheduler_patience: [9]
+  lr_scheduler_threshold: [0.0008]
+  lr_scheduler_threshold_mode: ["abs"]
+  lr_scheduler_min_lr: [1.0e-5]
+  stiefel_lr_scheduler_min_lr: [1.0e-6]
+  weight_decay: [0.01]  # 0.01 best in [0.008, 0.01, 0.015]
+  apply_weight_decay_to_special_parameters: [true]  # no big difference to be determined
+  gradient_clip_norm: [0.8]
+  early_stopping_patience: [ 11 ]
+  early_stopping_min_delta: [ 0.0008 ]
+  condition_regularization_weight: [0.0]
+  num_workers: [0]
+  pin_memory: [true]
+  allow_tf32: [true]
+
+output:
+  dir: experiments/results/spd_axis_prototype_domain
+  dataset_cache_dir: experiments/cache/preprocessed_datasets

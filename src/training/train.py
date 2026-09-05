@@ -38,6 +38,17 @@ from src.datasets.PhysioNetMI_preprocess import (
 )
 from src.models.MotorImageryDataset import MotorImageryDataset
 from src.models.SPDTransformerClassifier import SPDTransformerClassifier
+from src.training.domain_adversarial import (
+    encode_subject_domains,
+    unpack_supervised_batch,
+    domain_epoch_options,
+)
+from src.training.losses import (
+    compute_training_objective,
+    prototype_loss_options,
+    auxiliary_loss_history,
+    format_auxiliary_losses,
+)
 from src.training.config_grid import (
     expand_data_grid,
     expand_grid,
@@ -323,9 +334,17 @@ def make_loaders(
         num_workers: int,
         dtype: torch.dtype,
         pin_memory: bool = False,
+        domain_labels: np.ndarray | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     train_loader = DataLoader(
-        MotorImageryDataset(x[train_idx], y[train_idx], dtype=dtype),
+        MotorImageryDataset(
+            x[train_idx],
+            y[train_idx],
+            dtype=dtype,
+            domain_labels=(
+                None if domain_labels is None else domain_labels[train_idx]
+            ),
+        ),
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
@@ -333,7 +352,14 @@ def make_loaders(
         drop_last=False,
     )
     test_loader = DataLoader(
-        MotorImageryDataset(x[test_idx], y[test_idx], dtype=dtype),
+        MotorImageryDataset(
+            x[test_idx],
+            y[test_idx],
+            dtype=dtype,
+            domain_labels=(
+                None if domain_labels is None else domain_labels[test_idx]
+            ),
+        ),
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
@@ -500,6 +526,7 @@ def build_model(
         time_sequence_length,
         frequency_sequence_length,
         brain_region_sequence_length=1,
+        num_domains: int | None = None,
 ) -> SPDTransformerClassifier:
     depth = int(model_cfg.get("depth", 1))
     attention_dim = parse_attention_dims(
@@ -559,6 +586,15 @@ def build_model(
             default=False,
         ),
         tangent_use_position_embedding=tangent_use_position_embedding,
+        share_metric_across_layers=parse_bool(
+            model_cfg.get("share_metric_across_layers", False), default=False,
+        ),
+        domain_adversarial=parse_bool(
+            model_cfg.get("domain_adversarial", False), default=False,
+        ),
+        num_domains=num_domains,
+        domain_hidden_dim=int(model_cfg.get("domain_hidden_dim", 32)),
+        domain_dropout=float(model_cfg.get("domain_dropout", 0.3)),
     )
 
 
@@ -686,6 +722,9 @@ def evaluate(
         criterion: nn.Module,
         device: torch.device,
         condition_regularization_weight: float = 1e-3,
+        prototype_intra_weight: float = 0.0,
+        prototype_inter_weight: float = 0.0,
+        prototype_margin: float = 1.0,
 ) -> dict[str, float]:
     predictions = predict_loader(
         model,
@@ -693,9 +732,16 @@ def evaluate(
         criterion,
         device,
         condition_regularization_weight=condition_regularization_weight,
+        prototype_intra_weight=prototype_intra_weight,
+        prototype_inter_weight=prototype_inter_weight,
+        prototype_margin=prototype_margin,
     )
     return {
         "loss": predictions["loss"],
+        "cross_entropy": predictions["cross_entropy"],
+        "condition_loss": predictions["condition_loss"],
+        "prototype_intra_loss": predictions["prototype_intra_loss"],
+        "prototype_inter_loss": predictions["prototype_inter_loss"],
         "accuracy": predictions["accuracy"],
         "macro_f1": predictions["macro_f1"],
         "cohen_kappa": predictions["cohen_kappa"],
@@ -708,35 +754,44 @@ def predict_loader(
         criterion: nn.Module,
         device: torch.device,
         condition_regularization_weight: float = 1e-3,
+        prototype_intra_weight: float = 0.0,
+        prototype_inter_weight: float = 0.0,
+        prototype_margin: float = 1.0,
 ) -> dict[str, Any]:
     model.eval()
     total_loss = 0.0
+    component_totals = {
+        "cross_entropy": 0.0,
+        "condition_loss": 0.0,
+        "prototype_intra_loss": 0.0,
+        "prototype_inter_loss": 0.0,
+    }
     y_true = []
     y_pred = []
 
     with torch.no_grad():
         non_blocking = device.type == "cuda"
-        for x_batch, y_batch in loader:
+        for batch in loader:
+            x_batch, y_batch, _domain_batch = unpack_supervised_batch(batch)
             x_batch = x_batch.to(device, non_blocking=non_blocking)
             y_batch = y_batch.to(device, non_blocking=non_blocking)
 
-            use_condition_regularization = condition_regularization_weight > 0
-            logits, aux = model(
+            logits, _aux, losses = compute_training_objective(
+                model,
                 x_batch,
-                return_aux=use_condition_regularization,
+                y_batch,
+                criterion,
+                condition_regularization_weight=condition_regularization_weight,
+                condition_regularization_fn=condition_regularization,
+                prototype_intra_weight=prototype_intra_weight,
+                prototype_inter_weight=prototype_inter_weight,
+                prototype_margin=prototype_margin,
             )
-            cond_loss = logits.new_tensor(0.0)
-            if use_condition_regularization and aux:
-                for name, P_bimap in aux.items():
-                    cond_loss = cond_loss + condition_regularization(P_bimap)
-                cond_loss = cond_loss / len(aux)
-
-            loss = (
-                    criterion(logits, y_batch)
-                    + condition_regularization_weight * cond_loss
-            )
+            loss = losses["loss"]
 
             total_loss += loss.item() * y_batch.size(0)
+            for name in component_totals:
+                component_totals[name] += losses[name].item() * y_batch.size(0)
             y_true.extend(y_batch.cpu().numpy().tolist())
             y_pred.extend(logits.argmax(dim=1).cpu().numpy().tolist())
 
@@ -744,6 +799,10 @@ def predict_loader(
     y_pred = np.asarray(y_pred, dtype=np.int64)
     return {
         "loss": total_loss / len(y_true),
+        **{
+            name: value / len(y_true)
+            for name, value in component_totals.items()
+        },
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "macro_f1": float(
             f1_score(y_true, y_pred, average="macro", zero_division=0)
@@ -832,35 +891,70 @@ def train_one_epoch(
         gradient_clip_norm: float | None = None,
         debug_anomaly: bool = False,
         condition_regularization_weight: float = 1e-3,
+        prototype_intra_weight: float = 0.0,
+        prototype_inter_weight: float = 0.0,
+        prototype_margin: float = 1.0,
+        domain_adversarial_coefficient: float | None = None,
+        domain_loss_normalize: bool = True,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
+    component_totals = {
+        "cross_entropy": 0.0,
+        "condition_loss": 0.0,
+        "prototype_intra_loss": 0.0,
+        "prototype_inter_loss": 0.0,
+        "domain_loss": 0.0,
+        "domain_accuracy": 0.0,
+        "domain_adversarial_coefficient": 0.0,
+    }
     y_true = []
     y_pred = []
     non_blocking = device.type == "cuda"
 
-    for x_batch, y_batch in loader:
+    for batch in loader:
+        x_batch, y_batch, domain_batch = unpack_supervised_batch(batch)
         x_batch = x_batch.to(device, non_blocking=non_blocking)
         y_batch = y_batch.to(device, non_blocking=non_blocking)
-        use_condition_regularization = condition_regularization_weight > 0
-        logits, aux = model(
+        if domain_adversarial_coefficient is not None:
+            if domain_batch is None:
+                raise ValueError(
+                    "Domain adversarial training is enabled, but the train "
+                    "loader does not provide domain labels."
+                )
+            domain_batch = domain_batch.to(
+                device,
+                non_blocking=non_blocking,
+            )
+        logits, _aux, losses = compute_training_objective(
+            model,
             x_batch,
-            return_aux=use_condition_regularization,
+            y_batch,
+            criterion,
+            condition_regularization_weight=condition_regularization_weight,
+            condition_regularization_fn=condition_regularization,
+            prototype_intra_weight=prototype_intra_weight,
+            prototype_inter_weight=prototype_inter_weight,
+            prototype_margin=prototype_margin,
+            domain_targets=(
+                domain_batch
+                if domain_adversarial_coefficient is not None
+                else None
+            ),
+            domain_adversarial_coefficient=(
+                domain_adversarial_coefficient or 0.0
+            ),
+            domain_loss_normalize=domain_loss_normalize,
         )
-        cls_loss = criterion(logits, y_batch)
-
-        cond_loss = logits.new_tensor(0.0)
-        if use_condition_regularization and aux:
-            for name, P_bimap in aux.items():
-                cond_loss = cond_loss + condition_regularization(P_bimap)
-            cond_loss = cond_loss / len(aux)
-
-        loss = cls_loss + condition_regularization_weight * cond_loss
+        loss = losses["loss"]
         if not torch.isfinite(loss):
             raise RuntimeError(
                 "Non-finite training loss detected: "
-                f"cls_loss={cls_loss.item():.6e} "
-                f"cond_loss={cond_loss.item():.6e} "
+                f"cross_entropy={losses['cross_entropy'].item():.6e} "
+                f"cond_loss={losses['condition_loss'].item():.6e} "
+                f"prototype_intra={losses['prototype_intra_loss'].item():.6e} "
+                f"prototype_inter={losses['prototype_inter_loss'].item():.6e} "
+                f"domain={losses['domain_loss'].item():.6e} "
                 f"loss={loss.item():.6e}. "
                 "Check input SPD matrices, learning rate, and model numerical stability."
             )
@@ -897,11 +991,17 @@ def train_one_epoch(
         assert_model_finite(model, "optimizer step")
 
         total_loss += loss.item() * y_batch.size(0)
+        for name in component_totals:
+            component_totals[name] += losses[name].item() * y_batch.size(0)
         y_true.extend(y_batch.detach().cpu().numpy().tolist())
         y_pred.extend(logits.argmax(dim=1).detach().cpu().numpy().tolist())
 
     return {
         "loss": total_loss / len(y_true),
+        **{
+            name: value / len(y_true)
+            for name, value in component_totals.items()
+        },
         "accuracy": accuracy_score(y_true, y_pred),
         "macro_f1": f1_score(y_true, y_pred, average="macro", zero_division=0),
     }
@@ -1108,6 +1208,15 @@ def train_fold(
         allow_subject_overlap=allow_subject_overlap,
     )
 
+    domain_enabled = parse_bool(model_cfg.get("domain_adversarial", False))
+    domain_labels = None
+    domain_subject_mapping = {}
+    if domain_enabled:
+        domain_labels, domain_subject_mapping = encode_subject_domains(
+            subject_labels, sorted(train_subjects),
+        )
+    loss_options = prototype_loss_options(training_cfg)
+
     train_loader, test_loader = make_loaders(
         x=x,
         y=y,
@@ -1116,6 +1225,7 @@ def train_fold(
         batch_size=int(training_cfg.get("batch_size", 16)),
         num_workers=int(training_cfg.get("num_workers", 0)),
         dtype=dtype,
+        domain_labels=domain_labels,
         pin_memory=parse_bool(
             training_cfg.get("pin_memory", device.type == "cuda"),
             default=device.type == "cuda",
@@ -1132,6 +1242,7 @@ def train_fold(
         frequency_sequence_length=frequency_sequence_length,
         brain_region_sequence_length=brain_region_sequence_length,
         num_classes=len(class_names),
+        num_domains=len(domain_subject_mapping) if domain_enabled else None,
     ).to(device=device, dtype=dtype)
 
     criterion = nn.CrossEntropyLoss()
@@ -1241,6 +1352,12 @@ def train_fold(
         f"samples train/test={len(train_idx)}/{len(test_idx)}"
     )
 
+    print(f"  prototype_objective={loss_options}")
+    if domain_enabled:
+        print(
+            f"  source domains={len(domain_subject_mapping)}, "
+            f"uniform chance={1.0 / len(domain_subject_mapping):.4f}"
+        )
     print(f"thread: {torch.get_num_threads()}")
     print(torch.get_num_interop_threads())
 
@@ -1254,7 +1371,9 @@ def train_fold(
             device,
             gradient_clip_norm=gradient_clip_norm,
             debug_anomaly=debug_anomaly,
+            **domain_epoch_options(model, training_cfg, epoch, epochs),
             condition_regularization_weight=condition_regularization_weight,
+            **loss_options,
         )
         test_metrics = evaluate(
             model,
@@ -1262,6 +1381,7 @@ def train_fold(
             criterion,
             device,
             condition_regularization_weight=condition_regularization_weight,
+            **loss_options,
         )
 
         if lr_scheduler_name is not None:
@@ -1292,6 +1412,8 @@ def train_fold(
         row = {
             "epoch": epoch,
             "train_loss": train_metrics["loss"],
+            **auxiliary_loss_history(train_metrics),
+            **auxiliary_loss_history(test_metrics, "test"),
             "train_accuracy": train_metrics["accuracy"],
             "train_macro_f1": train_metrics["macro_f1"],
             "test_loss": test_metrics["loss"],
@@ -1314,6 +1436,7 @@ def train_fold(
                     "model_state_dict": model.state_dict(),
                     "class_names": class_names,
                     "config": experiment_cfg,
+                    "domain_subject_mapping": domain_subject_mapping,
                     "best_epoch": best_epoch,
                     "best_test_macro_f1": best_test_macro_f1,
                 },
@@ -1323,6 +1446,7 @@ def train_fold(
         print(
             f"  epoch {epoch:03d}/{epochs} | "
             f"train loss={train_metrics['loss']:.4f} "
+            f"{format_auxiliary_losses(train_metrics)} "
             f"acc={train_metrics['accuracy']:.4f} "
             f"mf1={train_metrics['macro_f1']:.4f} | "
             f"test loss={test_metrics['loss']:.4f} "
@@ -1358,6 +1482,7 @@ def train_fold(
             criterion,
             device,
             condition_regularization_weight=condition_regularization_weight,
+            **loss_options,
         ),
         "test": predict_loader(
             model,
@@ -1365,6 +1490,7 @@ def train_fold(
             criterion,
             device,
             condition_regularization_weight=condition_regularization_weight,
+            **loss_options,
         ),
     }
     save_per_class_metrics(
@@ -1397,6 +1523,7 @@ def train_fold(
         "n_test": int(len(test_idx)),
         "allow_subject_overlap": allow_subject_overlap,
         "n_train_subjects": int(len(train_subjects)),
+        "domain_subject_mapping": domain_subject_mapping,
         "n_test_subjects": int(len(test_subjects)),
     }
 

@@ -3,6 +3,7 @@ from typing import Literal
 import torch
 from torch import nn
 
+from src.models.DomainAdversarial import DomainAdversarialHead
 from src.models.SPDMDMClassifier import SPDMDMClassifier
 from src.models.SPDPoolingClassifier import SPDPoolingClassifier
 
@@ -65,6 +66,11 @@ class SPDTransformerClassifier(nn.Module):
             tangent_activation: Literal["relu", "gelu"] = "gelu",
             tangent_norm_first: bool = False,
             tangent_use_position_embedding: bool | None = None,
+            share_metric_across_layers: bool = False,
+            domain_adversarial: bool = False,
+            num_domains: int | None = None,
+            domain_hidden_dim: int = 32,
+            domain_dropout: float = 0.3,
     ):
         super().__init__()
         self.debug_tensor_stats = debug_tensor_stats
@@ -146,6 +152,7 @@ class SPDTransformerClassifier(nn.Module):
                 layer_norm_affine=layer_norm_affine,
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
+                share_metric_across_layers=share_metric_across_layers,
             )
         elif classifier_type == "mdm":
             self.model = SPDMDMClassifier(
@@ -175,9 +182,38 @@ class SPDTransformerClassifier(nn.Module):
                 layer_norm_affine=layer_norm_affine,
                 stage_projection_init=stage_projection_init,
                 add_norm_type=add_norm_type,
+                share_metric_across_layers=share_metric_across_layers,
             )
         else:
             self.model = None
+
+        if not isinstance(domain_adversarial, bool):
+            raise TypeError(
+                "domain_adversarial must be a bool, "
+                f"got {type(domain_adversarial).__name__}."
+            )
+        self.domain_adversarial = domain_adversarial
+        if self.domain_adversarial:
+            if self.encoder_type != "spd" or self.classifier_type not in {
+                    "pooling",
+                    "mdm",
+            }:
+                raise ValueError(
+                    "Domain adversarial training requires encoder_type='spd' "
+                    "and classifier_type='pooling' or 'mdm'."
+                )
+            if num_domains is None:
+                raise ValueError(
+                    "num_domains is required when domain_adversarial=true."
+                )
+            self.domain_head = DomainAdversarialHead(
+                spd_dim=self.model.transformer_out_dim,
+                num_domains=int(num_domains),
+                hidden_dim=int(domain_hidden_dim),
+                dropout=float(domain_dropout),
+            )
+        else:
+            self.domain_head = None
 
     def forward(
             self,
@@ -188,3 +224,80 @@ class SPDTransformerClassifier(nn.Module):
             logits = self.model(x, return_aux=False)
             return logits, {}
         return self.model(x, return_aux=return_aux)
+
+    def forward_with_prototype_losses(
+            self,
+            x: torch.Tensor,
+            targets: torch.Tensor,
+            *,
+            prototype_margin: float,
+            return_aux: bool = True,
+    ) -> tuple[torch.Tensor, dict, torch.Tensor, torch.Tensor]:
+        logits, aux, intra_loss, inter_loss, _domain_logits = (
+            self.forward_with_training_outputs(
+                x,
+                targets,
+                prototype_margin=prototype_margin,
+                compute_prototype_losses=True,
+                compute_domain_logits=False,
+                domain_reversal_coefficient=0.0,
+                return_aux=return_aux,
+            )
+        )
+        return logits, aux, intra_loss, inter_loss
+
+    def forward_with_training_outputs(
+            self,
+            x: torch.Tensor,
+            targets: torch.Tensor,
+            *,
+            prototype_margin: float,
+            compute_prototype_losses: bool,
+            compute_domain_logits: bool,
+            domain_reversal_coefficient: float,
+            return_aux: bool = True,
+    ) -> tuple[
+        torch.Tensor,
+        dict,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+    ]:
+        if self.encoder_type != "spd" or self.model is None:
+            raise ValueError(
+                "Training auxiliary outputs require encoder_type='spd'."
+            )
+        logits, aux, pooled_log = self.model.forward_with_pooled(
+            x,
+            return_aux=return_aux,
+        )
+        intra_loss = logits.new_zeros(())
+        inter_loss = logits.new_zeros(())
+        if compute_prototype_losses:
+            if self.classifier_type != "mdm":
+                raise ValueError(
+                    "Prototype losses require classifier_type='mdm'."
+                )
+            intra_loss, inter_loss = self.model.mdm_head.prototype_losses(
+                pooled_log,
+                targets,
+                margin=prototype_margin,
+            )
+
+        domain_logits = None
+        if compute_domain_logits:
+            if self.domain_head is None:
+                raise ValueError(
+                    "Domain labels were provided but domain_adversarial is disabled."
+                )
+            domain_logits = self.domain_head(
+                pooled_log,
+                reversal_coefficient=domain_reversal_coefficient,
+            )
+        return logits, aux, intra_loss, inter_loss, domain_logits
+
+    def set_domain_head_trainable(self, trainable: bool) -> None:
+        if self.domain_head is None:
+            return
+        for parameter in self.domain_head.parameters():
+            parameter.requires_grad_(trainable)
