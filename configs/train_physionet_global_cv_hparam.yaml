@@ -17,7 +17,7 @@ data:
   sfreq: [160]
   eps: [1.0e-6]
   covariance_signal_scale: ["auto"]
-  replace_covariance_diagonal_with_raw_energy: [true,false]
+  replace_covariance_diagonal_with_raw_energy: [false]
   brain_region_mode: ["physionet_8x8"]
   covariance_output_dtype: ["float32"]
   channels: [null]
@@ -25,7 +25,8 @@ data:
   imaged: [true]
   executed: [false]
   task_types: [[unilateral_fist]]
-  epoch_slice: [[-2.0, 4.0],[-1.5, 3.5]]
+  #epoch_slice: [[-2.0, 4.0],[-1.5, 3.5]]
+  epoch_slice: [[-1.5, 3.5]]
   segment_slice: [[0.5, 0.25]]
 
   reject_threshold_uv: [null]
