@@ -386,9 +386,21 @@ class SPDMDMClassifier(nn.Module):
             x: torch.Tensor,
             return_aux: bool = True,
     ) -> tuple[Any, Any]:
+        logits, aux, _pooled_log = self.forward_with_pooled(
+            x,
+            return_aux=return_aux,
+        )
+        return logits, aux
+
+    def forward_with_pooled(
+            self,
+            x: torch.Tensor,
+            *,
+            return_aux: bool = True,
+    ) -> tuple[torch.Tensor, dict, torch.Tensor]:
         pooled_log, aux = self._encode_and_pool(x, return_aux=return_aux)
         logits = self._mdm_logits(pooled_log)
-        return logits, aux
+        return logits, aux, pooled_log
 
     def forward_with_prototype_losses(
             self,
@@ -398,8 +410,10 @@ class SPDMDMClassifier(nn.Module):
             prototype_margin: float,
             return_aux: bool = True,
     ) -> tuple[torch.Tensor, dict, torch.Tensor, torch.Tensor]:
-        pooled_log, aux = self._encode_and_pool(x, return_aux=return_aux)
-        logits = self._mdm_logits(pooled_log)
+        logits, aux, pooled_log = self.forward_with_pooled(
+            x,
+            return_aux=return_aux,
+        )
         intra_loss, inter_loss = self.mdm_head.prototype_losses(
             pooled_log,
             targets,

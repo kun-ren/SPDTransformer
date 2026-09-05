@@ -46,7 +46,12 @@ from src.datasets.PhysioNetMI_pretrain_finetune_preprocess import (  # noqa: E40
 )
 from src.models.MotorImageryDataset import MotorImageryDataset  # noqa: E402
 from src.training.config_grid import expand_data_grid, expand_grid  # noqa: E402
-from src.training.losses import prototype_loss_settings  # noqa: E402
+from src.training.domain_adversarial import encode_subject_domains  # noqa: E402
+from src.training.losses import (  # noqa: E402
+    domain_adversarial_coefficient,
+    domain_adversarial_settings,
+    prototype_loss_settings,
+)
 from src.training.train import (  # noqa: E402
     build_lr_schedulers,
     build_model,
@@ -156,6 +161,7 @@ def make_model(
     *,
     device: torch.device,
     dtype: torch.dtype,
+    num_domains: int | None = None,
 ) -> nn.Module:
     model = build_model(
         model_cfg=copy.deepcopy(model_cfg),
@@ -164,6 +170,7 @@ def make_model(
         time_sequence_length=int(x.shape[1]),
         frequency_sequence_length=int(x.shape[2]) if x.ndim >= 5 else 1,
         brain_region_sequence_length=int(x.shape[3]) if x.ndim >= 6 else 1,
+        num_domains=num_domains,
     )
     return model.to(device=device, dtype=dtype)
 
@@ -230,6 +237,19 @@ def train_with_early_stopping(
     prototype_intra_weight, prototype_inter_weight, prototype_margin = (
         prototype_loss_settings(cfg)
     )
+    domain_enabled = getattr(model, "domain_head", None) is not None
+    if domain_enabled:
+        (
+            domain_max_weight,
+            domain_warmup_epochs,
+            domain_schedule,
+            domain_loss_normalize,
+        ) = domain_adversarial_settings(cfg)
+    else:
+        domain_max_weight = 0.0
+        domain_warmup_epochs = 0
+        domain_schedule = "constant"
+        domain_loss_normalize = True
     patience = int(cfg.get("early_stopping_patience", 10))
     min_delta = float(cfg.get("early_stopping_min_delta", 0.0))
     if patience < 1:
@@ -244,7 +264,27 @@ def train_with_early_stopping(
         f"+ {prototype_inter_weight:g}*prototype_inter_margin "
         f"(margin={prototype_margin:g})."
     )
+    if domain_enabled:
+        print(
+            f"    {stage_name} domain_adversarial=enabled, "
+            f"domains={model.domain_head.num_domains}, "
+            f"max_weight={domain_max_weight:g}, "
+            f"warmup_epochs={domain_warmup_epochs}, "
+            f"schedule={domain_schedule}, "
+            f"normalize_loss={domain_loss_normalize}."
+        )
     for epoch in range(1, epochs + 1):
+        domain_coefficient = (
+            domain_adversarial_coefficient(
+                epoch=epoch,
+                total_epochs=epochs,
+                max_weight=domain_max_weight,
+                warmup_epochs=domain_warmup_epochs,
+                schedule=domain_schedule,
+            )
+            if domain_enabled
+            else None
+        )
         metrics = train_one_epoch(
             model,
             train_loader,
@@ -257,6 +297,8 @@ def train_with_early_stopping(
             prototype_intra_weight=prototype_intra_weight,
             prototype_inter_weight=prototype_inter_weight,
             prototype_margin=prototype_margin,
+            domain_adversarial_coefficient=domain_coefficient,
+            domain_loss_normalize=domain_loss_normalize,
         )
         validation_metrics = evaluate(
             model,
@@ -293,6 +335,11 @@ def train_with_early_stopping(
             ),
             "train_prototype_inter_loss": float(
                 metrics["prototype_inter_loss"]
+            ),
+            "train_domain_loss": float(metrics["domain_loss"]),
+            "train_domain_accuracy": float(metrics["domain_accuracy"]),
+            "domain_adversarial_coefficient": float(
+                metrics["domain_adversarial_coefficient"]
             ),
             "train_accuracy": float(metrics["accuracy"]),
             "train_macro_f1": float(metrics["macro_f1"]),
@@ -333,6 +380,9 @@ def train_with_early_stopping(
             f"ce={row['train_cross_entropy']:.4f}, "
             f"intra={row['train_prototype_intra_loss']:.4f}, "
             f"inter={row['train_prototype_inter_loss']:.4f}, "
+            f"domain={row['train_domain_loss']:.4f}, "
+            f"domain_acc={row['train_domain_accuracy']:.4f}, "
+            f"grl={row['domain_adversarial_coefficient']:.4f}, "
             f"accuracy={row['train_accuracy']:.4f}, "
             f"mf1={row['train_macro_f1']:.4f} | "
             f"validation loss={row['validation_loss']:.4f}, "
@@ -841,7 +891,23 @@ def main(argv: list[str] | None = None) -> int:
                 "high" if pretrain_allow_tf32 else "highest"
             )
 
-    full_dataset = MotorImageryDataset(x, y, dtype=dtype)
+    domain_enabled = parse_bool(
+        config["model"].get("domain_adversarial", False),
+        default=False,
+    )
+    domain_subject_mapping: dict[str, int] = {}
+    domain_labels = None
+    if domain_enabled:
+        domain_labels, domain_subject_mapping = encode_subject_domains(
+            subject_labels,
+            global_train_subjects,
+        )
+    full_dataset = MotorImageryDataset(
+        x,
+        y,
+        dtype=dtype,
+        domain_labels=domain_labels,
+    )
     num_workers = int(pretrain_cfg.get("num_workers", 0))
     pin_memory = parse_bool(
         pretrain_cfg.get("pin_memory", device.type == "cuda"),
@@ -870,6 +936,7 @@ def main(argv: list[str] | None = None) -> int:
                 "resolved_protocol": {
                     "global_train_subjects": global_train_subjects,
                     "global_test_subjects": global_test_subjects,
+                    "domain_subject_mapping": domain_subject_mapping,
                 },
             },
             handle,
@@ -882,13 +949,24 @@ def main(argv: list[str] | None = None) -> int:
         f"held-out cross-subject trials={len(global_test_idx)}."
     )
     set_seed(pretrain_seed)
-    global_model = make_model(
-        config["model"],
-        x,
-        num_classes,
-        device=device,
-        dtype=dtype,
-    )
+    if domain_enabled:
+        global_model = make_model(
+            config["model"],
+            x,
+            num_classes,
+            device=device,
+            dtype=dtype,
+            num_domains=len(domain_subject_mapping),
+        )
+    else:
+        # Keep the legacy call shape for existing custom model factories.
+        global_model = make_model(
+            config["model"],
+            x,
+            num_classes,
+            device=device,
+            dtype=dtype,
+        )
     global_train_loader = make_loader(
         full_dataset,
         global_train_idx,
@@ -1005,6 +1083,7 @@ def main(argv: list[str] | None = None) -> int:
                 "global_train_indices": global_train_idx.astype(int).tolist(),
                 "global_validation_indices": global_validation_idx.astype(int).tolist(),
                 "global_test_indices": global_test_idx.astype(int).tolist(),
+                "domain_subject_mapping": domain_subject_mapping,
             },
             handle,
             indent=2,
@@ -1043,6 +1122,7 @@ def main(argv: list[str] | None = None) -> int:
                 "best_validation_macro_f1": global_best_validation_mf1,
                 "global_train_subjects": global_train_subjects,
                 "global_test_subjects": global_test_subjects,
+                "domain_subject_mapping": domain_subject_mapping,
             },
             global_dir / "global_model.pt",
         )
@@ -1084,14 +1164,31 @@ def main(argv: list[str] | None = None) -> int:
             f"global-before accuracy={before_metrics['accuracy']:.4f}."
         )
         set_seed(subject_seed)
-        model = make_model(
-            config["model"],
-            x,
-            num_classes,
-            device=device,
-            dtype=dtype,
-        )
+        if domain_enabled:
+            model = make_model(
+                config["model"],
+                x,
+                num_classes,
+                device=device,
+                dtype=dtype,
+                num_domains=len(domain_subject_mapping),
+            )
+        else:
+            model = make_model(
+                config["model"],
+                x,
+                num_classes,
+                device=device,
+                dtype=dtype,
+            )
         model.load_state_dict(global_state)
+        set_domain_head_trainable = getattr(
+            model,
+            "set_domain_head_trainable",
+            None,
+        )
+        if callable(set_domain_head_trainable):
+            set_domain_head_trainable(False)
         fine_tune_loader = make_loader(
             full_dataset,
             fine_tune_indices,
@@ -1181,6 +1278,7 @@ def main(argv: list[str] | None = None) -> int:
                         if save_global_checkpoint
                         else "in_memory_global_best_state"
                     ),
+                    "domain_adversarial_during_fine_tune": False,
                     "fine_tune_indices": fine_tune_indices.astype(int).tolist(),
                     "test_indices": test_indices.astype(int).tolist(),
                 },
@@ -1200,6 +1298,7 @@ def main(argv: list[str] | None = None) -> int:
                         if save_global_checkpoint
                         else "in_memory_global_best_state"
                     ),
+                    "domain_adversarial_during_fine_tune": False,
                 },
                 subject_dir / "fine_tuned_model.pt",
             )

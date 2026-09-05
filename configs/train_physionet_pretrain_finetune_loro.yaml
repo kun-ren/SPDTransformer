@@ -71,6 +71,11 @@ model:
   pooling_uniform_mix: [0.1]
   # The same gate is trained globally and retained during subject fine-tuning.
   pooling_mean_anchor: [true]
+  # The domain branch is active only during Global pretraining. It predicts
+  # Global-train subject IDs from the pooled tangent representation.
+  domain_adversarial: [true]
+  domain_hidden_dim: [32]
+  domain_dropout: [0.3]
   dropout: [0.4]
   attention_dropout: [0.1]
   head_dropout: [0.1]
@@ -122,6 +127,10 @@ pretrain:
   prototype_intra_weight: [0.001]
   prototype_inter_weight: [0.01]
   prototype_margin: [1.0]
+  domain_adversarial_max_weight: [0.03]
+  domain_adversarial_warmup_epochs: [10]
+  domain_adversarial_schedule: ["dann"]
+  domain_loss_normalize: [true]
   seed: [42]
   num_workers: [0]
   pin_memory: [true]
@@ -131,6 +140,7 @@ fine_tune:
   # Traverse every Global-test subject. For each one, restart from the same
   # Global checkpoint, pool all retained runs, and make one stratified split.
   # There is no fine-tune validation dataset.
+  # The loaded Global domain head is frozen and skipped for every target.
   train_size: [0.7]
   test_size: [0.3]
   seed: [42]

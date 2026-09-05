@@ -174,14 +174,23 @@ class SPDPoolingClassifier(SPDClassifierBase):
             x: torch.Tensor,
             return_aux: bool = True,
     ) -> tuple[Any, Any]:
+        logits, aux, _pooled_log = self.forward_with_pooled(
+            x,
+            return_aux=return_aux,
+        )
+        return logits, aux
 
+    def forward_with_pooled(
+            self,
+            x: torch.Tensor,
+            *,
+            return_aux: bool = True,
+    ) -> tuple[torch.Tensor, dict, torch.Tensor]:
         x_log, aux = self.encoder(
             x,
             return_log=True,
             return_aux=return_aux,
         )
-
-
         if self.pooling == "mean":
             pooled_log = self._mean_pool(x_log)
         else:
@@ -189,8 +198,7 @@ class SPDPoolingClassifier(SPDClassifierBase):
         features = self.upper_triangular_vectorize(pooled_log)
 
         logits = self.classifier(features)
-
-        return logits, aux
+        return logits, aux, pooled_log
 
     def _mean_pool(self, x_log: torch.Tensor) -> torch.Tensor:
         """

@@ -12,12 +12,12 @@ data:
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
   subjects: 1-87,90-91,93-99,101-103,105,107-109
 
-  filter_bank: [[[8, 13], [13, 20], [20, 30]]]
+  filter_bank: [[[5, 13], [13, 20], [20, 35]]]
   estimator: ["lwf"]
   sfreq: [160]
   eps: [1.0e-6]
   covariance_signal_scale: ["auto"]
-  replace_covariance_diagonal_with_raw_energy: [true]
+  replace_covariance_diagonal_with_raw_energy: [true,false]
   brain_region_mode: ["physionet_8x8"]
   covariance_output_dtype: ["float32"]
   channels: [null]
@@ -25,7 +25,7 @@ data:
   imaged: [true]
   executed: [false]
   task_types: [[unilateral_fist]]
-  epoch_slice: [[-2.0, 4.0]]
+  epoch_slice: [[-2.0, 4.0],[-1.5, 3.5]]
   segment_slice: [[0.5, 0.25]]
 
   reject_threshold_uv: [null]
@@ -44,7 +44,7 @@ data:
 
 model:
   head_nums: [1]
-  attention_dim: ["8, 8, 8, 6, 6"]
+  attention_dim: ["8, 8, 8, 8, 8,8"]
   # Both encoder layers preserve the 8x8 SPD dimension.
   stage_transition: [true]
   stage_projection_init: ["random"]
@@ -60,7 +60,7 @@ model:
   # Matching 8x8 layers can share corresponding axis metrics across layers.
   # With shared axes, all axes in shared layers use one common metric.
   share_metric_across_layers: [False]
-  depth: [5]
+  depth: [6]
   classifier_type: ["mdm"]
   pooling: ["weighted"]
   pooling_weight_mode: ["factorized"]
@@ -69,12 +69,18 @@ model:
   # Set false to recover the original pure weighted-pooling path.
   pooling_mean_anchor: [true]
 
+  # Predict source-subject IDs through a gradient-reversal branch attached to
+  # the pooled tangent feature. Held-out fold subjects are never domain labels.
+  domain_adversarial: [true]
+  domain_hidden_dim: [32]
+  domain_dropout: [0.3]
+
   # Hyperparameter search values. Two values create two model candidates.
   dropout: [0.2]
 
   attention_dropout: [0.1]
   head_dropout: [0.0]
-  use_position_bias: [true]
+  use_position_bias: [true, false]
   position_bias_axes: ["time"]
   position_bias_max: [0.5]
   attention_score_target_rms: [1.0]
@@ -83,7 +89,7 @@ model:
   learnable_metric_mode: ["low-rank"]
   learnable_metric_score: ["distance"]
   # Shared upper bound for the learnable axis metrics.
-  learnable_metric_rank: [4]
+  learnable_metric_rank: [4, 6]
   eps: [1.0e-6]
 
 training:
@@ -94,7 +100,7 @@ training:
   cv_seed: [42]
 
   # Fixed training only. Test data never controls epochs or learning rate.
-  epochs: [150]
+  epochs: [200]
   batch_size: [128]
   precision: ["float32"]
 
@@ -107,7 +113,7 @@ training:
   # not leak test-subject information into training. Set ["none"] to disable.
   lr_scheduler: [ "multistep" ]
   lr_scheduler_gamma: 0.5
-  lr_scheduler_milestones: [ [ 30, 55, 80, 110 ] ]
+  lr_scheduler_milestones: [ [ 30, 50, 70, 150 ] ]
   lr_scheduler_min_lr: [1.0e-5]
   stiefel_lr_scheduler_min_lr: [1.0e-6]
   weight_decay: [0.01]
@@ -115,9 +121,15 @@ training:
   gradient_clip_norm: [10.0]
   condition_regularization_weight: [0.0]
   # CE + lambda1 * intra distance + lambda2 * inter-prototype margin.
-  prototype_intra_weight: [0.001]
+  prototype_intra_weight: [0.002]
   prototype_inter_weight: [0.01]
   prototype_margin: [1.0]
+  # Effective reversed encoder-gradient weight. Domain CE itself is normalized
+  # by log(number of source subjects), while the domain head trains normally.
+  domain_adversarial_max_weight: [0.03]
+  domain_adversarial_warmup_epochs: [10]
+  domain_adversarial_schedule: ["dann"]
+  domain_loss_normalize: [true]
   seed: [42]
   num_workers: [0]
   pin_memory: [true]

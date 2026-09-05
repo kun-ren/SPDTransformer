@@ -44,8 +44,14 @@ from src.training.config_grid import (
     normalize_data_time_config,
     normalize_filter_bank,
 )
+from src.training.domain_adversarial import (
+    encode_subject_domains,
+    unpack_supervised_batch,
+)
 from src.training.losses import (
     compute_training_objective,
+    domain_adversarial_coefficient,
+    domain_adversarial_settings,
     prototype_loss_settings,
 )
 
@@ -327,9 +333,17 @@ def make_loaders(
         num_workers: int,
         dtype: torch.dtype,
         pin_memory: bool = False,
+        domain_labels: np.ndarray | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     train_loader = DataLoader(
-        MotorImageryDataset(x[train_idx], y[train_idx], dtype=dtype),
+        MotorImageryDataset(
+            x[train_idx],
+            y[train_idx],
+            dtype=dtype,
+            domain_labels=(
+                None if domain_labels is None else domain_labels[train_idx]
+            ),
+        ),
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
@@ -337,7 +351,14 @@ def make_loaders(
         drop_last=False,
     )
     test_loader = DataLoader(
-        MotorImageryDataset(x[test_idx], y[test_idx], dtype=dtype),
+        MotorImageryDataset(
+            x[test_idx],
+            y[test_idx],
+            dtype=dtype,
+            domain_labels=(
+                None if domain_labels is None else domain_labels[test_idx]
+            ),
+        ),
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
@@ -504,6 +525,7 @@ def build_model(
         time_sequence_length,
         frequency_sequence_length,
         brain_region_sequence_length=1,
+        num_domains: int | None = None,
 ) -> SPDTransformerClassifier:
     if "share_metric_across_heads" in model_cfg:
         raise ValueError(
@@ -596,6 +618,13 @@ def build_model(
             model_cfg.get("pooling_mean_anchor", False),
             default=False,
         ),
+        domain_adversarial=parse_bool(
+            model_cfg.get("domain_adversarial", False),
+            default=False,
+        ),
+        num_domains=num_domains,
+        domain_hidden_dim=int(model_cfg.get("domain_hidden_dim", 32)),
+        domain_dropout=float(model_cfg.get("domain_dropout", 0.3)),
     )
 
 
@@ -720,7 +749,8 @@ def predict_loader(
 
     with torch.no_grad():
         non_blocking = device.type == "cuda"
-        for x_batch, y_batch in loader:
+        for batch in loader:
+            x_batch, y_batch, _domain_batch = unpack_supervised_batch(batch)
             x_batch = x_batch.to(device, non_blocking=non_blocking)
             y_batch = y_batch.to(device, non_blocking=non_blocking)
 
@@ -842,6 +872,8 @@ def train_one_epoch(
         prototype_intra_weight: float = 0.0,
         prototype_inter_weight: float = 0.0,
         prototype_margin: float = 1.0,
+        domain_adversarial_coefficient: float | None = None,
+        domain_loss_normalize: bool = True,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
@@ -850,14 +882,28 @@ def train_one_epoch(
         "condition_loss": 0.0,
         "prototype_intra_loss": 0.0,
         "prototype_inter_loss": 0.0,
+        "domain_loss": 0.0,
+        "domain_accuracy": 0.0,
+        "domain_adversarial_coefficient": 0.0,
     }
     y_true = []
     y_pred = []
     non_blocking = device.type == "cuda"
 
-    for x_batch, y_batch in loader:
+    for batch in loader:
+        x_batch, y_batch, domain_batch = unpack_supervised_batch(batch)
         x_batch = x_batch.to(device, non_blocking=non_blocking)
         y_batch = y_batch.to(device, non_blocking=non_blocking)
+        if domain_adversarial_coefficient is not None:
+            if domain_batch is None:
+                raise ValueError(
+                    "Domain adversarial training is enabled, but the train "
+                    "loader does not provide domain labels."
+                )
+            domain_batch = domain_batch.to(
+                device,
+                non_blocking=non_blocking,
+            )
         logits, _aux, losses = compute_training_objective(
             model,
             x_batch,
@@ -868,6 +914,15 @@ def train_one_epoch(
             prototype_intra_weight=prototype_intra_weight,
             prototype_inter_weight=prototype_inter_weight,
             prototype_margin=prototype_margin,
+            domain_targets=(
+                domain_batch
+                if domain_adversarial_coefficient is not None
+                else None
+            ),
+            domain_adversarial_coefficient=(
+                domain_adversarial_coefficient or 0.0
+            ),
+            domain_loss_normalize=domain_loss_normalize,
         )
         loss = losses["loss"]
         if not torch.isfinite(loss):
@@ -877,6 +932,7 @@ def train_one_epoch(
                 f"cond_loss={losses['condition_loss'].item():.6e} "
                 f"prototype_intra={losses['prototype_intra_loss'].item():.6e} "
                 f"prototype_inter={losses['prototype_inter_loss'].item():.6e} "
+                f"domain={losses['domain_loss'].item():.6e} "
                 f"loss={loss.item():.6e}. "
                 "Check input SPD matrices, learning rate, and model numerical stability."
             )
@@ -1119,6 +1175,17 @@ def train_fold(
                 "Subject-level split failed: subject overlap detected between "
                 f"train and test: {sorted(train_test_overlap)}."
             )
+    domain_enabled = parse_bool(
+        model_cfg.get("domain_adversarial", False),
+        default=False,
+    )
+    domain_labels = None
+    domain_subject_mapping: dict[str, int] = {}
+    if domain_enabled:
+        domain_labels, domain_subject_mapping = encode_subject_domains(
+            subject_labels,
+            sorted(train_subjects),
+        )
     save_split_metadata(
         run_dir / "split.json",
         y=y,
@@ -1142,6 +1209,7 @@ def train_fold(
             training_cfg.get("pin_memory", device.type == "cuda"),
             default=device.type == "cuda",
         ),
+        domain_labels=domain_labels,
     )
 
     time_sequence_length = x.shape[1]
@@ -1154,6 +1222,7 @@ def train_fold(
         frequency_sequence_length=frequency_sequence_length,
         brain_region_sequence_length=brain_region_sequence_length,
         num_classes=len(class_names),
+        num_domains=(len(domain_subject_mapping) if domain_enabled else None),
     ).to(device=device, dtype=dtype)
 
     criterion = nn.CrossEntropyLoss()
@@ -1210,6 +1279,18 @@ def train_fold(
         prototype_inter_weight,
         prototype_margin,
     ) = prototype_loss_settings(training_cfg)
+    if domain_enabled:
+        (
+            domain_max_weight,
+            domain_warmup_epochs,
+            domain_schedule,
+            domain_loss_normalize,
+        ) = domain_adversarial_settings(training_cfg)
+    else:
+        domain_max_weight = 0.0
+        domain_warmup_epochs = 0
+        domain_schedule = "constant"
+        domain_loss_normalize = True
     early_stopping_patience = training_cfg.get("early_stopping_patience")
     if early_stopping_patience is not None:
         early_stopping_patience = int(early_stopping_patience)
@@ -1258,11 +1339,31 @@ def train_fold(
         f"+ {prototype_inter_weight:g}*prototype_inter_margin "
         f"(margin={prototype_margin:g})"
     )
+    if domain_enabled:
+        print(
+            "  domain_adversarial="
+            f"enabled domains={len(domain_subject_mapping)} "
+            f"max_weight={domain_max_weight:g} "
+            f"warmup_epochs={domain_warmup_epochs} "
+            f"schedule={domain_schedule} "
+            f"normalize_loss={domain_loss_normalize}"
+        )
 
     print(f"thread: {torch.get_num_threads()}")
     print(torch.get_num_interop_threads())
 
     for epoch in range(1, epochs + 1):
+        domain_coefficient = (
+            domain_adversarial_coefficient(
+                epoch=epoch,
+                total_epochs=epochs,
+                max_weight=domain_max_weight,
+                warmup_epochs=domain_warmup_epochs,
+                schedule=domain_schedule,
+            )
+            if domain_enabled
+            else None
+        )
         train_metrics = train_one_epoch(
             model,
             train_loader,
@@ -1276,6 +1377,8 @@ def train_fold(
             prototype_intra_weight=prototype_intra_weight,
             prototype_inter_weight=prototype_inter_weight,
             prototype_margin=prototype_margin,
+            domain_adversarial_coefficient=domain_coefficient,
+            domain_loss_normalize=domain_loss_normalize,
         )
         test_metrics = evaluate(
             model,
@@ -1319,6 +1422,11 @@ def train_fold(
             "train_cross_entropy": train_metrics["cross_entropy"],
             "train_prototype_intra_loss": train_metrics["prototype_intra_loss"],
             "train_prototype_inter_loss": train_metrics["prototype_inter_loss"],
+            "train_domain_loss": train_metrics["domain_loss"],
+            "train_domain_accuracy": train_metrics["domain_accuracy"],
+            "domain_adversarial_coefficient": train_metrics[
+                "domain_adversarial_coefficient"
+            ],
             "train_accuracy": train_metrics["accuracy"],
             "train_macro_f1": train_metrics["macro_f1"],
             "test_loss": test_metrics["loss"],
@@ -1346,6 +1454,7 @@ def train_fold(
                     "config": experiment_cfg,
                     "best_epoch": best_epoch,
                     "best_test_macro_f1": best_test_macro_f1,
+                    "domain_subject_mapping": domain_subject_mapping,
                 },
                 checkpoint_path,
             )
@@ -1356,6 +1465,9 @@ def train_fold(
             f"ce={train_metrics['cross_entropy']:.4f} "
             f"intra={train_metrics['prototype_intra_loss']:.4f} "
             f"inter={train_metrics['prototype_inter_loss']:.4f} "
+            f"domain={train_metrics['domain_loss']:.4f} "
+            f"domain_acc={train_metrics['domain_accuracy']:.4f} "
+            f"grl={train_metrics['domain_adversarial_coefficient']:.4f} "
             f"acc={train_metrics['accuracy']:.4f} "
             f"mf1={train_metrics['macro_f1']:.4f} | "
             f"test loss={test_metrics['loss']:.4f} "
@@ -1438,6 +1550,8 @@ def train_fold(
         "allow_subject_overlap": allow_subject_overlap,
         "n_train_subjects": int(len(train_subjects)),
         "n_test_subjects": int(len(test_subjects)),
+        "domain_adversarial": domain_enabled,
+        "num_source_domains": len(domain_subject_mapping),
     }
 
     with (run_dir / "metrics.json").open("w", encoding="utf-8") as handle:
