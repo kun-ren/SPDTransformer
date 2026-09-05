@@ -282,7 +282,11 @@ def train_with_early_stopping(
             condition_regularization_weight=condition_weight,
             **loss_options,
         )
-        if scheduler_name is not None:
+        if scheduler_name == "multistep":
+            scheduler.step()
+            if stiefel_scheduler is not None:
+                stiefel_scheduler.step()
+        elif scheduler_name is not None:
             metric_name = str(scheduler_metric or "validation_macro_f1")
             scheduler_values = {
                 "validation_loss": float(validation_metrics["loss"]),

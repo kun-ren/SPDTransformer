@@ -1089,9 +1089,34 @@ def build_lr_schedulers(
         optimizer_euclid: torch.optim.Optimizer,
         optimizer_stiefel: torch.optim.Optimizer | None,
 ) -> tuple[str | None, str | None, Any, Any]:
-    scheduler_name = str(training_cfg.get("lr_scheduler", "none")).lower()
+    scheduler_name = str(training_cfg.get("lr_scheduler", "none")).strip().lower()
     if scheduler_name in {"", "none", "null", "false", "off"}:
         return None, None, None, None
+
+    if scheduler_name in {"multistep", "multi_step", "multisteplr"}:
+        milestones = training_cfg.get("lr_scheduler_milestones")
+        if (
+                not isinstance(milestones, (list, tuple))
+                or not milestones
+                or any(type(value) is not int or value < 1 for value in milestones)
+                or list(milestones) != sorted(set(milestones))
+        ):
+            raise ValueError(
+                "lr_scheduler_milestones must be strictly increasing positive "
+                "integers; use [[40, 70]] in grid YAML configs."
+            )
+        gamma = float(training_cfg.get("lr_scheduler_gamma", 0.5))
+        if not 0.0 < gamma < 1.0:
+            raise ValueError("lr_scheduler_gamma must be between 0 and 1.")
+        euclid_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer_euclid, milestones=list(milestones), gamma=gamma,
+        )
+        stiefel_scheduler = None
+        if optimizer_stiefel is not None:
+            stiefel_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                optimizer_stiefel, milestones=list(milestones), gamma=gamma,
+            )
+        return "multistep", None, euclid_scheduler, stiefel_scheduler
 
     if scheduler_name not in {
         "plateau",
@@ -1099,7 +1124,7 @@ def build_lr_schedulers(
         "reduce_lr_on_plateau",
     }:
         raise ValueError(
-            "Only lr_scheduler='plateau' is supported, "
+            "lr_scheduler must be 'none', 'plateau', or 'multistep', "
             f"got {scheduler_name!r}."
         )
 
@@ -1387,13 +1412,20 @@ def train_fold(
         if lr_scheduler_name is not None:
             old_euclid_lrs = optimizer_lr_values(optimizer_euclid)
             old_stiefel_lrs = optimizer_lr_values(optimizer_stiefel)
-            scheduler_value = resolve_scheduler_metric(
-                lr_scheduler_metric,
-                test_metrics,
-            )
-            lr_scheduler_euclid.step(scheduler_value)
-            if lr_scheduler_stiefel is not None:
-                lr_scheduler_stiefel.step(scheduler_value)
+            if lr_scheduler_name == "multistep":
+                lr_scheduler_euclid.step()
+                if lr_scheduler_stiefel is not None:
+                    lr_scheduler_stiefel.step()
+                scheduler_description = f"epoch={epoch}"
+            else:
+                scheduler_value = resolve_scheduler_metric(
+                    lr_scheduler_metric,
+                    test_metrics,
+                )
+                lr_scheduler_euclid.step(scheduler_value)
+                if lr_scheduler_stiefel is not None:
+                    lr_scheduler_stiefel.step(scheduler_value)
+                scheduler_description = f"{lr_scheduler_metric}={scheduler_value:.6f}"
             new_euclid_lrs = optimizer_lr_values(optimizer_euclid)
             new_stiefel_lrs = optimizer_lr_values(optimizer_stiefel)
             if (
@@ -1402,7 +1434,7 @@ def train_fold(
             ):
                 print(
                     "  lr scheduler step | "
-                    f"{lr_scheduler_metric}={scheduler_value:.6f} "
+                    f"{scheduler_description} "
                     f"euclid_lr {format_lr_values(old_euclid_lrs)}"
                     f" -> {format_lr_values(new_euclid_lrs)} "
                     f"stiefel_lr {format_lr_values(old_stiefel_lrs)}"

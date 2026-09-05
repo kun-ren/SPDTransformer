@@ -113,14 +113,11 @@ training:
   batch_size: [128]
   learning_rate: [0.0022] #  0.0022 is better than 0.0020 and 0.0018
   stiefel_learning_rate: [0.0003]  #  0.0003 best
-  lr_scheduler: ["plateau"]
-  lr_scheduler_metric: ["test_macro_f1"]
-  lr_scheduler_factor: [0.5]
-  lr_scheduler_patience: [9]
-  lr_scheduler_threshold: [0.0008]
-  lr_scheduler_threshold_mode: ["abs"]
-  lr_scheduler_min_lr: [1.0e-5]
-  stiefel_lr_scheduler_min_lr: [1.0e-6]
+  lr_scheduler: ["multistep"]
+  # Nested list is one schedule, not separate grid candidates.
+  # Decay at epoch end; early stopping can stop before these milestones.
+  lr_scheduler_milestones: [[60, 100, 130]]
+  lr_scheduler_gamma: [0.5]
   weight_decay: [0.01]  # 0.01 best in [0.008, 0.01, 0.015]
   apply_weight_decay_to_special_parameters: [true]  # no big difference to be determined
   gradient_clip_norm: [0.8]
