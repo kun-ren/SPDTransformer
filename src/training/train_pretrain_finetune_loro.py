@@ -270,6 +270,7 @@ def train_with_early_stopping(
             optimizer_stiefel,
             device,
             gradient_clip_norm=gradient_clip_norm,
+            debug_anomaly=parse_bool(cfg.get("debug_anomaly", False), default=False),
             **domain_epoch_options(model, cfg, epoch, epochs),
             condition_regularization_weight=condition_weight,
             **loss_options,

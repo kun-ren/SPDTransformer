@@ -140,13 +140,13 @@ class _SPDLogEig(torch.autograd.Function):
                     * log_eigenvalues.unsqueeze(-2)
             ) @ eigenvectors.transpose(-1, -2)
 
-        ctx.save_for_backward(safe_eigenvalues, log_eigenvalues, eigenvectors)
+        ctx.save_for_backward(eigenvalues, safe_eigenvalues, log_eigenvalues, eigenvectors)
         ctx.eps = eps
         return _symmetrize(y)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
-        safe_eigenvalues, log_eigenvalues, eigenvectors = ctx.saved_tensors
+        eigenvalues, safe_eigenvalues, log_eigenvalues, eigenvectors = ctx.saved_tensors
         eps = ctx.eps
 
         grad_output = _symmetrize(grad_output)
@@ -156,8 +156,10 @@ class _SPDLogEig(torch.autograd.Function):
                 @ eigenvectors
         )
 
-        lambda_i = safe_eigenvalues.unsqueeze(-1)
-        lambda_j = safe_eigenvalues.unsqueeze(-2)
+        # Divided differences use the original spectrum of log(clamp(lambda)),
+        # not the spectrum after clamping. Clamped eigenspaces are constant.
+        lambda_i = eigenvalues.unsqueeze(-1)
+        lambda_j = eigenvalues.unsqueeze(-2)
         log_i = log_eigenvalues.unsqueeze(-1)
         log_j = log_eigenvalues.unsqueeze(-2)
 
@@ -165,7 +167,10 @@ class _SPDLogEig(torch.autograd.Function):
         log_diff = log_i - log_j
         scale = torch.maximum(lambda_i.abs(), lambda_j.abs()).clamp_min(eps)
         rtol = math.sqrt(torch.finfo(safe_eigenvalues.dtype).eps)
-        close = lambda_diff.abs() <= rtol * scale
+        active_i = lambda_i >= eps
+        active_j = lambda_j >= eps
+        same_side = active_i == active_j
+        close = (lambda_diff.abs() <= rtol * scale) & same_side
 
         safe_diff = torch.where(
             close,
@@ -173,7 +178,11 @@ class _SPDLogEig(torch.autograd.Function):
             lambda_diff,
         )
         divided_difference = log_diff / safe_diff
-        limit = 2.0 / (lambda_i + lambda_j).clamp_min(eps)
+        limit = torch.where(
+            active_i & active_j,
+            2.0 / (safe_eigenvalues.unsqueeze(-1) + safe_eigenvalues.unsqueeze(-2)),
+            torch.zeros_like(lambda_diff),
+        )
         loewner = torch.where(close, limit, divided_difference)
 
         grad_x = (
@@ -185,18 +194,7 @@ class _SPDLogEig(torch.autograd.Function):
 
 
 def spd_log(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
-    # Temporarily bypass _SPDLogEig to compare against PyTorch's native
-    # torch.linalg.eigh autograd behavior.
     return _SPDLogEig.apply(x, eps)
-    # x = _symmetrize(x)
-    # eigenvalues, eigenvectors = torch.linalg.eigh(x)
-    # safe_eigenvalues = eigenvalues.clamp_min(eps)
-    # log_eigenvalues = safe_eigenvalues.log()
-    # y = (
-    #         eigenvectors
-    #         * log_eigenvalues.unsqueeze(-2)
-    # ) @ eigenvectors.transpose(-1, -2)
-    # return _symmetrize(y)
 
 
 

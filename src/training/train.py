@@ -7,6 +7,7 @@ import itertools
 import json
 import random
 from copy import deepcopy
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -927,49 +928,47 @@ def train_one_epoch(
                 device,
                 non_blocking=non_blocking,
             )
-        logits, _aux, losses = compute_training_objective(
-            model,
-            x_batch,
-            y_batch,
-            criterion,
-            condition_regularization_weight=condition_regularization_weight,
-            condition_regularization_fn=condition_regularization,
-            prototype_intra_weight=prototype_intra_weight,
-            prototype_inter_weight=prototype_inter_weight,
-            prototype_margin=prototype_margin,
-            domain_targets=(
-                domain_batch
-                if domain_adversarial_coefficient is not None
-                else None
-            ),
-            domain_adversarial_coefficient=(
-                domain_adversarial_coefficient or 0.0
-            ),
-            domain_loss_normalize=domain_loss_normalize,
-        )
-        loss = losses["loss"]
-        if not torch.isfinite(loss):
-            raise RuntimeError(
-                "Non-finite training loss detected: "
-                f"cross_entropy={losses['cross_entropy'].item():.6e} "
-                f"cond_loss={losses['condition_loss'].item():.6e} "
-                f"prototype_intra={losses['prototype_intra_loss'].item():.6e} "
-                f"prototype_inter={losses['prototype_inter_loss'].item():.6e} "
-                f"domain={losses['domain_loss'].item():.6e} "
-                f"loss={loss.item():.6e}. "
-                "Check input SPD matrices, learning rate, and model numerical stability."
+        anomaly_context = torch.autograd.detect_anomaly() if debug_anomaly else nullcontext()
+        with anomaly_context:
+            logits, _aux, losses = compute_training_objective(
+                model,
+                x_batch,
+                y_batch,
+                criterion,
+                condition_regularization_weight=condition_regularization_weight,
+                condition_regularization_fn=condition_regularization,
+                prototype_intra_weight=prototype_intra_weight,
+                prototype_inter_weight=prototype_inter_weight,
+                prototype_margin=prototype_margin,
+                domain_targets=(
+                    domain_batch
+                    if domain_adversarial_coefficient is not None
+                    else None
+                ),
+                domain_adversarial_coefficient=(
+                    domain_adversarial_coefficient or 0.0
+                ),
+                domain_loss_normalize=domain_loss_normalize,
             )
+            loss = losses["loss"]
+            if not torch.isfinite(loss):
+                raise RuntimeError(
+                    "Non-finite training loss detected: "
+                    f"cross_entropy={losses['cross_entropy'].item():.6e} "
+                    f"cond_loss={losses['condition_loss'].item():.6e} "
+                    f"prototype_intra={losses['prototype_intra_loss'].item():.6e} "
+                    f"prototype_inter={losses['prototype_inter_loss'].item():.6e} "
+                    f"domain={losses['domain_loss'].item():.6e} "
+                    f"loss={loss.item():.6e}. "
+                    "Check input SPD matrices, learning rate, and model numerical stability."
+                )
 
-        optimizers = [optimizer_euclid]
-        if optimizer_stiefel is not None:
-            optimizers.append(optimizer_stiefel)
-        for optimizer in optimizers:
-            optimizer.zero_grad()
+            optimizers = [optimizer_euclid]
+            if optimizer_stiefel is not None:
+                optimizers.append(optimizer_stiefel)
+            for optimizer in optimizers:
+                optimizer.zero_grad()
 
-        if debug_anomaly:
-            with torch.autograd.detect_anomaly():
-                loss.backward()
-        else:
             loss.backward()
         assert_model_finite(model, "backward")
 
