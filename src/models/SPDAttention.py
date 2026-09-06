@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 from enum import Enum
 import math
+import warnings
 from typing import Literal
 
 import torch
@@ -8,6 +9,7 @@ from torch import nn, Tensor
 import torch.nn.functional as F
 
 from src.models.GeooptBiMap import GeooptBiMap
+from src.models.NumericalChecks import require_finite, tensor_summary
 
 
 class MetricType(Enum):
@@ -57,7 +59,7 @@ def normalize_position_bias_axes(
     return frozenset(axes)
 
 def _symmetrize(x: torch.Tensor) -> torch.Tensor:
-    return 0.5 * (x + x.transpose(-1, -2))
+    return 0.5 * x + 0.5 * x.transpose(-1, -2)
 
 
 def _eye_like(x: torch.Tensor) -> torch.Tensor:
@@ -72,8 +74,8 @@ def _safe_eigh(
         check_finite: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     x = _symmetrize(x)
-    if check_finite and not torch.isfinite(x).all():
-        raise ValueError("SPD spectral operation received NaN or Inf values.")
+    if check_finite:
+        require_finite(x, "spd_log.input_spd (before eigh)")
 
     try:
         return torch.linalg.eigh(x)
@@ -132,7 +134,7 @@ def _safe_eigh(
 class _SPDLogEig(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, eps: float) -> torch.Tensor:
-        eigenvalues, eigenvectors = _safe_eigh(x, eps=eps)
+        eigenvalues, eigenvectors = _safe_eigh(x, eps=eps, check_finite=True)
         safe_eigenvalues = eigenvalues.clamp_min(eps)
         log_eigenvalues = safe_eigenvalues.log()
         y = (
@@ -194,6 +196,8 @@ class _SPDLogEig(torch.autograd.Function):
 
 
 def spd_log(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+    if not math.isfinite(eps) or eps <= 0:
+        raise ValueError(f"spd_log eps must be finite and positive, got {eps}.")
     return _SPDLogEig.apply(x, eps)
 
 
@@ -316,12 +320,12 @@ class SingleHeadAttention(nn.Module):
         self.debug_tensor_stats = debug_tensor_stats
         self.affine_log_eps = eps
         self.use_position = use_position
-        if attention_score_target_rms <= 0:
+        if not math.isfinite(attention_score_target_rms) or attention_score_target_rms <= 0:
             raise ValueError(
                 "attention_score_target_rms must be positive, got "
                 f"{attention_score_target_rms}."
             )
-        if attention_score_clip <= 0:
+        if not math.isfinite(attention_score_clip) or attention_score_clip <= 0:
             raise ValueError(
                 f"attention_score_clip must be positive, got {attention_score_clip}."
             )
@@ -412,33 +416,58 @@ class SingleHeadAttention(nn.Module):
     ) -> tuple[Tensor, dict[str, torch.Tensor]]:
 
         aux = {}
-        q = self.query(x)
+        logs = {}
+        for name, projection in (("q", self.query), ("k", self.key), ("v", self.value)):
+            matrix = projection(x)
+            try:
+                logs[name] = spd_log(matrix, eps=self.eps)
+            except RuntimeError as error:
+                raise RuntimeError(
+                    f"attention.{name} projection/log failed: {error}; "
+                    f"input: {tensor_summary(x)}; "
+                    f"weight: {tensor_summary(projection.weight)}"
+                ) from error
+            if return_aux:
+                aux[f"P_{name}"] = matrix
 
-        k = self.key(x)
-
-        v = self.value(x)
-
-        log_v = spd_log(v, eps=self.eps)
-        log_q = spd_log(q, eps=self.eps)
-        log_k = spd_log(k, eps=self.eps)
-
-        if return_aux:
-            aux['P_q'] = q
-            aux['P_k'] = k
-            aux['P_v'] = v
-
-        score = self.learnableRiemannianScore(log_q, log_k)
-        if self.position_bias is not None:
-            score = score + self.position_bias(score.shape[-1])
-        score = self._stabilize_attention_score(score)
+        score = self._normalized_attention_score(logs["q"], logs["k"])
 
         attention = torch.softmax(score, dim=-1)
 
         attention = self.attention_dropout(attention)
 
-        weighted_log_v = torch.einsum('...ij,...jmn->...imn', attention, log_v)
+        weighted_log_v = torch.einsum('...ij,...jmn->...imn', attention, logs["v"])
 
         return weighted_log_v, aux
+
+    def _normalized_attention_score(self, log_q, log_k) -> torch.Tensor:
+        recomputed = False
+        score = self.learnableRiemannianScore(log_q, log_k)
+        if not torch.isfinite(score).all():
+            require_finite(log_q, "attention.log_q")
+            require_finite(log_k, "attention.log_k")
+            for name in ("metric_low_rank", "metric_matrix"):
+                parameter = getattr(self, name)
+                if parameter is not None:
+                    require_finite(parameter, f"attention.{name}")
+            if score.dtype != torch.float64:
+                # Retry the formula, not the invalid tensor. Its failed graph is
+                # discarded; casts of the metric retain gradients to the parameter.
+                score = self.learnableRiemannianScore(log_q.double(), log_k.double())
+                recomputed = True
+        if self.position_bias is not None:
+            score = score + self.position_bias(score.shape[-1]).to(dtype=score.dtype)
+        # Cast only after compression: a valid float64 raw score can exceed fp32.
+        score = self._stabilize_attention_score(score).to(dtype=log_q.dtype)
+        if recomputed:
+            warnings.warn(
+                "SPD attention score overflowed in the input dtype; "
+                "recomputed and normalized in float64. Check metric magnitude "
+                "and learning rate if this repeats.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return score
 
     def learnableRiemannianScore(self, log_q, log_k) -> torch.Tensor:
 
@@ -467,21 +496,25 @@ class SingleHeadAttention(nn.Module):
         if not torch.isfinite(score).all():
             raise RuntimeError(
                 "Non-finite SPD attention score detected before softmax. "
+                f"{tensor_summary(score)}. "
                 "Check SPD eigenvalue range, eps, and attention learning rate."
             )
+        output_dtype = score.dtype
+        # Only row statistics use float64, not the much larger pairwise feature
+        # tensors. Scaling before centering/norm avoids overflowing even a finite
+        # row. vector_norm has a defined zero gradient at flat rows.
+        score = score.double()
+        row_scale = score.detach().abs().amax(dim=-1, keepdim=True).clamp_min(1.0)
+        score = score / row_scale
         score = score - score.mean(dim=-1, keepdim=True)
-        # Clamp before sqrt: flat rows otherwise backpropagate 0 * inf = NaN.
-        # This is equivalent to max(RMS / target, 1) in the forward pass.
-        row_mean_square = score.square().mean(dim=-1, keepdim=True)
-        compression = row_mean_square.clamp_min(
-            self.attention_score_target_rms ** 2
-        ).sqrt() / self.attention_score_target_rms
-        score = score / compression
+        rms = torch.linalg.vector_norm(score, dim=-1, keepdim=True) / math.sqrt(score.shape[-1])
+        denominator = torch.maximum(rms, self.attention_score_target_rms / row_scale)
+        score = (score / denominator) * self.attention_score_target_rms
         score = score.clamp(
             min=-self.attention_score_clip,
             max=self.attention_score_clip,
         )
-        return score - score.amax(dim=-1, keepdim=True)
+        return (score - score.amax(dim=-1, keepdim=True)).to(dtype=output_dtype)
 
     @staticmethod
     def _upper_triangular_vectorize(x: torch.Tensor) -> torch.Tensor:
@@ -510,9 +543,7 @@ class SingleHeadAttention(nn.Module):
         if self.metric_matrix is None:
             raise RuntimeError("Full metric score requires metric_matrix G.")
 
-        metric = 0.5 * (
-            self.metric_matrix + self.metric_matrix.transpose(-1, -2)
-        )
+        metric = _symmetrize(self.metric_matrix.to(dtype=q_vec.dtype))
         scale = math.sqrt(self.tangent_feature_dim)
 
         if self.learnable_metric_score == "qgk":
@@ -534,15 +565,16 @@ class SingleHeadAttention(nn.Module):
             raise RuntimeError("Low-rank metric score requires factor L and rank r.")
 
         scale = math.sqrt(self.learnable_metric_rank)
+        metric_low_rank = self.metric_low_rank.to(dtype=q_vec.dtype)
         if self.learnable_metric_score == "qgk":
-            q_low = torch.einsum("...d,dr->...r", q_vec, self.metric_low_rank)
-            k_low = torch.einsum("...d,dr->...r", k_vec, self.metric_low_rank)
+            q_low = torch.einsum("...d,dr->...r", q_vec, metric_low_rank)
+            k_low = torch.einsum("...d,dr->...r", k_vec, metric_low_rank)
             score_low = torch.einsum("...ir,...jr->...ij", q_low, k_low)
             score_eye = torch.einsum("...id,...jd->...ij", q_vec, k_vec)
             return (score_low + self.eps * score_eye) / scale
 
         diff = q_vec.unsqueeze(-2) - k_vec.unsqueeze(-3)
-        diff_low = torch.einsum("...ijd,dr->...ijr", diff, self.metric_low_rank)
+        diff_low = torch.einsum("...ijd,dr->...ijr", diff, metric_low_rank)
         squared_distance_low = diff_low.square().sum(dim=-1)
         squared_distance_eye = diff.square().sum(dim=-1)
         squared_distance = (

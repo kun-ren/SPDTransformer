@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from src.models.GeooptBiMap import GeooptBiMap
+from src.models.NumericalChecks import checked_matrix_exp, require_finite
 from src.models.SPDAttention import (
     SingleHeadAttention,
     normalize_position_bias_axes,
@@ -378,10 +379,16 @@ class SPDMultiHeadEncoder(nn.Module):
         all_aux: dict[str, torch.Tensor] = {}
         head_logs = []
         for head_index, attention_head in enumerate(attention_heads):
-            y_log, aux = attention_head(
-                head_inputs[head_index],
-                return_aux=return_aux,
-            )
+            try:
+                y_log, aux = attention_head(
+                    head_inputs[head_index],
+                    return_aux=return_aux,
+                )
+            except RuntimeError as error:
+                axis_name = {1: "time", 2: "frequency", 3: "region"}.get(axis, str(axis))
+                raise RuntimeError(
+                    f"axis={axis_name}, head={head_index}: {error}"
+                ) from error
             head_logs.append(y_log)
             if return_aux:
                 for key, value in aux.items():
@@ -434,7 +441,9 @@ class SPDMultiHeadEncoder(nn.Module):
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
 
         if attention_input.ndim >= 5 and attention_input.shape[2] > 1:
-            x_spd = torch.matrix_exp(_symmetrize(x_log).contiguous())
+            x_spd = checked_matrix_exp(
+                _symmetrize(x_log).contiguous(), "after_time.before_frequency",
+            )
 
             frequency_output_log, aux = self._apply_attention_along_axis(
                 self.frequency_attention,
@@ -450,7 +459,7 @@ class SPDMultiHeadEncoder(nn.Module):
             x_log = self.frequency_add_norm2(x_log, self.frequency_ffn(x_log))
 
         if attention_input.ndim == 6 and attention_input.shape[3] > 1:
-            x_spd = torch.matrix_exp(_symmetrize(x_log))
+            x_spd = checked_matrix_exp(_symmetrize(x_log), "after_frequency.before_region")
 
             region_output_log, aux = self._apply_attention_along_axis(
                 self.region_attention,
@@ -467,8 +476,9 @@ class SPDMultiHeadEncoder(nn.Module):
 
         x_log = _symmetrize(x_log)
         if return_log:
+            require_finite(x_log, "encoder.output_log")
             return x_log, all_aux
 
-        x_spd = torch.matrix_exp(x_log.contiguous())
+        x_spd = checked_matrix_exp(x_log.contiguous(), "encoder.output_spd")
 
         return x_spd, all_aux

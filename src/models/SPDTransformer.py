@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from src.models.AxisMetricSharing import share_axis_metrics
 from src.models.GeooptBiMap import GeooptBiMap
+from src.models.NumericalChecks import checked_matrix_exp, require_finite
 from src.models.MultiHeadEncoder import (
     AddNormType,
     SPDMultiHeadEncoder,
@@ -227,7 +228,11 @@ class SPDEncoder(nn.Module):
             perm.insert(seq_pos, moved_axis)
             x = x.permute(perm)
 
-        y_log, aux = attention(x, return_aux=return_aux)
+        try:
+            y_log, aux = attention(x, return_aux=return_aux)
+        except RuntimeError as error:
+            axis_name = {1: "time", 2: "frequency", 3: "region"}.get(axis, str(axis))
+            raise RuntimeError(f"axis={axis_name}, head=0: {error}") from error
 
         if axis != seq_pos:
             inverse_perm = [0] * len(perm)
@@ -273,7 +278,9 @@ class SPDEncoder(nn.Module):
         x_log = self.time_add_norm2(x_log, self.time_ffn(x_log))
 
         if attention_input.ndim >= 5 and attention_input.shape[2] > 1:
-            x_spd = torch.matrix_exp(_symmetrize(x_log).contiguous())
+            x_spd = checked_matrix_exp(
+                _symmetrize(x_log).contiguous(), "after_time.before_frequency",
+            )
             frequency_output_log, aux = self._apply_attention_along_axis(
                 self.frequency_attention,
                 x_spd,
@@ -289,7 +296,7 @@ class SPDEncoder(nn.Module):
             x_log = self.frequency_add_norm2(x_log, self.frequency_ffn(x_log))
 
         if attention_input.ndim == 6 and attention_input.shape[3] > 1:
-            x_spd = torch.matrix_exp(_symmetrize(x_log))
+            x_spd = checked_matrix_exp(_symmetrize(x_log), "after_frequency.before_region")
             region_output_log, aux = self._apply_attention_along_axis(
                 self.region_attention,
                 x_spd,
@@ -306,9 +313,10 @@ class SPDEncoder(nn.Module):
 
         x_log = _symmetrize(x_log)
         if return_log:
+            require_finite(x_log, "encoder.output_log")
             return x_log, all_aux
 
-        x_spd = torch.matrix_exp(x_log.contiguous())
+        x_spd = checked_matrix_exp(x_log.contiguous(), "encoder.output_spd")
 
         return _symmetrize(x_spd), all_aux
 
@@ -423,11 +431,14 @@ class SPDTransformer(nn.Module):
         all_aux = {}
         for layer_index, layer in enumerate(self.layers):
             layer_return_log = return_log and layer_index == len(self.layers) - 1
-            x, aux = layer(
-                x,
-                return_log=layer_return_log,
-                return_aux=return_aux,
-            )
+            try:
+                x, aux = layer(
+                    x,
+                    return_log=layer_return_log,
+                    return_aux=return_aux,
+                )
+            except RuntimeError as error:
+                raise RuntimeError(f"encoder.layers.{layer_index}: {error}") from error
             if return_aux:
                 for name, param in aux.items():
                     all_aux[name + "_" + str(layer_index)] = param
