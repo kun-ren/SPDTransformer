@@ -472,10 +472,12 @@ class SingleHeadAttention(nn.Module):
                 "Check SPD eigenvalue range, eps, and attention learning rate."
             )
         score = score - score.mean(dim=-1, keepdim=True)
-        row_rms = score.square().mean(dim=-1, keepdim=True).sqrt()
-        compression = (
-            row_rms / self.attention_score_target_rms
-        ).clamp_min(1.0)
+        # Clamp before sqrt: flat rows otherwise backpropagate 0 * inf = NaN.
+        # This is equivalent to max(RMS / target, 1) in the forward pass.
+        row_mean_square = score.square().mean(dim=-1, keepdim=True)
+        compression = row_mean_square.clamp_min(
+            self.attention_score_target_rms ** 2
+        ).sqrt() / self.attention_score_target_rms
         score = score / compression
         score = score.clamp(
             min=-self.attention_score_clip,

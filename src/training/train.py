@@ -558,6 +558,7 @@ def build_model(
         tau=model_cfg.get("tau", 1.0),
         num_classes=num_classes,
         ffn_hidden_spd_dim=model_cfg.get("ffn_hidden_spd_dim", None),
+        ffn_type=str(model_cfg.get("ffn_type", "current")),
         metric=str(model_cfg.get("metric", "log-euclidean")),
         depth=depth,
         classifier_type=str(model_cfg.get("classifier_type", "pooling")),

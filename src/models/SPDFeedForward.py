@@ -48,7 +48,7 @@ def _apply_activation(
 
 class SPDFeedForward(nn.Module):
     """
-    Log-domain vector feed-forward block for SPD Transformer.
+    Selectable log-domain vector feed-forward block for SPD Transformer.
 
     The encoder already keeps the block input in the tangent/log domain, so this
     module implements the stable part of the requested pipeline:
@@ -56,6 +56,10 @@ class SPDFeedForward(nn.Module):
         log(SPD) -> upper triangular vector
             -> Linear -> GELU -> Dropout -> Linear
             -> symmetric matrix -> residual in log domain
+
+    With ffn_type="tangent_mixer", use a single feature_dim -> feature_dim map,
+    activation, dropout and gated residual instead. hidden_spd_dim is ignored.
+    The off-diagonal sqrt(2) vectorization scale is undone before reconstruction.
 
     The returned matrix is symmetric log-domain output. TraceAddNorm consumes
     this log-domain output directly and keeps the block in the tangent domain.
@@ -69,8 +73,13 @@ class SPDFeedForward(nn.Module):
             dropout: float = 0.0,
             eps: float = 1e-4,
             debug_tensor_stats: bool = False,
+            ffn_type: Literal["current", "tangent_mixer"] = "current",
     ) -> None:
         super().__init__()
+
+        if ffn_type not in {"current", "tangent_mixer"}:
+            raise ValueError("ffn_type must be 'current' or 'tangent_mixer'.")
+        self.ffn_type = ffn_type
 
         if activation not in {"relu", "gelu", "softplus"}:
             raise ValueError(
@@ -79,7 +88,10 @@ class SPDFeedForward(nn.Module):
 
         self.spd_dim = spd_dim
         self.feature_dim = spd_dim * (spd_dim + 1) // 2
-        self.hidden_feature_dim = int(hidden_spd_dim or self.feature_dim * 2)
+        self.hidden_feature_dim = (
+            self.feature_dim if ffn_type == "tangent_mixer"
+            else int(hidden_spd_dim or self.feature_dim * 2)
+        )
         if self.hidden_feature_dim < 1:
             raise ValueError(
                 f"hidden_spd_dim must be positive, got {hidden_spd_dim!r}."
@@ -90,16 +102,26 @@ class SPDFeedForward(nn.Module):
         self.eps = eps
         self.debug_tensor_stats = debug_tensor_stats
 
-        self.linear_in = nn.Linear(self.feature_dim, self.hidden_feature_dim)
-        self.linear_out = nn.Linear(self.hidden_feature_dim, self.feature_dim)
+        if ffn_type == "current":
+            self.linear_in = nn.Linear(self.feature_dim, self.hidden_feature_dim)
+            self.linear_out = nn.Linear(self.hidden_feature_dim, self.feature_dim)
+        else:
+            self.mixer = nn.Linear(self.feature_dim, self.feature_dim)
+            nn.init.normal_(self.mixer.weight, std=0.02)
+            nn.init.zeros_(self.mixer.bias)
         row, col = torch.triu_indices(spd_dim, spd_dim)
         self.register_buffer("triu_row", row, persistent=False)
         self.register_buffer("triu_col", col, persistent=False)
 
-        # Start close to identity: the residual branch exists, but initially
-        # contributes almost nothing until the final projection learns.
-        nn.init.zeros_(self.linear_out.weight)
-        nn.init.zeros_(self.linear_out.bias)
+        # Current starts at identity; the mixer starts with a small residual.
+        if ffn_type == "current":
+            nn.init.zeros_(self.linear_out.weight)
+            nn.init.zeros_(self.linear_out.bias)
+        else:
+            # Isometric symmetric vectorization preserves Frobenius distances.
+            scale = torch.ones(self.feature_dim)
+            scale[row != col] = 2.0 ** 0.5
+            self.register_buffer("triu_scale", scale, persistent=False)
         self.raw_gate = nn.Parameter(torch.logit(torch.tensor(0.1)))
 
     def forward(self, x_log: torch.Tensor) -> torch.Tensor:
@@ -115,6 +137,13 @@ class SPDFeedForward(nn.Module):
                 f"Expected x_log shape (..., {self.spd_dim}, {self.spd_dim}), "
                 f"got {tuple(x_log.shape)}."
             )
+
+        if self.ffn_type == "tangent_mixer":
+            x_log = 0.5 * (x_log + x_log.transpose(-1, -2))
+            vector = x_log[..., self.triu_row, self.triu_col] * self.triu_scale
+            mixed = self.dropout(_apply_activation(self.mixer(vector), self.activation))
+            delta_log = self._upper_triangular_unvectorize(mixed / self.triu_scale)
+            return x_log + torch.sigmoid(self.raw_gate) * delta_log
 
         #x_log = _sym(x_log)
         vector = x_log[..., self.triu_row, self.triu_col]

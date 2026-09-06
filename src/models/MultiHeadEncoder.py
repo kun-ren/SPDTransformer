@@ -130,6 +130,7 @@ class SPDMultiHeadEncoder(nn.Module):
             dropout: float = 0.0,
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: AddNormType = "trace",
+            ffn_type: str = "current",
     ):
         super().__init__()
         if num_heads < 1:
@@ -199,6 +200,7 @@ class SPDMultiHeadEncoder(nn.Module):
         self.time_ffn = SPDFeedForward(
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
+            ffn_type=ffn_type,
             dropout=dropout,
             eps=eps
         )
@@ -247,6 +249,7 @@ class SPDMultiHeadEncoder(nn.Module):
         self.frequency_ffn = SPDFeedForward(
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
+            ffn_type=ffn_type,
             dropout=dropout,
             eps=eps
         )
@@ -295,6 +298,7 @@ class SPDMultiHeadEncoder(nn.Module):
         self.region_ffn = SPDFeedForward(
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
+            ffn_type=ffn_type,
             dropout=dropout,
             eps=eps
         )

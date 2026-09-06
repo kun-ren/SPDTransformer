@@ -71,6 +71,7 @@ class SPDTransformerClassifier(nn.Module):
             num_domains: int | None = None,
             domain_hidden_dim: int = 32,
             domain_dropout: float = 0.3,
+            ffn_type: str = "current",
     ):
         super().__init__()
         self.debug_tensor_stats = debug_tensor_stats
@@ -98,6 +99,10 @@ class SPDTransformerClassifier(nn.Module):
                 f"got {encoder_type!r}."
             )
         encoder_type = encoder_aliases[encoder_type]
+        if ffn_type not in {"current", "tangent_mixer"}:
+            raise ValueError("ffn_type must be 'current' or 'tangent_mixer'.")
+        if encoder_type != "spd" and ffn_type != "current":
+            raise ValueError("ffn_type='tangent_mixer' requires encoder_type='spd'.")
         if encoder_type == "tangent" and classifier_type != "mdm":
             raise ValueError(
                 "The tangent Transformer ablation currently requires "
@@ -136,6 +141,7 @@ class SPDTransformerClassifier(nn.Module):
                 brain_region_sequence_length=brain_region_sequence_length,
                 tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                ffn_type=ffn_type,
                 metric=metric,
                 depth=depth,
                 pooling=pooling,
@@ -166,6 +172,7 @@ class SPDTransformerClassifier(nn.Module):
                 brain_region_sequence_length=brain_region_sequence_length,
                 tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                ffn_type=ffn_type,
                 metric=metric,
                 depth=depth,
                 pooling=pooling,

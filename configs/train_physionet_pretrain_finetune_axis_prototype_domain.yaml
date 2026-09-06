@@ -49,6 +49,8 @@ data:
   baseline_window: [null]
 
 model:
+  # Applies to both pretrain and fine-tune. Hidden width is ignored by the mixer.
+  ffn_type: ["tangent_mixer"]
   # Independent axis metrics; Q/K/V projections always remain independent.
   # true shares same-axis metrics across layers with matching dimensions.
   share_metric_across_layers: [false]

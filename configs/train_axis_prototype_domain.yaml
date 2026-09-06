@@ -60,6 +60,8 @@ data:
   allow_subject_overlap: [true, false]  # use [true, false] to compare both splits
 
 model:
+  # current preserves the baseline FFN; tangent_mixer uses one d -> d map.
+  ffn_type: ["tangent_mixer"]
   # Independent axis metrics; Q/K/V projections always remain independent.
   # true shares same-axis metrics across layers with matching dimensions.
   share_metric_across_layers: [false]

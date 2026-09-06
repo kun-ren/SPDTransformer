@@ -43,6 +43,7 @@ class SPDEncoder(nn.Module):
             dropout: float = 0.0,
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: AddNormType = "trace",
+            ffn_type: str = "current",
     ):
         super().__init__()
         print("init single head encoder")
@@ -97,6 +98,7 @@ class SPDEncoder(nn.Module):
         self.time_ffn = SPDFeedForward(
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
+            ffn_type=ffn_type,
             dropout=dropout,
             eps=eps
         )
@@ -138,6 +140,7 @@ class SPDEncoder(nn.Module):
         self.frequency_ffn = SPDFeedForward(
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
+            ffn_type=ffn_type,
             dropout=dropout,
             eps=eps
         )
@@ -178,6 +181,7 @@ class SPDEncoder(nn.Module):
         self.region_ffn = SPDFeedForward(
             spd_out_dim,
             hidden_spd_dim=ffn_hidden_spd_dim,
+            ffn_type=ffn_type,
             dropout=dropout,
             eps=eps
         )
@@ -339,6 +343,7 @@ class SPDTransformer(nn.Module):
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: AddNormType = "trace",
             share_metric_across_layers: bool = False,
+            ffn_type: str = "current",
     ):
         super().__init__()
         if depth < 1:
@@ -363,6 +368,7 @@ class SPDTransformer(nn.Module):
                 brain_region_sequence_length=brain_region_sequence_length,
                 tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                ffn_type=ffn_type,
                 metric=metric,
                 attention_dropout=attention_dropout,
                 debug_attention_dropout=debug_attention_dropout,
@@ -389,6 +395,7 @@ class SPDTransformer(nn.Module):
                 brain_region_sequence_length=brain_region_sequence_length,
                 tau=tau,
                 ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+                ffn_type=ffn_type,
                 metric=metric,
                 attention_dropout=attention_dropout,
                 debug_attention_dropout=debug_attention_dropout,

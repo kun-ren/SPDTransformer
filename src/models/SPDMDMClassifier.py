@@ -257,6 +257,7 @@ class SPDMDMClassifier(nn.Module):
             stage_projection_init: Literal["identity", "random"] = "identity",
             add_norm_type: str = "trace",
             share_metric_across_layers: bool = False,
+            ffn_type: str = "current",
     ):
         super().__init__()
         pooling = self._normalize_pooling(pooling)
@@ -279,6 +280,7 @@ class SPDMDMClassifier(nn.Module):
             brain_region_sequence_length=brain_region_sequence_length,
             tau=tau,
             ffn_hidden_spd_dim=ffn_hidden_spd_dim,
+            ffn_type=ffn_type,
             metric=metric,
             attention_dropout=attention_dropout,
             debug_attention_dropout=debug_attention_dropout,
