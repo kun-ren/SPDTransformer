@@ -1,14 +1,12 @@
 """Cross-subject pretraining followed by target-subject run adaptation.
 
-For each requested target subject:
-1. train a fresh model on every trial from all *other* subjects;
-2. restore that identical pretrained state for every target recording run;
-3. fine-tune on the target subject's remaining runs;
-4. split that run evenly into validation/test trials;
-5. use validation for scheduling/early stopping and test the best checkpoint once.
+The default formal configuration pretrains on all other-subject trials, then
+holds out each complete target run for test while fine-tuning on its other runs.
+Every run fold starts from the identical pretrain state and fresh optimizers.
+Both stages use no validation and save the final epoch, not a selected best epoch.
 
-Other-subject pretraining independently uses stratified train/validation/test
-partitions (70/15/15 by default).
+Legacy validation/early-stopping and explicit leave-one-trial-out configurations
+remain supported, but are not the default protocol.
 """
 
 from __future__ import annotations
@@ -73,7 +71,7 @@ from src.training.train import (  # noqa: E402
 )
 
 
-DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_physionet_pretrain_finetune_loro.yaml"
+DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_physionet_pretrain_finetune_motor_11x9.yaml"
 
 
 def format_subject_id(subject_number: int, dataset_name: str) -> str:
@@ -531,6 +529,240 @@ def summarize_subjects(
     return rows
 
 
+def validate_final_epoch_config(cfg: dict[str, Any], stage: str) -> None:
+    if int(cfg.get("epochs", 0)) < 1:
+        raise ValueError(f"{stage}.epochs must be positive.")
+    if parse_bool(cfg.get("use_validation", False)):
+        raise ValueError(f"{stage}: final-epoch training requires use_validation=false.")
+    if cfg.get("checkpoint_selection", "last") != "last":
+        raise ValueError(f"{stage}: no-validation training requires checkpoint_selection=last.")
+    if float(cfg.get("validation_size", 0)) != 0 or float(cfg.get("test_size", 0)) != 0:
+        raise ValueError(f"{stage}: validation_size and test_size must both be zero.")
+    scheduler = str(cfg.get("lr_scheduler", "none")).strip().lower()
+    if scheduler not in {"none", "", "null", "false", "off", "multistep", "multi_step", "multisteplr"}:
+        raise ValueError(f"{stage}: no-validation training supports only none/multistep schedulers.")
+
+
+def train_final_epoch(model, train_loader, cfg, *, device, history_path, stage_name):
+    """Fixed-budget fitting: never evaluates holdouts or selects an earlier epoch."""
+    validate_final_epoch_config(cfg, stage_name)
+    epochs = int(cfg["epochs"])
+    optimizer, optimizer_stiefel = make_optimizers(model, cfg)
+    _, _, scheduler, stiefel_scheduler = build_lr_schedulers(cfg, optimizer, optimizer_stiefel)
+    criterion = nn.CrossEntropyLoss()
+    history = []
+    print(f"    {stage_name}: no validation/early stopping; checkpoint=epoch {epochs}")
+    for epoch in range(1, epochs + 1):
+        # Record the LR used for this epoch, before stepping the scheduler.
+        euclid_lr = optimizer_lr_values(optimizer)[0]
+        stiefel_lr = optimizer_lr_values(optimizer_stiefel)[0] if optimizer_stiefel else None
+        metrics = train_one_epoch(
+            model, train_loader, criterion, optimizer, optimizer_stiefel, device,
+            gradient_clip_norm=cfg.get("gradient_clip_norm", 1.0),
+            debug_anomaly=parse_bool(cfg.get("debug_anomaly", False)),
+            condition_regularization_weight=float(cfg.get("condition_regularization_weight", 0)),
+            **prototype_loss_options(cfg), **domain_epoch_options(model, cfg, epoch, epochs),
+        )
+        if scheduler is not None:
+            scheduler.step()
+        if stiefel_scheduler is not None:
+            stiefel_scheduler.step()
+        row = {
+            "epoch": epoch, "train_loss": float(metrics["loss"]),
+            "train_accuracy": float(metrics["accuracy"]),
+            "train_macro_f1": float(metrics["macro_f1"]),
+            **auxiliary_loss_history(metrics),
+            "euclid_lr": euclid_lr, "stiefel_lr": stiefel_lr,
+        }
+        history.append(row)
+        _write_csv(history_path, history)
+        print(
+            f"    {stage_name} epoch {epoch:03d}/{epochs}: "
+            f"train loss={row['train_loss']:.4f}, accuracy={row['train_accuracy']:.4f}, "
+            f"mf1={row['train_macro_f1']:.4f} | {format_auxiliary_losses(metrics)} | "
+            f"lr={euclid_lr:.3e}, stiefel_lr={stiefel_lr}"
+        )
+    return _cpu_state_dict(model), epochs
+
+
+def validate_trial_holdouts(y, subject_labels, target_subjects, *, num_classes, dataset_name):
+    target_indices = {}
+    expected_classes = set(range(num_classes))
+    for number in target_subjects:
+        target = format_subject_id(number, dataset_name)
+        indices = np.flatnonzero(subject_labels == target)
+        sources = np.flatnonzero(subject_labels != target)
+        if not len(indices):
+            raise ValueError(f"Target {target} is absent after preprocessing.")
+        if set(np.unique(y[sources])) != expected_classes:
+            raise ValueError(f"Other subjects for {target} must contain every class.")
+        counts = np.bincount(y[indices], minlength=num_classes)
+        if np.any(counts < 2):
+            raise ValueError(f"{target} needs >=2 trials per class for leave-one-trial-out: {counts}.")
+        target_indices[target] = indices
+    return target_indices
+
+
+def run_final_holdout_experiment(
+    config, pretrain_cfg, fine_tune_cfg, x, y, subject_labels, run_labels,
+    class_names, target_indices, *, full_dataset, device, dtype, run_dir,
+):
+    output_cfg = config["output"]
+    seed = int(pretrain_cfg.get("seed", 42))
+    domain_enabled = parse_bool(config["model"].get("domain_adversarial", False))
+    trial_rows, subject_predictions, run_rows = [], [], []
+    run_holdout = fine_tune_cfg.get("split_strategy") == "leave_one_run_out"
+
+    def write_json(path, payload):
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def loader(dataset, indices, stage):
+        return make_loader(
+            dataset, indices, batch_size=int(stage.get("batch_size", 32)), shuffle=True,
+            num_workers=int(stage.get("num_workers", 0)),
+            pin_memory=parse_bool(stage.get("pin_memory", device.type == "cuda")),
+        )
+
+    for target_position, (target, indices) in enumerate(target_indices.items(), 1):
+        target_dir = run_dir / target
+        target_dir.mkdir()
+        source_indices = np.flatnonzero(subject_labels != target)
+        source_subjects = sorted(set(subject_labels[source_indices].tolist()))
+        mapping, source_dataset = {}, full_dataset
+        if domain_enabled:
+            domains, mapping = encode_subject_domains(subject_labels, source_subjects)
+            source_dataset = SubjectDomainDataset(full_dataset, domains)
+        target_seed = seed + int(target[1:])
+        if run_holdout:
+            from src.baselines.baseline_utils import make_subject_specific_loro_splits
+            local_folds = make_subject_specific_loro_splits(
+                y[indices], subject_labels[indices], run_labels[indices],
+                seed=seed, held_out_run_validation_size=0,
+            )
+            folds = [(run, indices[train], indices[test]) for _, run, train, _, test in local_folds]
+        else:
+            folds = [(int(run_labels[i]), indices[indices != i], np.array([i])) for i in indices]
+        print(
+            f"[{target_position}/{len(target_indices)}] {target}: "
+            f"pretrain={len(source_indices)} trials from {len(source_subjects)} other subjects; "
+            f"validation=0, source test=0; target folds={len(folds)}."
+        )
+        set_seed(target_seed)
+        base_model = make_model(
+            config["model"], x, len(class_names), device=device, dtype=dtype,
+            num_domains=len(mapping) if domain_enabled else None,
+        )
+        pretrained_state, pretrain_epoch = train_final_epoch(
+            base_model, loader(source_dataset, source_indices, pretrain_cfg), pretrain_cfg,
+            device=device, history_path=target_dir / "pretrain_history.csv", stage_name="pretrain",
+        )
+        write_json(target_dir / "pretrain_split.json", {
+            "excluded_target_subject": target, "pretrain_subjects": source_subjects,
+            "train_indices": source_indices.tolist(), "validation_indices": [], "test_indices": [],
+            "checkpoint_selection": "last", "epoch": pretrain_epoch,
+            "domain_subject_mapping": mapping,
+        })
+        checkpoint_common = {
+            "class_names": class_names, "model_config": config["model"],
+            "domain_subject_mapping": mapping, "checkpoint_selection": "last",
+            "target_subject": target,
+        }
+        if parse_bool(output_cfg.get("save_pretrained_checkpoints", True)):
+            torch.save({
+                **checkpoint_common, "model_state_dict": pretrained_state,
+                "epoch": pretrain_epoch, "excluded_target_subject": target,
+                "pretrain_subjects": source_subjects,
+            }, target_dir / "pretrained_last.pt")
+        del base_model
+        target_true, target_pred = [], []
+        for fold, (test_run, train_indices, test_indices) in enumerate(folds, 1):
+            fold_dir = target_dir / (f"test_run_{test_run:02d}" if run_holdout else f"test_trial_{fold:04d}")
+            fold_dir.mkdir()
+            fold_seed = target_seed * 10000 + fold
+            print(
+                f"  [{fold}/{len(folds)}] run={test_run}: "
+                f"fine-tune={len(train_indices)}, validation=0, test={len(test_indices)}."
+            )
+            set_seed(fold_seed)
+            model = make_model(
+                config["model"], x, len(class_names), device=device, dtype=dtype,
+                num_domains=len(mapping) if domain_enabled else None,
+            )
+            # Fresh model AND fresh optimizers for every fold, not sequential adaptation.
+            model.load_state_dict(pretrained_state, strict=True)
+            model.set_domain_head_trainable(False)
+            final_state, final_epoch = train_final_epoch(
+                model, loader(full_dataset, train_indices, fine_tune_cfg), fine_tune_cfg,
+                device=device, history_path=fold_dir / "fine_tune_history.csv", stage_name="fine-tune",
+            )
+            split = {
+                "target_subject": target, "test_run": test_run, "seed": fold_seed,
+                "fine_tune_indices": train_indices.tolist(), "validation_indices": [],
+                "test_indices": test_indices.tolist(), "checkpoint_selection": "last", "epoch": final_epoch,
+            }
+            write_json(fold_dir / "split.json", split)
+            if parse_bool(output_cfg.get("save_fine_tuned_checkpoints", False)):
+                torch.save({
+                    **checkpoint_common, "model_state_dict": final_state,
+                    "epoch": final_epoch, "test_run": test_run, "test_indices": test_indices.tolist(),
+                }, fold_dir / "fine_tuned_last.pt")
+            # Test exactly once, after all updates. Keep every time window of the trial together.
+            model.eval()
+            fold_rows = []
+            with torch.no_grad():
+                for test_index in test_indices:
+                    trial = full_dataset.x[int(test_index):int(test_index) + 1].to(device)
+                    logits, _ = model(trial, return_aux=False)
+                    if not torch.isfinite(logits).all():
+                        raise RuntimeError(f"Non-finite test logits: {target} trial {test_index}.")
+                    probabilities = logits.softmax(-1)[0].cpu().tolist()
+                    predicted, truth = int(logits.argmax(-1).item()), int(y[test_index])
+                    target_true.append(truth)
+                    target_pred.append(predicted)
+                    fold_rows.append({
+                        "target_subject": target, "test_trial_index": int(test_index),
+                        "test_run": test_run, "n_pretrain_trials": len(source_indices),
+                        "n_fine_tune_trials": len(train_indices), "n_test_trials": len(test_indices),
+                        "epoch": final_epoch, "y_true": truth, "y_pred": predicted,
+                        "test_accuracy": float(predicted == truth),
+                        **{f"probability_class_{i}": p for i, p in enumerate(probabilities)},
+                    })
+            trial_rows.extend(fold_rows)
+            _write_csv(fold_dir / "test_prediction.csv", fold_rows)
+            _write_csv(run_dir / "per_trial_results.csv", trial_rows)
+            fold_accuracy = statistics.fmean(row["test_accuracy"] for row in fold_rows)
+            if run_holdout:
+                run_rows.append({"target_subject": target, "test_run": test_run,
+                                 "n_train": len(train_indices), "n_test": len(test_indices),
+                                 "test_accuracy": fold_accuracy, "epoch": final_epoch})
+                _write_csv(run_dir / "per_run_results.csv", run_rows)
+            print(f"    test accuracy={fold_accuracy:.4f}")
+            del model, final_state
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        # Single-trial F1/kappa are not meaningful: aggregate all out-of-fold predictions first.
+        prediction = {"y_true": np.array(target_true), "y_pred": np.array(target_pred)}
+        subject_predictions.append({"target_subject": target, "_y_true": prediction["y_true"], "_y_pred": prediction["y_pred"]})
+        save_per_class_metrics(target_dir / "per_class_metrics.csv", {"test": prediction}, class_names)
+        save_confusion_matrices(target_dir / "confusion_matrix.csv", {"test": prediction}, class_names)
+        subject_rows = summarize_subjects(subject_predictions, num_classes=len(class_names))
+        _write_csv(run_dir / "per_subject_summary.csv", subject_rows)
+        current_summary = next(row for row in subject_rows if row["Subject"] == target)
+        print(f"  {target} held-out accuracy={current_summary['Accuracy (%)']:.2f}%")
+    accuracies = [float(row["Accuracy (%)"]) / 100 for row in subject_rows]
+    overall = {
+        "protocol": "other-subject all-trial pretrain + target " + ("leave-one-run-out" if run_holdout else "leave-one-trial-out") + " fine-tune",
+        "checkpoint_selection": "last", "validation_used": False,
+        "n_target_subjects": len(subject_rows), "n_test_trials": len(trial_rows),
+        "class_names": class_names, "mean_subject_accuracy": statistics.fmean(accuracies),
+        "between_subject_accuracy_sd": statistics.stdev(accuracies) if len(accuracies) > 1 else 0.0,
+        "pooled_trial_accuracy": statistics.fmean(row["test_accuracy"] for row in trial_rows),
+    }
+    write_json(run_dir / "overall_summary.json", overall)
+    print(f"Mean subject accuracy={overall['mean_subject_accuracy']:.4f}; results={run_dir}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -601,6 +833,18 @@ def main(argv: list[str] | None = None) -> int:
         if int(cfg.get("epochs", 0)) < 1:
             raise ValueError(f"{name}.epochs must be at least 1.")
 
+    split_strategy = str(fine_tune_cfg.get("split_strategy", "leave_one_run_out"))
+    if split_strategy not in {"leave_one_run_out", "leave_one_trial_out"}:
+        raise ValueError(f"Unknown fine_tune.split_strategy: {split_strategy!r}.")
+    trial_holdout = split_strategy == "leave_one_trial_out"
+    final_holdout = trial_holdout or (
+        fine_tune_cfg.get("checkpoint_selection") == "last"
+        and not parse_bool(fine_tune_cfg.get("use_validation", True))
+    )
+    if final_holdout:
+        validate_final_epoch_config(pretrain_cfg, "pretrain")
+        validate_final_epoch_config(fine_tune_cfg, "fine_tune")
+
     dataset_name = normalize_dataset_name(data_cfg.get("dataset"))
     expected_runs: list[int] | str
     if dataset_name == "physionet_mi":
@@ -611,11 +855,16 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         expected_runs = "MOABB session/run pairs (normally 12 per subject)"
-    print("Protocol: other-subject pretraining -> target-subject run adaptation.")
-    print(
-        "Pretrain split=train/validation/test with configured 0.70/0.15/0.15; "
-        "each target run is split evenly into validation/test."
-    )
+    if final_holdout:
+        print(f"Protocol: all other-subject trials -> target {split_strategy}; "
+              "no validation, no early stopping, last-epoch checkpoints. "
+              "Every fold restarts from the same pretrain checkpoint.")
+    else:
+        print("Protocol: other-subject pretraining -> target-subject run adaptation.")
+        print(
+            "Pretrain split=train/validation/test with configured fractions; "
+            "each target run is split evenly into validation/test."
+        )
     print(
         "Targets="
         f"{','.join(format_subject_id(value, dataset_name) for value in target_subjects)}, "
@@ -663,14 +912,21 @@ def main(argv: list[str] | None = None) -> int:
             f"This experiment needs at least two classes, got "
             f"{num_classes}: {class_names}."
         )
-    run_map = validate_protocol(
-        y,
-        subject_labels,
-        run_labels,
+    protocol_validator = validate_trial_holdouts if final_holdout else validate_protocol
+    validation_args = (y, subject_labels) if final_holdout else (y, subject_labels, run_labels)
+    run_map = protocol_validator(
+        *validation_args,
         target_subjects,
         num_classes=num_classes,
         dataset_name=dataset_name,
     )
+    if final_holdout and not trial_holdout:
+        from src.baselines.baseline_utils import make_subject_specific_loro_splits
+        target_mask = np.isin(subject_labels, list(run_map))
+        make_subject_specific_loro_splits(
+            y[target_mask], subject_labels[target_mask], run_labels[target_mask],
+            seed=int(pretrain_cfg.get("seed", 42)), held_out_run_validation_size=0,
+        )
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     precision = normalize_precision_name(pretrain_cfg.get("precision", "float32"))
@@ -701,6 +957,12 @@ def main(argv: list[str] | None = None) -> int:
     # Construct one tensor view for the whole cohort. Subset keeps only integer
     # indices, avoiding a multi-gigabyte NumPy copy for every target subject.
     full_dataset = MotorImageryDataset(x, y, dtype=dtype)
+    if final_holdout:
+        return run_final_holdout_experiment(
+            config, pretrain_cfg, fine_tune_cfg, x, y, subject_labels, run_labels,
+            class_names, run_map, full_dataset=full_dataset, device=device,
+            dtype=dtype, run_dir=run_dir,
+        )
     num_workers = int(pretrain_cfg.get("num_workers", 0))
     pin_memory = parse_bool(
         pretrain_cfg.get("pin_memory", device.type == "cuda"),

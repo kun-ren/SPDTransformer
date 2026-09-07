@@ -160,6 +160,42 @@ def parse_bool(value: Any, default: bool = False) -> bool:
     raise ValueError(f"Cannot parse boolean value: {value!r}")
 
 
+def make_subject_specific_trial_splits(y, subject_labels):
+    """Leave one complete trial out within each subject, without validation."""
+    y = np.asarray(y, dtype=np.int64)
+    subjects = np.asarray(subject_labels, dtype=np.str_)
+    if y.shape != subjects.shape or y.ndim != 1 or not len(y):
+        raise ValueError("Labels and subjects must be nonempty aligned vectors.")
+    expected = set(np.unique(y))
+    folds = []
+    for subject in np.unique(subjects):
+        indices = np.flatnonzero(subjects == subject)
+        classes, counts = np.unique(y[indices], return_counts=True)
+        if set(classes) != expected or np.any(counts < 2):
+            raise ValueError(f"{subject} needs at least two trials of every class.")
+        for index in indices:
+            folds.append((str(subject), int(index), indices[indices != index],
+                          np.empty(0, dtype=np.int64), np.array([index], dtype=np.int64)))
+    return folds
+
+
+def mean_logeuclidean_tokens(x_spd, eps=1e-6, batch_size=16):
+    """Pool each trial independently, bounding the eigendecomposition workspace."""
+    if x_spd.ndim < 3 or x_spd.shape[-1] != x_spd.shape[-2]:
+        raise ValueError("Expected (trials, ..., D, D) covariance matrices.")
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive.")
+    result = np.empty((len(x_spd), *x_spd.shape[-2:]), dtype=np.float64)
+    token_axes = tuple(range(1, x_spd.ndim - 2))
+    for start in range(0, len(x_spd), batch_size):
+        matrices = x_spd[start:start + batch_size]
+        if token_axes:
+            result[start:start + batch_size] = matrix_exp(matrix_log(matrices, eps=eps).mean(axis=token_axes))
+        else:
+            result[start:start + batch_size] = matrices
+    return result
+
+
 def make_subject_specific_loro_splits(
     y: np.ndarray,
     subject_labels: np.ndarray,
@@ -168,7 +204,7 @@ def make_subject_specific_loro_splits(
     held_out_run_validation_size: float = 0.5,
     seed: int,
 ) -> list[tuple[str, int, np.ndarray, np.ndarray, np.ndarray]]:
-    """Leave each run out and split that run into validation/test halves."""
+    """Leave each run out; zero validation size keeps the entire run for test."""
 
     from sklearn.model_selection import train_test_split
 
@@ -177,8 +213,8 @@ def make_subject_specific_loro_splits(
     run_labels = np.asarray(run_labels, dtype=np.int16)
     if not (len(y) == len(subject_labels) == len(run_labels)):
         raise ValueError("y, subject_labels, and run_labels must align.")
-    if not 0.0 < held_out_run_validation_size < 1.0:
-        raise ValueError("held_out_run_validation_size must be between 0 and 1.")
+    if not 0.0 <= held_out_run_validation_size < 1.0:
+        raise ValueError("held_out_run_validation_size must be in [0, 1).")
 
     expected_classes = set(np.unique(y).astype(int).tolist())
     splits: list[tuple[str, int, np.ndarray, np.ndarray, np.ndarray]] = []
@@ -211,6 +247,10 @@ def make_subject_specific_loro_splits(
                     f"Subject {subject} excluding run {held_out_run} has classes "
                     f"{sorted(train_classes)}, expected {sorted(expected_classes)}."
                 )
+            if held_out_run_validation_size == 0:
+                splits.append((subject, held_out_run, train_idx,
+                               np.empty(0, dtype=np.int64), held_out_idx))
+                continue
             held_out_counts = np.bincount(
                 y[held_out_idx], minlength=max(expected_classes) + 1
             )

@@ -1,18 +1,14 @@
-# Formal 11x9 training: no validation and last-epoch checkpoints.
-# train_grid.yaml-aligned singleton-grid configuration.
-# data.subjects is the target subject set: use 1 or 1-10.
-# data.pretrain_subjects is the complete candidate pretraining cohort; the
-# current target is removed automatically before every target-specific run.
+# Global cross-subject training based on the current motor_11x9 configuration.
+# Five subject folds by default, fixed epochs, no validation or fine-tuning.
+# Each fold is initialized independently; only the final epoch is tested/saved.
 
 data:
   dataset: ["physionet_mi"]
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
 
-  # Subjects to evaluate/fine-tune. This matches train_grid.yaml semantics.
+  # Complete cohort for subject-wise cross-validation.
   subjects: 1-87,90-91,93-99,101-103,105,107-109
-  # Full cohort available for preprocessing and other-subject pretraining.
   # Exclude S088, S089, S092, S100, S104, and S106.
-  pretrain_subjects: 1-87,90-91,93-99,101-103,105,107-109
 
   # As in train_grid.yaml, one filter-bank candidate needs an extra list level.
   filter_bank: [[[5, 13], [13, 20], [20, 35]]]
@@ -50,7 +46,7 @@ data:
   baseline_window: [null]
 
 model:
-  # Applies to both pretrain and fine-tune. Hidden width is ignored by the mixer.
+  # Model settings match the 11x9 pretrain/fine-tune configuration.
   ffn_type: ["tangent_mixer"]
   # Independent axis metrics; Q/K/V projections always remain independent.
   # true shares same-axis metrics across layers with matching dimensions.
@@ -82,7 +78,10 @@ model:
   learnable_metric_rank: [4]
   eps: [1.0e-6]
 
-pretrain:
+training:
+  cv_n_splits: [5]
+  cv_shuffle: [true]
+  cv_seed: [42]
   # CE + lambda1 * class-conditional distance + lambda2 * prototype margin.
   # Both zero disables prototype regularization.
   prototype_intra_weight: [0.000]
@@ -93,10 +92,8 @@ pretrain:
   domain_adversarial_warmup_epochs: [50]
   domain_adversarial_schedule: ["dann"]
   domain_loss_normalize: [true]
-  # Every trial of every other subject is used for pretraining.
+  # All trials of the fold's training subjects; test subjects stay unseen.
   use_validation: [false]
-  validation_size: [0.0]
-  test_size: [0.0]
   checkpoint_selection: ["last"]
   epochs: [100]
   batch_size: [128]
@@ -116,36 +113,7 @@ pretrain:
   pin_memory: [true]
   allow_tf32: [false]
 
-fine_tune:
-  # CE + lambda1 * class-conditional distance + lambda2 * prototype margin.
-  # Both zero disables prototype regularization.
-  prototype_intra_weight: [0.001]
-  prototype_inter_weight: [0.01]
-  prototype_margin: [3.0]
-  # Single-target fine-tuning freezes and skips the source-domain head.
-  # Hold out each complete run for test. Other runs fine-tune a fresh copy
-  # of the same pretrain checkpoint. No part of the held-out run is trained on.
-  split_strategy: ["leave_one_run_out"]
-  use_validation: [false]
-  checkpoint_selection: ["last"]
-  epochs: [60]
-  batch_size: [64]
-  precision: ["float32"]
-  learning_rate: [0.0006]
-  stiefel_learning_rate: [0.0001]
-  lr_scheduler: ["multistep"]
-  lr_scheduler_milestones: [[20, 35]]
-  lr_scheduler_gamma: [0.5]
-  weight_decay: [0.01]
-  apply_weight_decay_to_special_parameters: [true]
-  gradient_clip_norm: [1.5]
-  condition_regularization_weight: [0.0]
-  num_workers: [0]
-  pin_memory: [true]
-  allow_tf32: [false]
-
 output:
-  dir: experiments/results/physionet_pretrain_finetune_motor_11x9_run_loo_final
+  dir: experiments/results/physionet_global_motor_11x9
   dataset_cache_dir: experiments/cache/preprocessed_datasets
-  save_pretrained_checkpoints: true
-  save_fine_tuned_checkpoints: true
+  save_fold_checkpoints: true

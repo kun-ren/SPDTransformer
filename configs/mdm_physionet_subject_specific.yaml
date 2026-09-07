@@ -1,5 +1,5 @@
-# PhysioNet preprocessing aligned to train_physionet_pretrain_finetune_motor_11x9.yaml.
-# Same bands, trial window and segmentation; full-channel baseline spatial input.
+# Subject-specific MDM; same preprocessing as mdm_physionet.yaml.
+# Train only on the current subject's other runs; no global pretraining.
 data:
   dataset: ["physionet_mi"]
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
@@ -10,7 +10,14 @@ data:
 
   # As in train_grid.yaml, one filter-bank candidate needs an extra list level.
   filter_bank: [[[5, 13], [13, 20], [20, 35]]]
+  estimator: ["lwf"]
   sfreq: [160]
+  eps: [1.0e-6]
+  covariance_signal_scale: ["auto"]
+  replace_covariance_diagonal_with_raw_energy: [true]
+  # Baselines retain full 64-channel spatial coordinates, not region tokens.
+  brain_region_mode: [null]
+  covariance_output_dtype: ["float32"]
   channels: [null]
 
   imaged: [true]
@@ -36,30 +43,26 @@ data:
   baseline_correction: [null]
   baseline_window: [null]
 
+model:
+  # Preprocessing-matched MDM: fixed log mean of segment/filter-bank tokens.
+  # Class centroids and prediction distances still use AIRM.
+  classifier_type: ["pyriemann"]
+  pooling: ["mean"]
+  token_weight_logits: null
+  metric_mean: ["riemann"]
+  metric_distance: ["riemann"]
+  n_jobs: [1]
+
 training:
   seed: [42]
-  # Same subject KFold partitions as the global SPDTransformer configuration.
   n_splits: [5]
-  subject_specific: [false]
-  allow_subject_overlap: [false]
-  subject_fold_method: ["kfold"]
-  cv_shuffle: [true]
+  subject_specific: [true]
+  subject_split_strategy: ["leave_one_run_out"]
+  held_out_run_validation_size: [0.0]
+  allow_subject_overlap: [true]
   val_size: [0.0]
-
-model:
-  # Per-band CSP is fitted only on training-trial windows; mean over windows,
-  # concatenate the three band feature vectors, then fit shrinkage LDA.
-  input_mode: segmented_filterbank
-  # Six filters is the established PhysioNet CSP setting. Ledoit-Wolf
-  # regularization is applied both to CSP covariance estimation and LDA,
-  # which is more stable for the small number of trials in each subject/run.
-  n_components: 6
-  csp_reg: ledoit_wolf
-  csp_log: true
-  csp_norm_trace: false
-  lda_solver: lsqr
-  lda_shrinkage: auto
-  mne_log_level: WARNING
+  split_file: null
 
 output:
-  dir: experiments/results/csp_lda_global_physionet_aligned
+  dir: experiments/results/mdm_subject_specific_run_loo_physionet_aligned
+  dataset_cache_dir: experiments/cache/mdm_preprocessed_datasets

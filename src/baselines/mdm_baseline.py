@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 from sklearn.model_selection import (
     GroupShuffleSplit,
+    KFold,
     StratifiedGroupKFold,
     StratifiedKFold,
     train_test_split,
@@ -38,6 +39,8 @@ from src.baselines.baseline_utils import (
     load_spd_like_train,
     load_yaml,
     make_subject_specific_loro_splits,
+    make_subject_specific_trial_splits,
+    mean_logeuclidean_tokens,
     matrix_exp,
     matrix_log,
     normalize_dataset_name,
@@ -691,15 +694,14 @@ def pool_spd_tokens(
             "has_parameters": False,
         }
 
-    log_x = matrix_log(x_spd, eps=eps)
     if pooling == "mean":
-        pooled_log = log_x.mean(axis=token_axes)
-        return matrix_exp(pooled_log).astype(np.float64), {
+        return mean_logeuclidean_tokens(x_spd, eps=eps), {
             "mode": "mean",
             "token_shape": list(token_shape),
             "has_parameters": False,
         }
 
+    log_x = matrix_log(x_spd, eps=eps)
     weights, source = resolve_token_weights(model_cfg, token_shape)
     view_shape = (1, *token_shape, 1, 1)
     pooled_log = (log_x * weights.reshape(view_shape)).sum(axis=token_axes)
@@ -1298,8 +1300,19 @@ def make_mdm_cv_splits(
     n_splits: int,
     seed: int,
     allow_subject_overlap: bool,
+    subject_fold_method: str = "stratified_group",
+    cv_shuffle: bool = True,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     indices = np.arange(len(y))
+    if subject_fold_method not in {"stratified_group", "kfold"}:
+        raise ValueError("subject_fold_method must be stratified_group or kfold.")
+    if not allow_subject_overlap and subject_fold_method == "kfold":
+        subjects = np.unique(subject_labels)
+        splitter = KFold(n_splits=n_splits, shuffle=cv_shuffle,
+                         random_state=seed if cv_shuffle else None)
+        return [(np.flatnonzero(np.isin(subject_labels, subjects[train])),
+                 np.flatnonzero(np.isin(subject_labels, subjects[test])))
+                for train, test in splitter.split(subjects)]
     if allow_subject_overlap:
         splitter = StratifiedKFold(
             n_splits=n_splits,
@@ -1412,6 +1425,69 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_subject_holdout_mdm(run_index, experiment_cfg, x_spd, y, subjects, runs,
+                          class_names, metric, base_output_dir):
+    """Classical MDM fitted inside each subject, with no validation dataset."""
+    from pyriemann.classification import MDM
+
+    model_cfg = experiment_cfg.get("model", {})
+    training = experiment_cfg["training"]
+    strategy = training.get("subject_split_strategy", "leave_one_run_out")
+    if strategy not in {"leave_one_run_out", "leave_one_trial_out"}:
+        raise ValueError(f"Unknown subject_split_strategy: {strategy}")
+    if float(training.get("val_size", 0)) != 0:
+        raise ValueError("No-validation subject-specific MDM requires val_size=0.")
+    run_holdout = strategy == "leave_one_run_out"
+    folds = (make_subject_specific_loro_splits(
+        y, subjects, runs, seed=int(training.get("seed", 42)), held_out_run_validation_size=0,
+    ) if run_holdout else make_subject_specific_trial_splits(y, subjects))
+    x_trial, pooling = pool_spd_tokens(x_spd, model_cfg,
+                                      eps=float(experiment_cfg["data"].get("eps", 1e-6)))
+    run_dir = base_output_dir / f"run_{run_index:03d}_{config_hash(experiment_cfg)}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    save_json(run_dir / "config.json", experiment_cfg)
+    split_rows, trial_rows, prediction_rows, test_rows = [], [], [], []
+    for subject, index, train, validation, test in folds:
+        classifier = MDM(metric=metric, n_jobs=int(model_cfg.get("n_jobs", 1)))
+        classifier.fit(x_trial[train], y[train])
+        prediction = classifier.predict(x_trial[test])
+        test_rows.extend({"subject": subject, "test_run": int(runs[i]),
+                          "test_trial_index": int(i), "y_true": int(y[i]), "y_pred": int(pred)}
+                         for i, pred in zip(test, prediction))
+        trial_rows.append({
+            "subject": subject, "test_run": int(index if run_holdout else runs[index]),
+            **({} if run_holdout else {"test_trial_index": index}),
+            "n_train": len(train), "n_validation": 0, "n_test": len(test),
+            **compute_mdm_metrics(y[test], prediction),
+        })
+        prediction_rows.append({"subject": subject, "_y_true": y[test], "_y_pred": prediction})
+        split_rows.append({"subject": subject, ("test_run" if run_holdout else "test_trial_index"): index,
+                           "train_indices": train.tolist(), "validation_indices": [],
+                           "test_indices": test.tolist()})
+    subject_rows = summarize_subject_fold_metrics(prediction_rows, MDM_REPORT_METRICS)
+    # Compute F1/kappa on all out-of-fold trials per subject, not on single trials.
+    subject_metrics = [{"accuracy": row["Accuracy (%)"] / 100,
+                        "macro_f1": row["Macro-F1"], "cohen_kappa": row["Cohen’s κ"]}
+                       for row in subject_rows]
+    aggregates = aggregate_mdm_fold_metrics(subject_metrics)
+    write_csv(run_dir / ("per_run_results.csv" if run_holdout else "per_trial_results.csv"), trial_rows)
+    write_csv(run_dir / "results.csv", trial_rows)
+    write_csv(run_dir / "test_predictions.csv", test_rows)
+    write_csv(run_dir / "per_subject_summary.csv", subject_rows)
+    save_json(run_dir / "splits.json", split_rows)
+    save_json(run_dir / "summary.json", {
+        "baseline": "mdm", "classifier_type": "pyriemann", "config": experiment_cfg,
+        "class_names": class_names, "token_pooling": pooling, "metric": metric,
+        "evaluation": {"strategy": "subject_specific_" + ("leave_one_run_out" if run_holdout else "leave_one_trial_out"), "validation_used": False},
+        "subjects": subject_rows, "aggregates": aggregates,
+        "aggregate_unit": "subject", "splits_file": "splits.json",
+    })
+    for row in subject_rows:
+        print(f"MDM {row['Subject']}: {row['Trials']} held-out trials, accuracy={row['Accuracy (%)']:.2f}%")
+    return {"status": "completed", "run_index": run_index, "run_dir": str(run_dir),
+            **{f"test_{metric}_mean": stats["mean"] for metric, stats in aggregates.items()}}
+
+
 def run_experiment(
     run_index: int,
     experiment_cfg: dict,
@@ -1437,11 +1513,24 @@ def run_experiment(
 
     validate_data_model_compatibility(data_cfg, model_cfg)
 
+    no_validation_subject_specific = (
+        parse_bool(training_cfg.get("subject_specific", False))
+        and (training_cfg.get("subject_split_strategy", "leave_one_run_out") == "leave_one_trial_out"
+             or float(training_cfg.get("held_out_run_validation_size", 0.5)) == 0)
+    )
+    if no_validation_subject_specific and classifier_type != "pyriemann":
+        raise ValueError("No-validation subject-specific MDM currently requires classifier_type='pyriemann'.")
+
     x_spd, y, subject_labels, run_labels, class_names = load_or_preprocess_spd(
         data_cfg,
         dataset_cache_dir,
         data_cache,
     )
+    if no_validation_subject_specific:
+        metric = resolve_mdm_metric(model_cfg, cli_metric=cli_metric,
+                                    cli_mean_metric=cli_mean_metric, cli_distance_metric=cli_distance_metric)
+        return run_subject_holdout_mdm(run_index, experiment_cfg, x_spd, y, subject_labels,
+                                     run_labels, class_names, metric, base_output_dir)
     (
         n_splits,
         seed,
@@ -1475,6 +1564,8 @@ def run_experiment(
                     n_splits=n_splits,
                     seed=seed,
                     allow_subject_overlap=allow_subject_overlap,
+                    subject_fold_method=training_cfg.get("subject_fold_method", "stratified_group"),
+                    cv_shuffle=parse_bool(training_cfg.get("cv_shuffle", True)),
                 ),
                 start=1,
             )
@@ -1737,7 +1828,8 @@ def run_experiment(
                 else (
                     "stratified_kfold"
                     if allow_subject_overlap
-                    else "stratified_group_kfold"
+                    else ("subject_kfold" if training_cfg.get("subject_fold_method") == "kfold"
+                          else "stratified_group_kfold")
                 )
             ),
             "n_splits": None if subject_specific else n_splits,

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from sklearn.base import BaseEstimator, TransformerMixin, clone
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -65,11 +66,20 @@ def build_cv_splits(
     n_splits: int,
     seed: int,
     allow_subject_overlap: bool,
+    subject_fold_method: str = "stratified_group",
+    cv_shuffle: bool = True,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """Create 80/20-style folds without a separate validation dataset."""
     from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
     indices = np.arange(len(y))
+    if not allow_subject_overlap and subject_fold_method == "kfold":
+        from src.training.train_global_cross_subject import make_subject_folds
+        return [(fold[2], fold[3]) for fold in make_subject_folds(
+            subject_labels, n_splits, shuffle=cv_shuffle, seed=seed,
+        )]
+    if subject_fold_method not in {"kfold", "stratified_group"}:
+        raise ValueError(f"Unknown subject_fold_method: {subject_fold_method}")
     if allow_subject_overlap:
         splitter = StratifiedKFold(
             n_splits=n_splits,
@@ -134,6 +144,34 @@ def validate_cv_config(
     return n_splits, seed, allow_subject_overlap, held_out_run_validation_size
 
 
+class SegmentedFilterBankCSP(TransformerMixin, BaseEstimator):
+    """Fit one CSP per band on training windows, then mean window features."""
+
+    def __init__(self, csp):
+        self.csp = csp
+
+    def fit(self, x, y):
+        if x.ndim != 5 or len(x) != len(y):
+            raise ValueError("Expected aligned (trial, segment, band, channel, sample) input.")
+        self.n_bands_ = x.shape[2]
+        self.csps_ = []
+        for band in range(self.n_bands_):
+            windows = x[:, :, band].reshape(-1, *x.shape[-2:]).astype(np.float64)
+            csp = clone(self.csp)
+            csp.fit(windows, np.repeat(y, x.shape[1]))
+            self.csps_.append(csp)
+        return self
+
+    def transform(self, x):
+        if x.ndim != 5 or x.shape[2] != self.n_bands_:
+            raise ValueError("Segmented CSP input band count differs from training.")
+        features = []
+        for band, csp in enumerate(self.csps_):
+            windows = x[:, :, band].reshape(-1, *x.shape[-2:]).astype(np.float64)
+            features.append(csp.transform(windows).reshape(len(x), x.shape[1], -1).mean(axis=1))
+        return np.concatenate(features, axis=-1)
+
+
 def build_csp_lda_pipeline(
     n_components: int,
     model_cfg: dict[str, Any] | None = None,
@@ -172,6 +210,11 @@ def build_csp_lda_pipeline(
         solver=lda_solver,
         shrinkage=lda_shrinkage,
     )
+    input_mode = model_cfg.get("input_mode", "original")
+    if input_mode not in {"original", "segmented_filterbank"}:
+        raise ValueError("CSP input_mode must be original or segmented_filterbank.")
+    if input_mode == "segmented_filterbank":
+        csp = SegmentedFilterBankCSP(csp)
     return Pipeline(
         [
             ("csp", csp),
@@ -273,6 +316,8 @@ def run_experiment(
                     n_splits=n_splits,
                     seed=seed,
                     allow_subject_overlap=allow_subject_overlap,
+                    subject_fold_method=training_cfg.get("subject_fold_method", "stratified_group"),
+                    cv_shuffle=parse_bool(training_cfg.get("cv_shuffle", True)),
                 ),
                 start=1,
             )
@@ -281,13 +326,14 @@ def run_experiment(
     n_segments = x.shape[1]
     n_bands = x.shape[2]
     n_channels = x.shape[3]
-    if n_segments != 1 or n_bands != 1:
+    segmented_filterbank = model_cfg.get("input_mode", "original") == "segmented_filterbank"
+    if not segmented_filterbank and (n_segments != 1 or n_bands != 1):
         raise ValueError(
             "The requested CSP -> LDA Pipeline requires exactly one segment "
             "and one frequency band per trial; got "
             f"n_segments={n_segments}, n_bands={n_bands}."
         )
-    trial_data = x[:, 0, 0]
+    trial_data = x if segmented_filterbank else x[:, 0, 0]
     requested_components = (
         n_components_override
         if n_components_override is not None
@@ -420,6 +466,8 @@ def run_experiment(
 
     summary = {
         "baseline": "csp_lda",
+        "input_mode": model_cfg.get("input_mode", "original"),
+        "segment_feature_pooling": "mean" if segmented_filterbank else None,
         "evaluation": {
             "strategy": (
                 "subject_specific_leave_one_run_out"
@@ -427,7 +475,7 @@ def run_experiment(
                 else (
                     "stratified_kfold"
                     if allow_subject_overlap
-                    else "stratified_group_kfold"
+                    else ("subject_kfold" if training_cfg.get("subject_fold_method") == "kfold" else "stratified_group_kfold")
                 )
             ),
             "n_splits": None if subject_specific else n_splits,
@@ -442,7 +490,7 @@ def run_experiment(
         "filter_bank": filter_bank,
         "x_shape": list(x.shape),
         "n_components": csp_components,
-        "feature_dim": csp_components,
+        "feature_dim": csp_components * n_bands if segmented_filterbank else csp_components,
         "pipeline_steps": ["csp", "lda"],
         "folds": public_rows,
         "runs": public_rows if subject_specific else [],

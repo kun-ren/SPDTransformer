@@ -44,25 +44,54 @@ data:
   baseline_window: [null]
 
 model:
-  # Preprocessing-matched MDM: fixed log mean of segment/filter-bank tokens.
-  # Class centroids and prediction distances still use AIRM.
-  classifier_type: ["pyriemann"]
-  pooling: ["mean"]
-  token_weight_logits: null
-  metric_mean: ["riemann"]
-  metric_distance: ["riemann"]
-  n_jobs: [1]
+  # Fixed, nonlearned input aggregation; the SPDNet network is unchanged.
+  token_pooling: logeuclid_mean
+  # Original SPDNet-style three-stage dimensionality reduction: 64->32->16->8.
+  dims: [32, 16, 8]
+  reig_epsilon: 1.0e-4
+  log_epsilon: 1.0e-6
+  project_stiefel: true
 
 training:
   seed: [42]
-  n_splits: [5]
-  subject_specific: [false]
-  allow_subject_overlap: [false]
-  subject_fold_method: ["kfold"]
-  cv_shuffle: [true]
-  val_size: [0.0]
-  split_file: null
+  protocol: ["pretrain_finetune"]
+  use_validation: [false]
+  checkpoint_selection: ["last"]
+  precision: ["float64"]
+  # Same fixed epoch budget as SPDTransformer pretraining; SPDNet-specific SGD.
+  epochs: [100]
+  batch_size: [30]
+  spdnet_optimizer: ["sgd"]
+  spdnet_learning_rate: [0.01]
+  spdnet_momentum: [0.0]
+  spdnet_weight_decay: [0.0005]
+  gradient_clip_norm: [5.0]
+  lr_scheduler: ["multistep"]
+  lr_scheduler_milestones: [[30, 60]]
+  lr_scheduler_gamma: [0.5]
+  log_every: [10]
+  split_file: [null]
+  num_workers: [0]
+
+# Scalar stage settings (not a hyperparameter grid).
+fine_tune:
+  target_subjects: "all"
+  split_strategy: leave_one_run_out
+  use_validation: false
+  checkpoint_selection: last
+  epochs: 60
+  batch_size: 30
+  precision: float64
+  spdnet_optimizer: sgd
+  spdnet_learning_rate: 0.001
+  spdnet_momentum: 0.0
+  spdnet_weight_decay: 0.0005
+  gradient_clip_norm: 5.0
+  lr_scheduler: multistep
+  lr_scheduler_milestones: [20, 35]
+  lr_scheduler_gamma: 0.5
+  log_every: 10
+  num_workers: 0
 
 output:
-  dir: experiments/results/mdm_global_physionet_aligned
-  dataset_cache_dir: experiments/cache/mdm_preprocessed_datasets
+  dir: experiments/results/spdnet_pretrain_finetune_run_loo_physionet_final

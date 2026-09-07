@@ -1,46 +1,51 @@
+# PhysioNet preprocessing aligned to train_physionet_pretrain_finetune_motor_11x9.yaml.
+# Same bands, trial window and segmentation; full-channel baseline spatial input.
 data:
-  # Dataset choices: "physionet_mi" or "bnci2014_001" (BCI Competition IV-2a).
   dataset: ["physionet_mi"]
   root_dir: ["data/MNE-eegbci-data/files/eegmmidb/1.0.0"]
-  filter_bank:
-    - [8, 30]
+
+  # Same retained subject cohort as the 11x9 reference.
+  subjects: 1-87,90-91,93-99,101-103,105,107-109
+  # Exclude S088, S089, S092, S100, S104, and S106.
+
+  # As in train_grid.yaml, one filter-bank candidate needs an extra list level.
+  filter_bank: [[[5, 13], [13, 20], [20, 35]]]
   estimator: ["lwf"]
   sfreq: [160]
   eps: [1.0e-6]
   covariance_signal_scale: ["auto"]
-  # Classic SPDNet consumes a standard covariance matrix directly.
-  replace_covariance_diagonal_with_raw_energy: [false]
-  # Subjects evaluated independently: use 1 for one target or 1-10 for a batch.
-  # S088, S089, S092, S100, S104, and S106 are excluded.
-  subjects: 1-87,90-91,93-99,101-103,105,107-109
-  # BCI IV-2a uses a different 22-channel montage, so use
-  # configs/spdnet_bci_iv_2a.yaml or clear/change channels when switching.
-  # channels: "FC5, FC3, FC1, FCz, FC2, FC4, FC6, C5, C3, C1, Cz, C2, C4, C6, CP5, CP3, CP1, CPz, CP2, CP4, CP6"
-  channels:
+  replace_covariance_diagonal_with_raw_energy: [true]
+  # Baselines retain full 64-channel spatial coordinates, not region tokens.
+  brain_region_mode: [null]
+  covariance_output_dtype: ["float32"]
+  channels: [null]
+
+  imaged: [true]
+  executed: [false]
+  # Use [[unilateral_fist]] for two classes, or the setting below for four.
+  task_types: [[unilateral_fist]]
+
+  # Paired time fields follow train_grid.yaml's grid syntax.
+  epoch_slice: [[-1.5, 3.5]]
+  segment_slice: [[0.5, 0.25]]
+
   reject_threshold_uv: [null]
   use_ica: [false]
-  ica_n_components: [13]
+  ica_n_components: [20]
   ica_random_state: [42]
-  ica_eog_channels: ["FP1,FP2"]
+  ica_eog_channels: [""]
   use_autoreject: [false]
   autoreject_random_state: [42]
-  autoreject_n_jobs: [2]
+  autoreject_n_jobs: [1]
   autoreject_cv: [10]
+  autoreject_cache_dir: "experiments/cache/autoreject_masks"
+  autoreject_force_rebuild: false
   baseline_correction: [null]
-  baseline_window: "-3,0"
-  # Use the complete 0--4 s motor-imagery trial as one covariance matrix.
-  # segment_duration=stride_duration=epoch duration creates exactly one segment.
-  epoch_slice: [[0.0, 4.0]]
-  segment_slice: [[4.0, 4.0]]
-  imaged: true
-  executed: false
-  # Match the CSP/MDM PhysioNet baselines: left-vs-right unilateral imagery.
-  task_types: unilateral_fist
-  # Subject-specific mode below guarantees subject isolation itself. Keep this
-  # as a singleton so the grid does not launch duplicate equivalent jobs.
-  allow_subject_overlap: [true]
+  baseline_window: [null]
 
 model:
+  # Fixed, nonlearned input aggregation; the SPDNet network is unchanged.
+  token_pooling: logeuclid_mean
   # Original SPDNet-style three-stage dimensionality reduction: 64->32->16->8.
   dims: [32, 16, 8]
   reig_epsilon: 1.0e-4
@@ -49,27 +54,26 @@ model:
 
 training:
   seed: [42]
-  # Train a fresh SPDNet independently for every subject/held-out-run split.
-  subject_specific: [true]
-  # Each run is held out once and split approximately 50/50 into
-  # validation/test. All other runs from the same subject are training data.
-  held_out_run_validation_size: [0.5]
+  protocol: ["global"]
+  n_splits: [5]
+  cv_shuffle: [true]
+  use_validation: [false]
+  checkpoint_selection: ["last"]
   precision: ["float64"]
-  # Official SPDNet optimization uses 500 epochs, batch size 30, SGD with
-  # learning rate 0.01 and weight decay 5e-4. Validation-based early stopping
-  # normally terminates earlier on these small subject-specific folds.
-  epochs: [500]
+  # Same fixed epoch budget as SPDTransformer pretraining; SPDNet-specific SGD.
+  epochs: [100]
   batch_size: [30]
   spdnet_optimizer: ["sgd"]
   spdnet_learning_rate: [0.01]
   spdnet_momentum: [0.0]
   spdnet_weight_decay: [0.0005]
   gradient_clip_norm: [5.0]
-  early_stopping_patience: [30]
-  early_stopping_min_delta: [0.0001]
+  lr_scheduler: ["multistep"]
+  lr_scheduler_milestones: [[30, 60]]
+  lr_scheduler_gamma: [0.5]
   log_every: [10]
   split_file: [null]
   num_workers: [0]
 
 output:
-  dir: experiments/results/spdnet_subject_specific_physionet
+  dir: experiments/results/spdnet_global_physionet_aligned_final

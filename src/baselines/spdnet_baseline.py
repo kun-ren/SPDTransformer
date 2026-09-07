@@ -26,6 +26,7 @@ from src.baselines.baseline_utils import (
     load_spd_like_train,
     load_yaml,
     make_subject_specific_loro_splits,
+    mean_logeuclidean_tokens,
     parse_bool,
     save_json,
     summarize_subject_fold_metrics,
@@ -193,13 +194,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "SPDNet baseline using one covariance matrix per trial and "
-            "optional subject-specific leave-one-run-out "
-            "train/validation/test evaluation."
+            "formal global CV or source pretrain/target run fine-tuning with "
+            "last-epoch checkpoints; legacy configurations remain supported."
         )
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--device", default=None)
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--target-subjects", help="Formal fine-tune targets, e.g. 1-3; other subjects remain pretraining data.")
     parser.add_argument(
         "--dims",
         default=None,
@@ -381,8 +383,10 @@ def evaluate(
     return metrics
 
 
-def single_trial_covariances(x_spd: np.ndarray) -> np.ndarray:
-    """Return one covariance matrix per trial without temporal/frequency pooling."""
+def single_trial_covariances(x_spd: np.ndarray, token_pooling="original", eps=1e-6) -> np.ndarray:
+    """Return one matrix per trial, optionally pooling window/band covariances."""
+    if token_pooling not in {"original", "logeuclid_mean"}:
+        raise ValueError("SPDNet token_pooling must be original or logeuclid_mean.")
     if x_spd.ndim != 5:
         raise ValueError(
             "SPDNet expects preprocessed SPD data shaped "
@@ -390,6 +394,8 @@ def single_trial_covariances(x_spd: np.ndarray) -> np.ndarray:
             f"got {x_spd.shape}."
         )
     n_segments, n_bands = int(x_spd.shape[1]), int(x_spd.shape[2])
+    if token_pooling == "logeuclid_mean":
+        return mean_logeuclidean_tokens(x_spd, eps=eps).astype(np.float32)
     if n_segments != 1 or n_bands != 1:
         raise ValueError(
             "Classic SPDNet uses exactly one covariance matrix per trial. "
@@ -530,6 +536,9 @@ def run_experiment(
 ) -> dict[str, Any]:
     data_cfg = experiment_cfg["data"]
     training_cfg = experiment_cfg["training"]
+    if "protocol" in training_cfg:
+        from src.baselines.spdnet_formal import run_formal_experiment
+        return run_formal_experiment(run_index, experiment_cfg, model_cfg, args, base_output_dir, device)
     (
         n_splits,
         seed,
@@ -572,7 +581,10 @@ def run_experiment(
                 start=1,
             )
         ]
-    x_trial_spd = single_trial_covariances(x_spd)
+    token_pooling = str(model_cfg.get("token_pooling", "original"))
+    x_trial_spd = single_trial_covariances(
+        x_spd, token_pooling=token_pooling, eps=float(data_cfg.get("eps", 1e-6)),
+    )
 
     dtype = resolve_precision(training_cfg.get("precision", "float64"))
     batch_size = int(training_cfg.get("batch_size", 30))
@@ -987,9 +999,12 @@ def run_experiment(
         "source_repository": "https://github.com/zhiwu-huang/SPDNet",
         "paper": "A Riemannian Network for SPD Matrix Learning, AAAI 2017",
         "architecture": "BiMap-ReEig blocks followed by LogEig and linear FC",
-        "input_representation": "one_full_trial_covariance_matrix",
-        "temporal_segmentation": False,
-        "token_pooling": "none",
+        "input_representation": (
+            "logeuclidean_mean_of_segment_filterbank_covariances"
+            if token_pooling == "logeuclid_mean" else "one_full_trial_covariance_matrix"
+        ),
+        "temporal_segmentation": int(x_spd.shape[1]) > 1,
+        "token_pooling": token_pooling,
         "dims": dims,
         "reig_epsilon": reig_epsilon,
         "log_epsilon": log_epsilon,
@@ -1041,6 +1056,9 @@ def main() -> int:
     args = build_parser().parse_args()
     config = load_yaml(args.config)
     experiments = expand_data_training_experiments(config)
+    for experiment in experiments:
+        if "fine_tune" in config:
+            experiment["fine_tune"] = dict(config["fine_tune"])
     model_cfg = dict(config.get("model", {}))
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
