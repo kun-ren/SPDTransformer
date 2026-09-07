@@ -64,6 +64,21 @@ PHYSIONET_BRAIN_REGION_PRESETS = {
         "left_parietal_occipital": ["CP1", "P7", "P5", "P3", "P1", "PO7", "PO3", "O1"],
         "right_parietal_occipital": ["CP6", "P2", "P4", "P6", "P8", "PO4", "PO8", "O2"],
     },
+    # Overlapping scalp neighborhoods, not anatomical source parcels.
+    # All 64 channels are covered; paired left/right groups use mirrored order.
+    "physionet_11x9": {
+        "left_sensorimotor": ["FC5", "FC3", "FC1", "C5", "C3", "C1", "CP5", "CP3", "CP1"],
+        "central_sensorimotor": ["FC1", "FCZ", "FC2", "C1", "CZ", "C2", "CP1", "CPZ", "CP2"],
+        "right_sensorimotor": ["FC6", "FC4", "FC2", "C6", "C4", "C2", "CP6", "CP4", "CP2"],
+        "anterior": ["FP1", "FPZ", "FP2", "AF7", "AF3", "AFZ", "AF4", "AF8", "FZ"],
+        "left_frontal": ["AF7", "AF3", "F7", "F5", "F3", "F1", "FT7", "FC5", "FC3"],
+        "right_frontal": ["AF8", "AF4", "F8", "F6", "F4", "F2", "FT8", "FC6", "FC4"],
+        "left_temporal": ["F7", "FT7", "FC5", "T9", "T7", "C5", "TP7", "CP5", "P7"],
+        "right_temporal": ["F8", "FT8", "FC6", "T10", "T8", "C6", "TP8", "CP6", "P8"],
+        "left_parietal": ["CP5", "CP3", "CP1", "P7", "P5", "P3", "P1", "PO7", "PO3"],
+        "right_parietal": ["CP6", "CP4", "CP2", "P8", "P6", "P4", "P2", "PO8", "PO4"],
+        "posterior_midline": ["CPZ", "PZ", "PO3", "POZ", "PO4", "O1", "OZ", "O2", "IZ"],
+    },
     "motor_7": {
         "left_motor": ["FC5", "FC3", "FC1", "C5", "C3", "C1", "CP3"],
         "central_motor": ["FC1", "FCZ", "FC2", "C1", "CZ", "C2", "CPZ"],
