@@ -23,6 +23,7 @@ from src.baselines.baseline_utils import (
     make_subject_specific_loro_splits,
     parse_bool,
     save_json,
+    save_fold_predictions,
     summarize_subject_fold_metrics,
 )
 
@@ -463,6 +464,7 @@ def run_experiment(
         writer.writeheader()
         writer.writerows(subject_rows)
     save_json(run_dir / "splits.json", split_rows)
+    save_fold_predictions(run_dir / "test_predictions.csv", fold_specs, rows, subject_labels, run_labels)
 
     summary = {
         "baseline": "csp_lda",

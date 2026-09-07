@@ -227,6 +227,7 @@ def main(argv=None):
     scores = [row["test_accuracy"] for row in fold_rows]
     summary = {
         "protocol": "subject-wise global cross-validation, no validation or fine-tuning",
+        "class_names": class_names,
         "n_splits": n_splits, "n_subjects": len(loaded), "epochs": int(training["epochs"]),
         "checkpoint_selection": "last", "mean_fold_test_accuracy": statistics.fmean(scores),
         "fold_test_accuracy_sd": statistics.stdev(scores),

@@ -48,6 +48,7 @@ from src.baselines.baseline_utils import (
     normalize_data_time_config,
     resolve_split_file,
     save_json,
+    save_fold_predictions,
     summarize_subject_fold_metrics,
 )
 
@@ -1809,6 +1810,7 @@ def run_experiment(
         for row in fold_rows
     ]
     write_csv(run_dir / "fold_results.csv", public_fold_rows)
+    save_fold_predictions(run_dir / "test_predictions.csv", fold_specs, fold_rows, subject_labels, run_labels)
     # Keep the historical filename for downstream analysis scripts.
     write_csv(run_dir / "results.csv", public_fold_rows)
     if subject_specific:

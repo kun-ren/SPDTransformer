@@ -1,0 +1,20 @@
+# Frozen evaluation suite, not a hyperparameter search.
+transformer_global: configs/train_physionet_global_motor_11x9.yaml
+transformer_finetune: configs/train_physionet_pretrain_finetune_motor_11x9.yaml
+mdm_global: configs/mdm_physionet.yaml
+mdm_subject_specific: configs/mdm_physionet_subject_specific.yaml
+spdnet_global: configs/spdnet_physionet.yaml
+spdnet_finetune: configs/spdnet_physionet_pretrain_finetune.yaml
+csp_global: configs/csp_lda_physionet.yaml
+n_splits: 5
+seed: 42
+rest_lengths: [0.0, 1.5]
+epoch_end: 3.5
+comparison_rest: 1.5
+variants: [complete, fixed_logeuclidean, linear_head, single_band]
+# These run separately and NEVER enter the subject-independent main/ablation tables.
+include_adaptation: true
+target_subjects: all
+# Subject-wise permutation p-values are exploratory, conditional on fitted models.
+permutation_resamples: 99999
+output_dir: experiments/results/physionet_paper_suite

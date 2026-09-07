@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import csv
 import itertools
 import json
 import os
@@ -68,6 +69,21 @@ def expand_data_training_experiments(config: dict[str, Any]) -> list[dict[str, A
             }
         )
     return experiments
+
+
+def save_fold_predictions(path, fold_specs, rows, subjects, runs=None):
+    """Persist original trial indices so comparisons can verify paired test data."""
+    records = []
+    for spec, row in zip(fold_specs, rows, strict=True):
+        subject, fold, _, _, test = spec
+        for index, truth, predicted in zip(test, row["_y_true"], row["_y_pred"], strict=True):
+            records.append({"fold": int(fold), "subject": str(subjects[index]),
+                            "trial_index": int(index), "run": int(runs[index]) if runs is not None else "",
+                            "y_true": int(truth), "y_pred": int(predicted)})
+    with Path(path).open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(records[0]))
+        writer.writeheader()
+        writer.writerows(records)
 
 
 def config_hash(config: dict[str, Any]) -> str:
