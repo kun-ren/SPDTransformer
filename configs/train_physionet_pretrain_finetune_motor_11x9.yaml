@@ -103,7 +103,7 @@ pretrain:
   stiefel_learning_rate: [0.0008]
   lr_scheduler: ["multistep"]
   # Nested list is one schedule. Early stopping remains independent.
-  lr_scheduler_milestones: [[30, 70]]
+  lr_scheduler_milestones: [[30, 60]]
   lr_scheduler_gamma: [0.5]
   weight_decay: [0.01]
   apply_weight_decay_to_special_parameters: [true]
