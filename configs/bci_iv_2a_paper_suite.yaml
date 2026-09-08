@@ -1,0 +1,20 @@
+# Same frozen evaluation protocol as physionet_paper_suite.yaml.
+# Both sessions are pooled before SUBJECT-wise global CV, not official T -> E.
+transformer_global: configs/train_bci_iv_2a.yaml
+transformer_finetune: configs/train_bci_iv_2a_pretrain_finetune_loro.yaml
+mdm_global: configs/mdm_bci_iv_2a.yaml
+mdm_subject_specific: configs/mdm_bci_iv_2a_subject_specific.yaml
+spdnet_global: configs/spdnet_bci_iv_2a.yaml
+spdnet_finetune: configs/spdnet_bci_iv_2a_pretrain_finetune.yaml
+csp_global: configs/csp_lda_bci_iv_2a.yaml
+n_splits: 5
+seed: 42
+rest_lengths: [0.0, 1.5]
+epoch_end: 3.5
+comparison_rest: 1.5
+variants: [complete, fixed_logeuclidean, linear_head, single_band]
+# Adaptation uses target-subject training runs; report separately from global CV.
+include_adaptation: true
+target_subjects: all
+permutation_resamples: 99999
+output_dir: experiments/results/bci_iv_2a_paper_suite

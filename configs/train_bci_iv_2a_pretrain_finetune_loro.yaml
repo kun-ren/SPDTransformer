@@ -1,117 +1,100 @@
-# BCI Competition IV-2a four-class LOSO pretraining and target-run adaptation.
-# Every target A01--A09 is excluded from its own other-subject pretraining set.
-
+# Target subject excluded from pretraining; every other-subject trial is used.
+# Hold out each complete session/run pair; restart from the same final pretrain checkpoint.
+# Shared bands and temporal segmentation; baselines retain full-channel spatial input.
+# Epoch [-1.5, 3.5] is cue-relative; the suite also generates [0, 3.5].
 data:
-  dataset: ["bnci2014_001"]
-  root_dir: ["data"]
-  subjects: 1
-  pretrain_subjects: 1-9
-
-  filter_bank: [[[8, 13], [13, 20], [20, 30]]]
-  estimator: ["lwf"]
+  dataset: [bnci2014_001]
+  root_dir: [data]
+  filter_bank: [[[5, 13], [13, 20], [20, 35]]]
+  estimator: [lwf]
   sfreq: [250]
-  eps: [1.0e-6]
-  covariance_signal_scale: ["auto"]
+  eps: [1.0e-06]
+  covariance_signal_scale: [auto]
   replace_covariance_diagonal_with_raw_energy: [true]
-  brain_region_mode: ["motor_7"]
-  covariance_output_dtype: ["float32"]
-  channels: [null]
-
-  # MOABB maps the original 769/770/771/772 events to these names. Their
-  # configured order is also the final integer class order 0/1/2/3.
-  events: "left_hand,right_hand,feet,tongue"
-  sessions: "all"
-  epoch_slice: [[-2.0, 4.0]]
-  segment_slice: [[0.5, 0.25]]
-
+  subjects: 1-9
+  events: left_hand,right_hand,feet,tongue
+  sessions: all
+  channels: null
+  brain_region_mode: [motor_7]
   reject_threshold_uv: [null]
   use_ica: [false]
   use_autoreject: [false]
   baseline_correction: [null]
   baseline_window: [null]
+  epoch_slice: [[-1.5, 3.5]]
+  segment_slice: [[0.5, 0.25]]
   moabb_accept_terms: [true]
   moabb_force_update: [false]
-
+  covariance_output_dtype: [float32]
+  pretrain_subjects: 1-9
 model:
   head_nums: [4]
-  attention_dim: ["6"]
+  attention_dim: ['6']
   stage_transition: [true]
-  stage_projection_init: ["random"]
-  add_norm_type: ["sequence_add_norm"]
+  stage_projection_init: [random]
+  add_norm_type: [sequence_add_norm]
   ffn_hidden_spd_dim: [32]
   tau: [1.3]
-  metric: ["learnable-metric"]
+  metric: [learnable-metric]
   depth: [1]
-  classifier_type: ["mdm"]
-  pooling: ["weighted"]
+  classifier_type: [mdm]
+  pooling: [weighted]
   dropout: [0.4]
   attention_dropout: [0.0]
   use_position_bias: [true]
-  position_bias_axes: ["time"]
-  position_bias_max: [0.5]
-  attention_score_target_rms: [1.0]
-  attention_score_clip: [5.0]
   layer_norm_affine: [false]
-  learnable_metric_mode: ["low-rank"]
-  learnable_metric_score: ["distance"]
+  learnable_metric_mode: [low-rank]
+  learnable_metric_score: [distance]
   learnable_metric_rank: [4]
-  eps: [1.0e-6]
-
+  eps: [1.0e-06]
 pretrain:
-  validation_size: [0.15]
-  test_size: [0.15]
-  epochs: [100]
+  prototype_intra_weight: [0.0]
+  prototype_inter_weight: [0.0]
+  prototype_margin: [3.0]
+  use_validation: [false]
+  validation_size: [0.0]
+  test_size: [0.0]
+  checkpoint_selection: [last]
+  epochs: [80]
   batch_size: [128]
-  precision: ["float32"]
+  precision: [float32]
   learning_rate: [0.0022]
   stiefel_learning_rate: [0.0003]
-  lr_scheduler: ["plateau"]
-  lr_scheduler_metric: ["validation_macro_f1"]
-  lr_scheduler_mode: ["max"]
-  lr_scheduler_factor: [0.5]
-  lr_scheduler_patience: [9]
-  lr_scheduler_threshold: [0.0008]
-  lr_scheduler_threshold_mode: ["abs"]
-  lr_scheduler_min_lr: [1.0e-5]
-  stiefel_lr_scheduler_min_lr: [1.0e-6]
+  lr_scheduler: [multistep]
+  lr_scheduler_milestones: [[25, 50]]
+  lr_scheduler_gamma: [0.5]
   weight_decay: [0.01]
   apply_weight_decay_to_special_parameters: [true]
   gradient_clip_norm: [0.8]
-  early_stopping_patience: [11]
-  early_stopping_min_delta: [0.0008]
   condition_regularization_weight: [0.0]
   seed: [42]
   num_workers: [0]
   pin_memory: [true]
-  allow_tf32: [true]
-
+  allow_tf32: [false]
 fine_tune:
-  epochs: [50]
+  prototype_intra_weight: [0.0]
+  prototype_inter_weight: [0.0]
+  prototype_margin: [3.0]
+  split_strategy: [leave_one_run_out]
+  use_validation: [false]
+  checkpoint_selection: [last]
+  epochs: [60]
   batch_size: [32]
-  precision: ["float32"]
+  precision: [float32]
   learning_rate: [0.001]
   stiefel_learning_rate: [0.0001]
-  lr_scheduler: ["plateau"]
-  lr_scheduler_metric: ["validation_macro_f1"]
-  lr_scheduler_mode: ["max"]
-  lr_scheduler_factor: [0.5]
-  lr_scheduler_patience: [5]
-  lr_scheduler_threshold: [0.0008]
-  lr_scheduler_threshold_mode: ["abs"]
-  lr_scheduler_min_lr: [1.0e-5]
-  stiefel_lr_scheduler_min_lr: [1.0e-6]
+  lr_scheduler: [multistep]
+  lr_scheduler_milestones: [[20, 35]]
+  lr_scheduler_gamma: [0.5]
   weight_decay: [0.01]
   apply_weight_decay_to_special_parameters: [true]
   gradient_clip_norm: [0.8]
-  early_stopping_patience: [8]
-  early_stopping_min_delta: [0.0008]
   condition_regularization_weight: [0.0]
   num_workers: [0]
   pin_memory: [true]
-  allow_tf32: [true]
-
+  allow_tf32: [false]
 output:
-  dir: experiments/results/bci_iv_2a_pretrain_finetune_loro
+  dir: experiments/results/bci_iv_2a_pretrain_finetune_run_loo_final
   dataset_cache_dir: experiments/cache/preprocessed_datasets
   save_pretrained_checkpoints: true
-  save_fine_tuned_checkpoints: false
+  save_fine_tuned_checkpoints: true

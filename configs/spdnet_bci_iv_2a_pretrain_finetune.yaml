@@ -1,4 +1,5 @@
-# Formal BCI IV-2a protocol aligned with the PhysioNet suite.
+# All other subjects pretrain; target run-LOO adaptation restarts from that checkpoint.
+# Fixed epochs, no validation; 22-channel input -> 16 -> 8 -> 4.
 # Shared bands and temporal segmentation; baselines retain full-channel spatial input.
 # Epoch [-1.5, 3.5] is cue-relative; the suite also generates [0, 3.5].
 data:
@@ -33,9 +34,7 @@ model:
   project_stiefel: true
 training:
   seed: [42]
-  protocol: [global]
-  n_splits: [5]
-  cv_shuffle: [true]
+  protocol: [pretrain_finetune]
   use_validation: [false]
   checkpoint_selection: [last]
   precision: [float64]
@@ -52,5 +51,23 @@ training:
   log_every: [10]
   split_file: [null]
   num_workers: [0]
+fine_tune:
+  target_subjects: all
+  split_strategy: leave_one_run_out
+  use_validation: false
+  checkpoint_selection: last
+  epochs: 60
+  batch_size: 30
+  precision: float64
+  spdnet_optimizer: sgd
+  spdnet_learning_rate: 0.001
+  spdnet_momentum: 0.0
+  spdnet_weight_decay: 0.0005
+  gradient_clip_norm: 5.0
+  lr_scheduler: multistep
+  lr_scheduler_milestones: [20, 35]
+  lr_scheduler_gamma: 0.5
+  log_every: 10
+  num_workers: 0
 output:
-  dir: experiments/results/spdnet_bci_iv_2a_formal
+  dir: experiments/results/spdnet_bci_iv_2a_pretrain_finetune_formal

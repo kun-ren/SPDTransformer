@@ -1,4 +1,5 @@
-# Formal BCI IV-2a protocol aligned with the PhysioNet suite.
+# Subject-specific MDM: fit on the target subject's other runs; test one complete run.
+# No global pretraining and no validation.
 # Shared bands and temporal segmentation; baselines retain full-channel spatial input.
 # Epoch [-1.5, 3.5] is cue-relative; the suite also generates [0, 3.5].
 data:
@@ -26,31 +27,21 @@ data:
   moabb_force_update: [false]
   covariance_output_dtype: [float32]
 model:
-  token_pooling: logeuclid_mean
-  dims: [16, 8, 4]
-  reig_epsilon: 0.0001
-  log_epsilon: 1.0e-06
-  project_stiefel: true
+  classifier_type: [pyriemann]
+  pooling: [mean]
+  token_weight_logits: null
+  metric_mean: [riemann]
+  metric_distance: [riemann]
+  n_jobs: [1]
 training:
   seed: [42]
-  protocol: [global]
   n_splits: [5]
-  cv_shuffle: [true]
-  use_validation: [false]
-  checkpoint_selection: [last]
-  precision: [float64]
-  epochs: [100]
-  batch_size: [30]
-  spdnet_optimizer: [sgd]
-  spdnet_learning_rate: [0.01]
-  spdnet_momentum: [0.0]
-  spdnet_weight_decay: [0.0005]
-  gradient_clip_norm: [5.0]
-  lr_scheduler: [multistep]
-  lr_scheduler_milestones: [[30, 60]]
-  lr_scheduler_gamma: [0.5]
-  log_every: [10]
-  split_file: [null]
-  num_workers: [0]
+  subject_specific: [true]
+  subject_split_strategy: [leave_one_run_out]
+  held_out_run_validation_size: [0.0]
+  allow_subject_overlap: [true]
+  val_size: [0.0]
+  split_file: null
 output:
-  dir: experiments/results/spdnet_bci_iv_2a_formal
+  dir: experiments/results/mdm_bci_iv_2a_subject_specific_formal
+  dataset_cache_dir: experiments/cache/mdm_preprocessed_datasets

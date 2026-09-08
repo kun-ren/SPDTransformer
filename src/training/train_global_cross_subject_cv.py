@@ -1,4 +1,4 @@
-"""Run frozen PhysioNet main/ablation experiments and collect publication CSVs.
+"""Run frozen EEG main/ablation experiments and collect publication CSVs.
 
 This branch's entry point orchestrates existing runners. It does not select
 hyperparameters from test scores. Target-run adaptation is reported separately
@@ -94,6 +94,10 @@ def plan_jobs(suite, directory, *, subjects=None, include_adaptation=None):
         cfg["data"]["segment_slice"] = copy.deepcopy(ref["segment_slice"])
         cfg["data"]["filter_bank"] = copy.deepcopy(ref["filter_bank"])
         if mode == "global":
+            # Data-level keys override training-level keys in legacy baselines.
+            # Never allow a stale base config to re-enable subject overlap.
+            cfg["data"].update(allow_subject_overlap=[False], val_size=[0.0],
+                               test_size=[1 / int(suite["n_splits"])], seed=[int(suite["seed"])])
             tr = cfg["training"]
             tr["seed"] = [int(suite["seed"])]
             if model == "transformer":
@@ -122,7 +126,10 @@ def plan_jobs(suite, directory, *, subjects=None, include_adaptation=None):
                                     validation_size=[0.0], test_size=[0.0], checkpoint_selection=["last"])
             cfg["fine_tune"].update(split_strategy=["leave_one_run_out"], use_validation=[False], checkpoint_selection=["last"])
         elif model == "spdnet":
-            cfg["training"].update(protocol=["pretrain_finetune"], seed=[int(suite["seed"])])
+            cfg["training"].update(protocol=["pretrain_finetune"], seed=[int(suite["seed"])],
+                                   use_validation=[False], checkpoint_selection=["last"])
+            cfg["fine_tune"].update(split_strategy="leave_one_run_out", use_validation=False,
+                                    checkpoint_selection="last")
             cfg["fine_tune"]["target_subjects"] = suite.get("target_subjects", "all")
         else:
             targets = suite.get("target_subjects", "all")
@@ -137,6 +144,8 @@ def plan_jobs(suite, directory, *, subjects=None, include_adaptation=None):
                 raise ValueError(f"{job_id}: {section} contains a hyperparameter grid; freeze it first.")
         if model in {"transformer", "mdm"} and len(expand_grid(cfg["model"])) != 1:
             raise ValueError(f"{job_id}: model contains multiple candidates; freeze hyperparameters first.")
+        if model == "transformer" and "fine_tune" in cfg and len(expand_grid(cfg["fine_tune"])) != 1:
+            raise ValueError(f"{job_id}: fine_tune contains multiple candidates; freeze hyperparameters first.")
         cfg["output"]["dir"] = str(directory / "runs" / job_id)
         config_path = directory / "configs" / f"{job_id}.yaml"
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,9 +190,9 @@ def execute_job(job, directory, device):
         subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=True)
 
 
-def build_parser():
+def build_parser(*, default_config=DEFAULT_CONFIG):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--config", type=Path, default=default_config)
     parser.add_argument("--suite-dir", type=Path)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--subjects", help="Override entire cohort for a smoke test, e.g. 1-10.")
@@ -195,8 +204,8 @@ def build_parser():
     return parser
 
 
-def main(argv=None):
-    args = build_parser().parse_args(argv)
+def main(argv=None, *, default_config=DEFAULT_CONFIG):
+    args = build_parser(default_config=default_config).parse_args(argv)
     if args.resume or args.collect_only:
         if args.suite_dir is None:
             raise ValueError("--resume/--collect-only requires --suite-dir.")
